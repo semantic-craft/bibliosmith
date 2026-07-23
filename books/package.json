@@ -14,5 +14,8 @@
   },
   "dependencies": {
     "epubchecker": "^5.2.1"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0"
   }
 }
