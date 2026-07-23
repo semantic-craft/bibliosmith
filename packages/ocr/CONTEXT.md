@@ -53,7 +53,7 @@ A user-facing export under `output/`, such as standalone HTML, EPUB, cleaned Mar
 _Avoid_: runtime state, temporary chunk output
 
 **Windows runner**:
-`scripts/run_windows.ps1`, the Legion task dispatcher that creates `.venv`, installs `requirements-win.txt`, and calls the same repository scripts.
+`scripts/run_windows.ps1`, the Windows worker task dispatcher that creates `.venv`, installs `requirements-win.txt`, and calls the same repository scripts.
 _Avoid_: separate product, global tool
 
 **Cleanup job**:

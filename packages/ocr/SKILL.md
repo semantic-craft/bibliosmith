@@ -11,7 +11,7 @@ This skill is scoped to this repository only. It teaches agents that this folder
 
 1. Read `README.md` for project scope, commands, and routing policy.
 2. Read `CONTEXT.md` for project vocabulary.
-3. Read `docs/windows.md` before touching Legion/Windows setup.
+3. Read `docs/windows.md` before touching the Windows worker setup.
 4. Check `git status --short --branch` if this directory is a Git repository.
 5. Do not print `.env`, API keys, tokens, or Zotero credentials.
 6. Use Homebrew Python 3.11 for macOS repo scripts:
@@ -66,7 +66,7 @@ macOS:
 ./scripts/normalize_pdf_attachment_names.py --dry-run
 ```
 
-Windows/Legion:
+Windows worker:
 
 ```powershell
 .\scripts\run_windows.ps1 worker --dry-run --limit 5

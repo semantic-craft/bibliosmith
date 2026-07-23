@@ -36,7 +36,7 @@ export function renderMarkdownToHtml(source: string, copy: Copy) {
     if (inHtmlBlock) {
       htmlLines.push(line);
       if (trimmed.toLowerCase().includes("</table>")) {
-        html.push(sanitizeTrustedDocHtml(htmlLines.join("\n")));
+        html.push(renderDocTable(htmlLines.join("\n")));
         htmlLines = [];
         inHtmlBlock = false;
       }
@@ -47,7 +47,7 @@ export function renderMarkdownToHtml(source: string, copy: Copy) {
       inHtmlBlock = true;
       htmlLines = [line];
       if (trimmed.toLowerCase().includes("</table>")) {
-        html.push(sanitizeTrustedDocHtml(htmlLines.join("\n")));
+        html.push(renderDocTable(htmlLines.join("\n")));
         htmlLines = [];
         inHtmlBlock = false;
       }
@@ -81,7 +81,7 @@ export function renderMarkdownToHtml(source: string, copy: Copy) {
     html.push(renderCodeBlock(codeLines.join("\n"), copy.copyCode));
   }
   if (inHtmlBlock && htmlLines.length) {
-    html.push(sanitizeTrustedDocHtml(htmlLines.join("\n")));
+    html.push(renderDocTable(htmlLines.join("\n")));
   }
   return html.join("\n");
 }
@@ -139,16 +139,112 @@ function escapeHtml(value: string) {
     .replaceAll('"', "&quot;");
 }
 
-function sanitizeHref(value: string) {
+export function sanitizeHref(value: string) {
   const trimmed = value.trim();
-  if (/^javascript:/i.test(trimmed)) return "#";
+  try {
+    const protocol = new URL(trimmed, "https://bibliosmith.invalid/").protocol;
+    if (protocol !== "http:" && protocol !== "https:" && protocol !== "mailto:") return "#";
+  } catch {
+    return "#";
+  }
   return escapeHtml(trimmed);
 }
 
-function sanitizeTrustedDocHtml(value: string) {
-  return value
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/\son\w+="[^"]*"/gi, "")
-    .replace(/\son\w+='[^']*'/gi, "")
-    .replace(/javascript:/gi, "");
+function safeTableTagName(value: string) {
+  switch (value) {
+    case "a": return "a";
+    case "br": return "br";
+    case "caption": return "caption";
+    case "code": return "code";
+    case "em": return "em";
+    case "strong": return "strong";
+    case "table": return "table";
+    case "tbody": return "tbody";
+    case "td": return "td";
+    case "tfoot": return "tfoot";
+    case "th": return "th";
+    case "thead": return "thead";
+    case "tr": return "tr";
+    default: return "";
+  }
+}
+
+function parseQuotedAttributes(value: string) {
+  const attributes: Record<string, string> = {};
+  let index = 0;
+  while (index < value.length) {
+    while (index < value.length && /\s/.test(value[index])) index += 1;
+    if (index >= value.length || value[index] === "/") break;
+
+    const nameStart = index;
+    while (index < value.length && /[A-Za-z0-9_-]/.test(value[index])) index += 1;
+    if (index === nameStart) return null;
+    const name = value.slice(nameStart, index).toLowerCase();
+
+    while (index < value.length && /\s/.test(value[index])) index += 1;
+    if (value[index] !== "=") return null;
+    index += 1;
+    while (index < value.length && /\s/.test(value[index])) index += 1;
+
+    const quote = value[index];
+    if (quote !== '"' && quote !== "'") return null;
+    const end = value.indexOf(quote, index + 1);
+    if (end < 0) return null;
+    attributes[name] = value.slice(index + 1, end);
+    index = end + 1;
+  }
+  return attributes;
+}
+
+function renderSafeTableTag(value: string) {
+  const trimmed = value.trim();
+  const closing = trimmed.startsWith("/");
+  const content = closing ? trimmed.slice(1).trim() : trimmed;
+  const nameEnd = content.search(/\s/);
+  const rawName = (nameEnd < 0 ? content : content.slice(0, nameEnd)).replace(/\/$/, "").toLowerCase();
+  const name = safeTableTagName(rawName);
+  if (!name) return "";
+
+  const rest = nameEnd < 0 ? "" : content.slice(nameEnd);
+  if (closing) return rest.trim() ? "" : `</${name}>`;
+  const attributes = parseQuotedAttributes(rest);
+  if (!attributes) return "";
+
+  if (name === "a") {
+    return `<a href="${sanitizeHref(attributes.href ?? "#")}">`;
+  }
+  if (name === "td" || name === "th") {
+    const span = ["colspan", "rowspan"]
+      .flatMap((attribute) => {
+        const raw = attributes[attribute];
+        const parsed = raw ? Number(raw) : 0;
+        return Number.isInteger(parsed) && parsed > 0 && parsed <= 100
+          ? [` ${attribute}="${parsed}"`]
+          : [];
+      })
+      .join("");
+    return `<${name}${span}>`;
+  }
+  return name === "br" ? "<br>" : `<${name}>`;
+}
+
+export function renderDocTable(value: string) {
+  const html: string[] = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    const tagStart = value.indexOf("<", cursor);
+    if (tagStart < 0) {
+      html.push(escapeHtml(value.slice(cursor)));
+      break;
+    }
+    html.push(escapeHtml(value.slice(cursor, tagStart)));
+    const tagEnd = value.indexOf(">", tagStart + 1);
+    if (tagEnd < 0) {
+      html.push(escapeHtml(value.slice(tagStart)));
+      break;
+    }
+    html.push(renderSafeTableTag(value.slice(tagStart + 1, tagEnd)));
+    cursor = tagEnd + 1;
+  }
+  return html.join("");
 }

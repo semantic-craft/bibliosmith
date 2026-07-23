@@ -8,9 +8,9 @@ D:\Projects\books-translation\packages\ocr
 
 It is focused on book OCR, Markdown extraction, standalone HTML generation, Zotero Markdown child attachments, PDF attachment naming, and conservative cleanup queues.
 
-## Legion Checkout
+## Windows worker checkout
 
-Authenticate to the private repository with an SSH deploy key or a GitHub PAT stored in Windows Credential Manager/Git Credential Manager. Never put repository credentials in `.env` or tracked files. Then use a sparse checkout so Legion does not download `books/` data or local OCR inputs:
+Authenticate to the private repository with an SSH deploy key or a GitHub PAT stored in Windows Credential Manager/Git Credential Manager. Never put repository credentials in `.env` or tracked files. Then use a sparse checkout so Windows worker does not download `books/` data or local OCR inputs:
 
 ```powershell
 git clone --filter=blob:none --no-checkout git@github.com:semantic-craft/books-translation.git D:\Projects\books-translation
@@ -51,9 +51,9 @@ uv run --package ocr python packages/ocr/scripts/zotero_llm_worker.py --help
 
 The runner creates `.venv`, preferring uv-managed Python 3.11 and falling back to `python -m venv` when uv cannot use its managed interpreter. It installs `requirements-win.txt`, creates the monorepo-root `.env` from the root `.env.example` when needed, sets `HOME` to `USERPROFILE`, and dispatches to the project scripts.
 
-## Verified Legion cutover
+## Verified Windows worker cutover
 
-Verified on Legion on 2026-07-17:
+Verified on Windows worker on 2026-07-17:
 
 - Existing SSH credentials authenticated to the private repository with
   `git ls-remote origin HEAD`; no deploy key or PAT was copied into the checkout.
@@ -77,7 +77,7 @@ To roll back:
 
 1. Stop the active OCR process or disable the affected Scheduled Task.
 2. Restore the recorded previous command and working directory. If this was a
-   fresh Legion install with no previous checkout, leave the task disabled.
+   fresh Windows worker install with no previous checkout, leave the task disabled.
 3. Keep `%USERPROFILE%\Zotero\OCR_OUTPUT\.state\zotero_llm.sqlite3` unchanged;
    both paths use the same external state database, so no state migration or
    database copy is part of rollback.

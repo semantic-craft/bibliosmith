@@ -10,7 +10,7 @@
     "dev": "vite --host 127.0.0.1 --port 1420",
     "prebuild": "npm run version:sync",
     "build": "tsc && vite build",
-    "test:startup-contract": "node scripts/check-startup-contract.mjs",
+    "test:startup-contract": "node scripts/check-startup-contract.mjs && node scripts/test-markdown-security.mjs",
     "clean:cache": "node scripts/clean-build-cache.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 1420",
     "tauri": "tauri",
