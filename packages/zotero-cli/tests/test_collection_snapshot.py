@@ -293,19 +293,22 @@ def test_collection_snapshot_collects_file_evidence_with_one_stat(
     tmp_path: Path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     db_path, storage_root = _fixture(tmp_path)
-    target = storage_root / "PDFOK" / "ok.pdf"
+    # _resolve_attachment_path returns a .resolve()d path, so compare against the
+    # canonical form. Matching the unresolved path is platform-dependent (macOS
+    # /var -> /private/var, or a symlinked CI temp dir), which made this flake on
+    # Linux. Count stats without sabotaging them, so a miscount can never corrupt
+    # the eligibility result the assertions below check.
+    target = (storage_root / "PDFOK" / "ok.pdf").resolve()
     original_stat = Path.stat
     target_stat_calls = 0
 
-    def one_shot_stat(path: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def counting_stat(path: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
         nonlocal target_stat_calls
         if path == target:
             target_stat_calls += 1
-            if target_stat_calls > 1:
-                raise FileNotFoundError(path)
         return original_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", one_shot_stat)
+    monkeypatch.setattr(Path, "stat", counting_stat)
 
     snapshot = zotero_db.snapshot_collection("COLL1", db_path=db_path, storage_root=storage_root)
 

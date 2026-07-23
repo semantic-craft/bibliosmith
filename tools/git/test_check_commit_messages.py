@@ -1,6 +1,6 @@
 import unittest
 
-from check_commit_messages import validate_commit_message
+from check_commit_messages import _is_generated_commit, validate_commit_message
 
 
 VALID_MESSAGE = """Document GitHub commit summary rules
@@ -51,6 +51,23 @@ JA: GitHub に push する前に commit タイトルと詳細な概要を書く�
         )
         issues = validate_commit_message(message)
         self.assertIn("EN summary section is too short", issues)
+
+
+class GeneratedCommitDetectionTests(unittest.TestCase):
+    def test_flags_dependabot_bot_commits(self):
+        self.assertTrue(
+            _is_generated_commit(
+                "49699333+dependabot[bot]@users.noreply.github.com",
+                "dependabot[bot]",
+                "abc123",
+            )
+        )
+
+    def test_flags_merge_commits(self):
+        self.assertTrue(_is_generated_commit("dev@example.com", "Developer", "abc123 def456"))
+
+    def test_allows_human_single_parent_commits(self):
+        self.assertFalse(_is_generated_commit("dev@example.com", "Developer", "abc123"))
 
 
 if __name__ == "__main__":

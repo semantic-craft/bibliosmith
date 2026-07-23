@@ -78,8 +78,18 @@ def validate_commit_message(message: str) -> list[str]:
     return issues
 
 
-def git_commit_messages(revision_range: str) -> list[tuple[str, str]]:
-    format_spec = "%H%x1f%B%x1e"
+def _is_generated_commit(author_email: str, author_name: str, parents: str) -> bool:
+    """Commits whose messages are not hand-authored, and so are exempt from the
+    ZH/EN/JA rule: bot commits (dependabot, github-actions) and merge commits."""
+    if "[bot]" in author_email.lower() or "[bot]" in author_name.lower():
+        return True
+    if len(parents.split()) > 1:  # a merge commit has more than one parent
+        return True
+    return False
+
+
+def git_commit_messages(revision_range: str) -> list[tuple[str, str, bool]]:
+    format_spec = "%H%x1f%ae%x1f%an%x1f%P%x1f%B%x1e"
     result = subprocess.run(
         ["git", "log", f"--pretty=format:{format_spec}", revision_range],
         text=True,
@@ -92,13 +102,17 @@ def git_commit_messages(revision_range: str) -> list[tuple[str, str]]:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "git log failed")
 
-    commits: list[tuple[str, str]] = []
+    commits: list[tuple[str, str, bool]] = []
     for entry in result.stdout.split("\x1e"):
         entry = entry.strip()
         if not entry:
             continue
-        commit_hash, _, message = entry.partition("\x1f")
-        commits.append((commit_hash.strip(), message.strip()))
+        parts = entry.split("\x1f", 4)
+        if len(parts) < 5:
+            continue
+        commit_hash, author_email, author_name, parents, message = parts
+        generated = _is_generated_commit(author_email, author_name, parents)
+        commits.append((commit_hash.strip(), message.strip(), generated))
     return commits
 
 
@@ -121,7 +135,10 @@ def validate_range(revision_range: str) -> int:
         return 0
 
     failed = False
-    for commit_hash, message in commits:
+    for commit_hash, message, generated in commits:
+        if generated:
+            print(f"SKIP {commit_hash[:12]} (bot or merge commit)")
+            continue
         issues = validate_commit_message(message)
         if issues:
             failed = True
