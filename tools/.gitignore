@@ -1,0 +1,36 @@
+# Generated dependency and build output under tools/.
+*.exe
+*.msi
+*.msix
+*.zip
+*.7z
+*.dmg
+*.pkg
+*.deb
+*.rpm
+*.AppImage
+**/node_modules/
+**/dist/
+**/target/
+**/gen/
+**/.cache/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Local logs and temporary diagnostics.
+*.log
+*.tmp
+*.temp
+
+# Packaged application artifacts belong on GitHub Releases, not in Git.
+bibliosmith-launcher/*.exe
+bibliosmith-launcher/*.msi
+bibliosmith-launcher/*.msix
+bibliosmith-launcher/*.zip
+bibliosmith-launcher/*.7z
+bibliosmith-launcher/*.dmg
+bibliosmith-launcher/*.pkg
+bibliosmith-launcher/*.deb
+bibliosmith-launcher/*.rpm
+bibliosmith-launcher/*.AppImage

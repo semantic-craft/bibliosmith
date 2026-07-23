@@ -1,0 +1,27 @@
+[project]
+name = "digest"
+version = "0.1.0"
+description = "BiblioSmith Digest post-EPUB processing"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+# The suite that exercises this package lives in the repository-root tests/
+# directory, not under packages/digest/. Declaring pytest here is what makes
+# `uv run --package digest pytest tests` self-contained: --package installs this
+# member so the subprocess in tests/digest/ can run `python -m
+# digest.bibliosmith_digest`, and the group supplies pytest itself.
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["digest", "digest.bibliosmith_digest"]
+
+[tool.setuptools.package-dir]
+digest = "."

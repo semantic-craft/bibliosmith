@@ -1,0 +1,19 @@
+# gitleaks configuration for BiblioSmith.
+# Extends the default ruleset and allowlists known false positives so a clean
+# tree scans to zero findings (used by the local pre-push hook and by CI).
+title = "BiblioSmith"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known false positives"
+# packages/translation-engine/.../engine.py emits a token-counting algorithm
+# version string ("tokenCounter": "utf8-byte-upper-bound-v1"), not a secret.
+regexes = [
+  '''utf8-byte-upper-bound-v1''',
+]
+# The allowlist regex above must not flag this config file itself.
+paths = [
+  '''\.gitleaks\.toml''',
+]

@@ -1,0 +1,110 @@
+schema = 1
+
+# This registry is intentionally non-secret: only endpoints and default models.
+# Credentials are resolved at runtime from key_env — either the repository-root
+# .env, or, when the launcher stores them in the macOS Keychain, injected into
+# that variable by the Rust runner before the engine starts.
+#
+# Every profile except gemini-native speaks the OpenAI chat-completions protocol
+# (provider_type = "openai-compatible") and so shares one client; the client
+# appends /chat/completions to base_url. A brand that bills two ways (Qwen, MiMo)
+# is two entries under one profile_id, keyed by config_id (payg vs token-plan),
+# because the two plans use different hosts and different keys and must not be
+# mixed. The default model here is only a starting point; a run may override it.
+
+[[providers]]
+profile_id = "openai-compatible"
+config_id = "openai-default"
+provider_type = "openai-compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1-mini"
+timeout_seconds = 120
+concurrency_limit = 4
+max_chunk_tokens = 8192
+key_env = "OPENAI_COMPATIBLE_API_KEYS"
+
+[[providers]]
+profile_id = "gemini-native"
+config_id = "gemini-default"
+provider_type = "gemini-native"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+model = "gemini-2.5-flash"
+timeout_seconds = 120
+concurrency_limit = 4
+max_chunk_tokens = 8192
+key_env = "GEMINI_API_KEYS"
+
+# DeepSeek. base_url has no /v1 suffix: DeepSeek serves /chat/completions at the
+# host root. deepseek-chat is deprecated 2026-07-24 in favour of deepseek-v4-flash
+# (its non-thinking mode), so the default points there.
+[[providers]]
+profile_id = "deepseek"
+config_id = "deepseek-default"
+provider_type = "openai-compatible"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+timeout_seconds = 120
+concurrency_limit = 4
+max_chunk_tokens = 8192
+key_env = "DEEPSEEK_API_KEYS"
+
+# Kimi (Moonshot). OpenAI-compatible at the /v1 host.
+[[providers]]
+profile_id = "kimi"
+config_id = "kimi-default"
+provider_type = "openai-compatible"
+base_url = "https://api.moonshot.ai/v1"
+model = "kimi-k2.6"
+timeout_seconds = 120
+concurrency_limit = 4
+max_chunk_tokens = 8192
+key_env = "KIMI_API_KEYS"
+
+# Qwen (Alibaba Model Studio / DashScope), pay-as-you-go route.
+[[providers]]
+profile_id = "qwen"
+config_id = "payg"
+provider_type = "openai-compatible"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "qwen-flash"
+timeout_seconds = 120
+concurrency_limit = 4
+max_chunk_tokens = 8192
+key_env = "QWEN_PAYG_API_KEYS"
+
+# Qwen Token Plan: a separate host and a separate key from pay-as-you-go; the two
+# must never be mixed (official guidance).
+[[providers]]
+profile_id = "qwen"
+config_id = "token-plan"
+provider_type = "openai-compatible"
+base_url = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+model = "qwen3.6-flash"
+timeout_seconds = 120
+concurrency_limit = 4
+max_chunk_tokens = 8192
+key_env = "QWEN_TOKEN_PLAN_API_KEYS"
+
+# Xiaomi MiMo, pay-as-you-go route.
+[[providers]]
+profile_id = "mimo"
+config_id = "payg"
+provider_type = "openai-compatible"
+base_url = "https://api.xiaomimimo.com/v1"
+model = "mimo-v2.5"
+timeout_seconds = 120
+concurrency_limit = 4
+max_chunk_tokens = 8192
+key_env = "MIMO_PAYG_API_KEYS"
+
+# Xiaomi MiMo Token Plan: separate host and key, same as the Qwen split.
+[[providers]]
+profile_id = "mimo"
+config_id = "token-plan"
+provider_type = "openai-compatible"
+base_url = "https://token-plan-cn.xiaomimimo.com/v1"
+model = "mimo-v2.5"
+timeout_seconds = 120
+concurrency_limit = 4
+max_chunk_tokens = 8192
+key_env = "MIMO_TOKEN_PLAN_API_KEYS"

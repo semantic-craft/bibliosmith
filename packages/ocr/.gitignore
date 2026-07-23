@@ -1,0 +1,40 @@
+.DS_Store
+
+# Local secrets and machine-specific config.
+.env
+.env.*
+!.env.example
+
+# Python/runtime caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local virtual environments.
+.venv/
+venv/
+
+# Runtime state, logs, and generated artifacts.
+.state/
+tmp/
+output/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Build/package outputs.
+build/
+dist/
+*.egg-info/
+
+# Personal/machine-specific artifacts — keep out of the public repo.
+reports/
+CURRENT_PLAN.md
+launchd/*.plist
+!launchd/com.example.*.plist
+
+# Local book PDF inputs (large; not tracked in Git, like output/).
+编程书/

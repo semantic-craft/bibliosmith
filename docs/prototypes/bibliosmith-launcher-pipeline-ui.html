@@ -1,0 +1,651 @@
+<meta charset="utf-8">
+<title>BiblioSmith 流水线 UI 原型</title>
+<style>
+  :root {
+    --paper: #f6f3ea; --paper-deep: #efeadd; --surface: #fffdf7; --surface-muted: #f2f5ef;
+    --ink: #16283b; --text: #1f2a33; --muted: #6b7568; --faint: #98a094;
+    --line: #dce0d6; --line-strong: #bac8bd;
+    --jade: #12897a; --jade-bright: #2bbfa8; --jade-soft: #e3f2ec;
+    --amber: #b66d13; --amber-soft: #fbf0d8;
+    --err: #b3403a; --err-soft: #f9e7e4;
+    --block: #7b5aa6; --block-soft: #efe9f6;
+    --info: #2e6da8; --info-soft: #e6eff7;
+    --shadow: 0 2px 10px rgba(22, 40, 59, 0.07);
+    --shadow-lift: 0 8px 24px rgba(22, 40, 59, 0.13);
+    --picker-bg: #1a2530; --picker-text: #e9e5d8; --picker-line: #34424e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #12181b; --paper-deep: #0d1316; --surface: #1a2226; --surface-muted: #202b2f;
+      --ink: #e9e5d8; --text: #d8d5c9; --muted: #8b958b; --faint: #66716a;
+      --line: #2a3438; --line-strong: #3a474c;
+      --jade: #43c9b0; --jade-bright: #43c9b0; --jade-soft: rgba(67, 201, 176, 0.14);
+      --amber: #e0a45b; --amber-soft: rgba(224, 164, 91, 0.14);
+      --err: #e07b6f; --err-soft: rgba(224, 123, 111, 0.14);
+      --block: #b49ad9; --block-soft: rgba(180, 154, 217, 0.14);
+      --info: #6fa8dc; --info-soft: rgba(111, 168, 220, 0.14);
+      --shadow: 0 2px 10px rgba(0, 0, 0, 0.35); --shadow-lift: 0 8px 24px rgba(0, 0, 0, 0.5);
+      --picker-bg: #212d33; --picker-text: #e9e5d8; --picker-line: #3a474c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #12181b; --paper-deep: #0d1316; --surface: #1a2226; --surface-muted: #202b2f;
+    --ink: #e9e5d8; --text: #d8d5c9; --muted: #8b958b; --faint: #66716a;
+    --line: #2a3438; --line-strong: #3a474c;
+    --jade: #43c9b0; --jade-bright: #43c9b0; --jade-soft: rgba(67, 201, 176, 0.14);
+    --amber: #e0a45b; --amber-soft: rgba(224, 164, 91, 0.14);
+    --err: #e07b6f; --err-soft: rgba(224, 123, 111, 0.14);
+    --block: #b49ad9; --block-soft: rgba(180, 154, 217, 0.14);
+    --info: #6fa8dc; --info-soft: rgba(111, 168, 220, 0.14);
+    --shadow: 0 2px 10px rgba(0, 0, 0, 0.35); --shadow-lift: 0 8px 24px rgba(0, 0, 0, 0.5);
+    --picker-bg: #212d33; --picker-text: #e9e5d8; --picker-line: #3a474c;
+  }
+  :root[data-theme="light"] {
+    --paper: #f6f3ea; --paper-deep: #efeadd; --surface: #fffdf7; --surface-muted: #f2f5ef;
+    --ink: #16283b; --text: #1f2a33; --muted: #6b7568; --faint: #98a094;
+    --line: #dce0d6; --line-strong: #bac8bd;
+    --jade: #12897a; --jade-bright: #2bbfa8; --jade-soft: #e3f2ec;
+    --amber: #b66d13; --amber-soft: #fbf0d8;
+    --err: #b3403a; --err-soft: #f9e7e4;
+    --block: #7b5aa6; --block-soft: #efe9f6;
+    --info: #2e6da8; --info-soft: #e6eff7;
+    --shadow: 0 2px 10px rgba(22, 40, 59, 0.07); --shadow-lift: 0 8px 24px rgba(22, 40, 59, 0.13);
+    --picker-bg: #1a2530; --picker-text: #e9e5d8; --picker-line: #34424e;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { background: var(--paper); color: var(--text); font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif; font-size: 14px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.86em; }
+  .num { font-variant-numeric: tabular-nums; }
+  button { font: inherit; cursor: pointer; }
+  button:focus-visible { outline: 2px solid var(--jade); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+  #stage { min-height: 100vh; padding-bottom: 150px; }
+
+  .chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); white-space: nowrap; }
+  .chip.ok { color: var(--jade); background: var(--jade-soft); border-color: transparent; }
+  .chip.warn { color: var(--amber); background: var(--amber-soft); border-color: transparent; }
+  .chip.err { color: var(--err); background: var(--err-soft); border-color: transparent; }
+  .chip.block { color: var(--block); background: var(--block-soft); border-color: transparent; }
+  .chip.info { color: var(--info); background: var(--info-soft); border-color: transparent; }
+  .chip.neutral { color: var(--muted); background: var(--surface-muted); border-color: transparent; }
+  .chip.hash { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+
+  .btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 14px; font-size: 13px; }
+  .btn:hover { border-color: var(--jade); color: var(--jade); }
+  .btn.primary { background: var(--jade); border-color: var(--jade); color: #fffdf7; font-weight: 500; }
+  .btn.primary:hover { filter: brightness(1.06); color: #fffdf7; }
+  .btn.primary:disabled { background: var(--line-strong); border-color: var(--line-strong); color: var(--surface); cursor: not-allowed; filter: none; }
+  .btn.quiet { border-color: transparent; background: transparent; color: var(--muted); }
+  .btn.danger-ghost { border-color: var(--line); color: var(--err); }
+  .btn.sm { padding: 3px 10px; font-size: 12px; border-radius: 6px; }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+  .panel-title { font-size: 13px; font-weight: 600; color: var(--ink); letter-spacing: 0.06em; display: flex; align-items: center; gap: 8px; }
+  .panel-title::before { content: ""; width: 4px; height: 14px; border-radius: 2px; background: var(--jade); }
+  .prog { height: 6px; border-radius: 3px; background: var(--surface-muted); overflow: hidden; }
+  .prog > i { display: block; height: 100%; border-radius: 3px; background: var(--jade-bright); }
+
+  .topbar { display: flex; align-items: center; gap: 14px; padding: 16px 24px 0; }
+  .topbar h1 { font-size: 19px; margin: 0; color: var(--ink); }
+  .topbar .crumb { color: var(--muted); font-size: 12.5px; }
+  .topbar .spacer { flex: 1; }
+  .budget-pill { display: flex; flex-direction: column; gap: 3px; min-width: 190px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+  .budget-pill .bl { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+  .budget-pill .bl b { color: var(--ink); }
+
+  .seg-bar { display: flex; padding: 14px 24px 0; }
+  .seg { flex: 1; text-align: center; padding: 8px 6px 10px; background: var(--surface); border: 1px solid var(--line); border-right-width: 0; cursor: pointer; position: relative; }
+  .seg:first-child { border-radius: 10px 0 0 10px; }
+  .seg:last-child { border-radius: 0 10px 10px 0; border-right-width: 1px; }
+  .seg .sv { font-size: 18px; font-weight: 700; color: var(--ink); }
+  .seg .sl { font-size: 11.5px; color: var(--muted); }
+  .seg.on { background: var(--jade-soft); }
+  .seg.on::after { content: ""; position: absolute; left: 12%; right: 12%; bottom: -1px; height: 3px; border-radius: 2px; background: var(--jade); }
+  .seg.hotseg .sv { color: var(--amber); }
+  .seg.badseg .sv { color: var(--err); }
+  .seg.blockseg .sv { color: var(--block); }
+  .seg.zero .sv, .seg.zero .sl { color: var(--faint); }
+
+  .body-grid { display: grid; grid-template-columns: 320px 1fr; margin-top: 14px; border-top: 1px solid var(--line); min-height: calc(100vh - 200px); }
+  .list-pane { border-right: 1px solid var(--line); background: var(--surface); }
+  .glabel { font-size: 11.5px; letter-spacing: 0.1em; padding: 12px 16px 6px; color: var(--muted); font-weight: 700; display: flex; }
+  .glabel .gcount { margin-left: auto; }
+  .lrow { display: flex; gap: 10px; padding: 9px 16px; cursor: pointer; border-left: 3px solid transparent; }
+  .lrow:hover { background: var(--surface-muted); }
+  .lrow.sel { background: var(--jade-soft); border-left-color: var(--jade); }
+  .lrow .dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 6px; flex: none; }
+  .lrow .lt { font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.3; }
+  .lrow .ls { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+  .lrow .ls.hot { color: var(--amber); }
+  .lrow .ls.bad { color: var(--err); }
+  .lrow .lprog { margin-top: 5px; width: 140px; }
+  .list-empty { padding: 30px 16px; color: var(--faint); font-size: 12.5px; text-align: center; }
+
+  .detail-pane { padding: 20px 26px 60px; min-width: 0; }
+  .det-head { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  .det-head h2 { margin: 0; font-size: 19px; color: var(--ink); }
+  .det-sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+  .tabs { display: flex; gap: 2px; margin: 18px 0 0; border-bottom: 1px solid var(--line-strong); }
+  .tabs .tab { padding: 7px 16px 8px; font-size: 13px; color: var(--muted); border: none; background: transparent; border-bottom: 2.5px solid transparent; margin-bottom: -1px; }
+  .tabs .tab.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--jade); }
+  .tabs .tab .tbadge { display: inline-block; min-width: 16px; text-align: center; font-size: 10.5px; background: var(--amber); color: #fff; border-radius: 8px; padding: 0 4px; margin-left: 5px; }
+  .tabs .tab .tbadge.bad { background: var(--err); }
+  .tabbody { padding-top: 16px; max-width: 800px; }
+
+  .stage-rail { display: flex; align-items: flex-start; margin: 4px 0 6px; overflow-x: auto; padding-bottom: 6px; }
+  .srail-node { flex: none; display: flex; flex-direction: column; align-items: center; width: 64px; position: relative; }
+  .srail-node::before { content: ""; position: absolute; top: 10px; left: -32px; width: 64px; height: 2px; background: var(--line-strong); }
+  .srail-node:first-child::before { display: none; }
+  .srail-node .snode { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line-strong); background: var(--surface); z-index: 1; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--surface); }
+  .srail-node.gate .snode { border-radius: 5px; transform: rotate(45deg); }
+  .srail-node.gate .snode span { transform: rotate(-45deg); }
+  .srail-node.done .snode { background: var(--jade); border-color: var(--jade); }
+  .srail-node.run .snode { background: var(--info); border-color: var(--info); box-shadow: 0 0 0 4px var(--info-soft); }
+  .srail-node.waitg .snode { background: var(--amber); border-color: var(--amber); box-shadow: 0 0 0 4px var(--amber-soft); }
+  .srail-node.failn .snode { background: var(--err); border-color: var(--err); }
+  .srail-node.blockn .snode { background: var(--block); border-color: var(--block); }
+  .srail-node.done::before, .srail-node.run::before, .srail-node.waitg::before { background: var(--jade); }
+  .srail-node .slab { font-size: 10.5px; color: var(--muted); margin-top: 6px; white-space: nowrap; }
+  .srail-node.run .slab, .srail-node.waitg .slab { color: var(--ink); font-weight: 600; }
+
+  .det-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin-top: 14px; }
+  .det-cards .panel { padding: 13px 15px; }
+  .det-cards h4 { margin: 0 0 9px; }
+  .evi-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; padding: 4.5px 0; border-bottom: 1px dashed var(--line); }
+  .evi-row:last-child { border-bottom: none; }
+  .evi-row .k { color: var(--muted); flex: none; }
+  .evi-row .v { color: var(--ink); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .span2 { grid-column: 1 / -1; }
+
+  .hintcard { display: flex; align-items: center; gap: 12px; border: 1.5px solid var(--amber); background: var(--amber-soft); border-radius: 11px; padding: 11px 15px; margin-top: 14px; font-size: 13px; }
+  .hintcard.errc { border-color: var(--err); background: var(--err-soft); }
+  .hintcard.blockc { border-color: var(--block); background: var(--block-soft); }
+  .hintcard .spacer { flex: 1; }
+
+  /* 阶段页签：纵向时间线 */
+  .vtl { margin-top: 4px; }
+  .vtl-row { display: flex; gap: 14px; position: relative; }
+  .vtl-row::before { content: ""; position: absolute; left: 10px; top: 24px; bottom: -2px; width: 2px; background: var(--line-strong); }
+  .vtl-row:last-child::before { display: none; }
+  .vtl-row.past::before { background: var(--jade); }
+  .vtl-node { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line-strong); background: var(--surface); flex: none; z-index: 1; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--surface); }
+  .vtl-row.gate .vtl-node { border-radius: 6px; transform: rotate(45deg); }
+  .vtl-row.gate .vtl-node span { transform: rotate(-45deg); }
+  .vtl-row.past .vtl-node { background: var(--jade); border-color: var(--jade); }
+  .vtl-row.now .vtl-node { background: var(--info); border-color: var(--info); box-shadow: 0 0 0 4px var(--info-soft); }
+  .vtl-row.gatewait .vtl-node { background: var(--amber); border-color: var(--amber); box-shadow: 0 0 0 4px var(--amber-soft); }
+  .vtl-row.failnode .vtl-node { background: var(--err); border-color: var(--err); }
+  .vtl-row.blocknode .vtl-node { background: var(--block); border-color: var(--block); }
+  .vtl-body { flex: 1; padding-bottom: 13px; min-width: 0; }
+  .vtl-body .vh { display: flex; align-items: baseline; gap: 10px; font-size: 13.5px; color: var(--ink); font-weight: 600; padding-top: 1px; }
+  .vtl-body .vh .vmeta { font-size: 11.5px; color: var(--muted); font-weight: 400; }
+  .vtl-open { margin-top: 8px; padding: 11px 14px; }
+
+  /* 审批页签（终稿合成：检查行 + 后果对照 + 失效即事件） */
+  .gate-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; letter-spacing: 0.08em; color: var(--amber); font-weight: 700; }
+  .gate-tag::before { content: ""; width: 9px; height: 9px; background: var(--amber); transform: rotate(45deg); border-radius: 2px; }
+  .gate-tag.dead { color: var(--err); }
+  .gate-tag.dead::before { background: var(--err); }
+  .estrip { display: flex; align-items: center; gap: 0; margin: 12px 0 16px; overflow-x: auto; }
+  .estep { display: flex; align-items: center; gap: 8px; flex: none; }
+  .estep .edot { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #fff; background: var(--jade); flex: none; }
+  .estep.now .edot { background: var(--amber); box-shadow: 0 0 0 4px var(--amber-soft); }
+  .estep.deadstep .edot { background: var(--err); }
+  .estep.future .edot { background: var(--surface); border: 2px dashed var(--line-strong); }
+  .estep .et { font-size: 12.5px; color: var(--ink); font-weight: 600; white-space: nowrap; }
+  .estep .ett { font-size: 11px; color: var(--faint); white-space: nowrap; }
+  .esep { flex: none; width: 42px; height: 2px; background: var(--line-strong); margin: 0 10px; }
+  .esep.done { background: var(--jade); }
+  .cklist { display: flex; flex-direction: column; gap: 8px; }
+  .ckrow { display: flex; align-items: flex-start; gap: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 10px 14px; }
+  .ckrow .ckicon { flex: none; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #fff; background: var(--jade); margin-top: 1px; }
+  .ckrow.fail { border-color: var(--err); background: var(--err-soft); }
+  .ckrow.fail .ckicon { background: var(--err); }
+  .ckrow b { display: block; font-size: 13px; color: var(--ink); }
+  .ckrow span { font-size: 12px; color: var(--muted); }
+  .ckrow.fail span { color: var(--err); }
+  .diff-grid { display: grid; grid-template-columns: 1fr 44px 1fr; margin-top: 16px; }
+  .diff-col { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 13px 16px; }
+  .diff-col h5 { margin: 0 0 9px; font-size: 12px; letter-spacing: 0.1em; color: var(--muted); }
+  .diff-col.after { border-color: var(--jade); background: var(--jade-soft); }
+  .diff-col.after h5 { color: var(--jade); }
+  .diff-arrow { display: flex; align-items: center; justify-content: center; font-size: 20px; color: var(--jade); }
+  .diff-row { font-size: 12.5px; padding: 5px 0; border-bottom: 1px dashed var(--line); display: flex; justify-content: space-between; gap: 10px; }
+  .diff-row:last-child { border-bottom: none; }
+  .diff-row .k { color: var(--muted); }
+  .diff-row .v { color: var(--ink); text-align: right; }
+  .appr-foot { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+  .appr-foot .summary { font-size: 12.5px; color: var(--muted); }
+
+  /* 工件表 */
+  .art-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .art-table th { text-align: left; font-size: 11px; letter-spacing: 0.07em; color: var(--muted); padding: 7px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; }
+  .art-table td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .art-table tr:last-child td { border-bottom: none; }
+  .art-table .an { font-weight: 600; color: var(--ink); }
+  .art-table .ap { font-size: 11px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+
+  /* 日志 */
+  .feed-line { display: flex; gap: 10px; font-size: 12.5px; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+  .feed-line:last-child { border-bottom: none; }
+  .feed-line .ft { color: var(--faint); flex: none; }
+  .feed-line.warn .fm { color: var(--amber); }
+  .feed-line.err .fm { color: var(--err); }
+
+  /* 向导（全屏接管） */
+  .takeover { padding: 26px 24px 60px; max-width: 900px; margin: 0 auto; }
+  .takeover h2 { margin: 0 0 4px; color: var(--ink); }
+  .takeover .tsub { margin: 0 0 18px; color: var(--muted); font-size: 12.5px; }
+  .wsteps { display: flex; align-items: center; margin-bottom: 18px; }
+  .wstep { display: flex; align-items: center; gap: 8px; }
+  .wstep .wnum { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--line-strong); display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--muted); background: var(--surface); }
+  .wstep.done .wnum { background: var(--jade); border-color: var(--jade); color: #fffdf7; }
+  .wstep.cur .wnum { border-color: var(--jade); color: var(--jade); font-weight: 700; box-shadow: 0 0 0 3px var(--jade-soft); }
+  .wstep .wlab { font-size: 12.5px; color: var(--muted); }
+  .wstep.cur .wlab { color: var(--ink); font-weight: 600; }
+  .wsep { flex: 1; height: 2px; background: var(--line); margin: 0 10px; min-width: 18px; }
+  .wsep.done { background: var(--jade); }
+  .src-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .src-card { padding: 22px 18px; text-align: center; cursor: pointer; border-width: 1.5px; }
+  .src-card:hover { border-color: var(--jade); }
+  .src-card .sg { font-size: 30px; margin-bottom: 8px; }
+  .src-card b { display: block; color: var(--ink); margin-bottom: 5px; }
+  .src-card span { font-size: 12.5px; color: var(--muted); }
+  .intent-row { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 16px; padding: 13px 16px; }
+  .intent-row label { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+  .intent-row select { font: inherit; font-size: 12.5px; padding: 4px 8px; border-radius: 7px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); }
+  .preflight { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .preflight .pf { display: flex; align-items: center; gap: 7px; font-size: 12px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--jade); }
+  .budget-bar { padding: 11px 14px; margin-bottom: 12px; }
+  .budget-bar .brow { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .budget-bar .brow b { color: var(--ink); }
+  .route-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .route-table th { text-align: left; font-size: 11px; letter-spacing: 0.07em; color: var(--muted); padding: 7px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; }
+  .route-table td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  .route-table tr:last-child td { border-bottom: none; }
+  .route-table .rt-t { font-weight: 600; color: var(--ink); }
+  .route-table .rt-s { font-size: 11px; color: var(--muted); }
+  .route-table select { font: inherit; font-size: 12px; padding: 3px 7px; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); }
+  .wiz-foot { display: flex; justify-content: space-between; margin-top: 18px; }
+  .confirm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+  .confirm-grid .panel { padding: 13px 16px; }
+  .confirm-grid h4 { margin: 0 0 9px; }
+
+  /* 场景快捷盒 */
+  #picker { position: fixed; right: 22px; bottom: 22px; z-index: 999; width: 300px; background: var(--picker-bg); color: var(--picker-text); border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.4); border: 1px solid var(--picker-line); user-select: none; font-size: 13px; }
+  #picker .drag { cursor: grab; display: flex; align-items: center; gap: 8px; padding: 9px 14px 7px; border-bottom: 1px solid var(--picker-line); font-size: 11px; letter-spacing: 0.14em; color: #8fa0ad; }
+  #picker.dragging .drag { cursor: grabbing; }
+  #picker .pgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 10px 12px 8px; }
+  #picker .pgrid button { border: 1px solid var(--picker-line); background: transparent; color: #aebac4; border-radius: 8px; padding: 6px 0; font-size: 12px; }
+  #picker .pgrid button.on { background: var(--jade-bright); border-color: var(--jade-bright); color: #10201c; font-weight: 600; }
+  #picker .phint { padding: 0 14px 10px; font-size: 11px; color: #6d7f8c; }
+</style>
+
+<div id="stage" aria-live="polite"></div>
+
+<div id="picker">
+  <div class="drag" id="pickerDrag"><span>⠿</span> 整合终稿 · 场景快捷键 · 可拖动</div>
+  <div class="pgrid" id="pScenes"></div>
+  <div class="phint">界面本身可点：分段筛选 / 列表 / 页签 / 向导三步</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var ROUTE = {
+    direct: { label: "直读文本层", cls: "ok" },
+    paddle: { label: "PaddleOCR-VL", cls: "info" },
+    mineru: { label: "MinerU 精解", cls: "info" },
+    dirty: { label: "脏文本层·已拦截", cls: "block" },
+    skip: { label: "已有转换", cls: "neutral" }
+  };
+  var STAGES = ["路由", "提取", "交接", "分章", "备译", "译前审批", "翻译", "专家QA", "晋升审批", "晋升", "成书", "校验"];
+  var GATE = { 5: true, 8: true };
+
+  var BOOKS = [
+    { id: "b1", title: "个人信息保护的理论与案例", author: "沈知微", year: 2025, pages: 418, route: "direct", stage: 6, status: "running", note: "翻译中 · 第 6/18 章", prog: 0.52 },
+    { id: "b2", title: "法学方法论（扫描本）", author: "贺秉衡", year: 1997, pages: 536, route: "paddle", stage: 1, status: "running", note: "OCR 提取中 · 分块 14/45", prog: 0.31 },
+    { id: "b3", title: "比较宪法研究（影印版）", author: "顾之澜", year: 1986, pages: 602, route: "dirty", stage: 0, status: "blocked", note: "文本层污损，等你选路线", prog: 0.02 },
+    { id: "b4", title: "Institutions and Legal Reasoning", author: "M. Harlow", year: 1982, pages: 328, route: "mineru", stage: 5, status: "waiting", note: "译前审批 · 待你批准", prog: 0.42, gate: "pre" },
+    { id: "b5", title: "合同编通释", author: "陆行舟", year: 2023, pages: 1088, route: "direct", stage: 11, status: "completed", note: "已完成 · MD / HTML / EPUB", prog: 1 },
+    { id: "b6", title: "数据要素治理研究", author: "周若谷", year: 2024, pages: 276, route: "paddle", stage: 1, status: "failed", note: "Paddle 服务端 500 × 3", prog: 0.12 },
+    { id: "b7", title: "制度变迁与社会秩序", author: "柯望", year: 2001, pages: 464, route: "paddle", stage: 0, status: "pending", note: "排队等待 OCR 预算", prog: 0 },
+    { id: "b8", title: "信赖保护原则研究", author: "刘承宇", year: 2019, pages: 342, route: "direct", stage: 8, status: "waiting", note: "晋升审批 · QA 已过 12/12 章", prog: 0.83, gate: "promo" },
+    { id: "b9", title: "罗马法史（第二版·扫描本）", author: "G. Ferretti", year: 1994, pages: 588, route: "paddle", stage: 0, status: "pending", note: "排队等待 OCR", prog: 0 },
+    { id: "b10", title: "宪法学讲稿", author: "林一鸣", year: 2018, pages: 390, route: "skip", stage: 11, status: "skipped", note: "已有 Markdown 转换，跳过", prog: 1 }
+  ];
+  var STATUS = {
+    running: { label: "进行中", cls: "info", dot: "var(--info)" },
+    waiting: { label: "待审批", cls: "warn", dot: "var(--amber)" },
+    blocked: { label: "已拦截", cls: "block", dot: "var(--block)" },
+    failed: { label: "失败", cls: "err", dot: "var(--err)" },
+    completed: { label: "完成", cls: "ok", dot: "var(--jade)" },
+    pending: { label: "排队", cls: "neutral", dot: "var(--faint)" },
+    skipped: { label: "跳过", cls: "neutral", dot: "var(--faint)" }
+  };
+  var FILTERS = [
+    { key: "all", label: "全部", match: function () { return true; } },
+    { key: "running", label: "进行中", match: function (b) { return b.status === "running"; } },
+    { key: "queue", label: "排队", match: function (b) { return b.status === "pending"; } },
+    { key: "waiting", label: "待审批", cls: "hotseg", match: function (b) { return b.status === "waiting"; } },
+    { key: "blocked", label: "已拦截", cls: "blockseg", match: function (b) { return b.status === "blocked"; } },
+    { key: "failed", label: "失败", cls: "badseg", match: function (b) { return b.status === "failed"; } },
+    { key: "done", label: "完成", match: function (b) { return b.status === "completed" || b.status === "skipped"; } }
+  ];
+
+  var S = { filter: "all", sel: "b2", tab: 0, wiz: 0, invalid: false };
+
+  function chip(c, t) { return '<span class="chip ' + c + '">' + t + "</span>"; }
+  function routeChip(r) { return chip(ROUTE[r].cls, ROUTE[r].label); }
+  function prog(p) { return '<div class="prog"><i style="width:' + Math.round(p * 100) + '%"></i></div>'; }
+  function book() { return BOOKS.filter(function (b) { return b.id === S.sel; })[0] || BOOKS[0]; }
+
+  /* ---------- 框架 ---------- */
+  function topbar() {
+    return '<div class="topbar"><h1>流水线</h1><span class="crumb">收件箱工作台 · launchd 每日 09:00</span><span class="spacer"></span>' +
+      '<div class="budget-pill"><div class="bl"><span>今日 OCR 预算</span><b class="num">3,120 / 10,000 页</b></div>' + prog(0.31) + "</div>" +
+      '<button class="btn primary" data-act="wiz-open">＋ 新建任务</button></div>';
+  }
+  function segBar() {
+    return '<div class="seg-bar">' + FILTERS.map(function (f) {
+      var n = BOOKS.filter(f.match).length;
+      var cls = (f.cls || "") + (S.filter === f.key ? " on" : "") + (n === 0 ? " zero" : "");
+      return '<div class="seg ' + cls + '" data-act="filter" data-key="' + f.key + '" role="button" tabindex="0"><div class="sv num">' + n + '</div><div class="sl">' + f.label + "</div></div>";
+    }).join("") + "</div>";
+  }
+  function listPane() {
+    var f = FILTERS.filter(function (x) { return x.key === S.filter; })[0];
+    var items = BOOKS.filter(f.match);
+    var rows = items.map(function (b) {
+      var subCls = b.status === "waiting" || b.status === "blocked" ? " hot" : b.status === "failed" ? " bad" : "";
+      var dead = S.invalid && b.id === "b4";
+      return '<div class="lrow' + (b.id === S.sel ? " sel" : "") + '" data-act="sel" data-id="' + b.id + '">' +
+        '<span class="dot" style="background:' + (dead ? "var(--err)" : STATUS[b.status].dot) + '"></span><div>' +
+        '<div class="lt">' + b.title + '</div><div class="ls' + (dead ? " bad" : subCls) + '">' + (dead ? "审批已失效 · 源图谱变更" : b.note) + "</div>" +
+        (b.status === "running" ? '<div class="lprog">' + prog(b.prog) + "</div>" : "") + "</div></div>";
+    }).join("") || '<div class="list-empty">此筛选下暂无书目</div>';
+    return '<div class="list-pane"><div class="glabel">' + f.label + '<span class="gcount num">' + items.length + "</span></div>" + rows + "</div>";
+  }
+
+  function railH(b) {
+    return '<div class="stage-rail">' + STAGES.map(function (s, i) {
+      var cls = "";
+      if (i < b.stage || b.status === "completed" || b.status === "skipped") cls = "done";
+      else if (i === b.stage) cls = b.status === "waiting" ? "waitg" : b.status === "failed" ? "failn" : b.status === "blocked" ? "blockn" : "run";
+      return '<div class="srail-node ' + cls + (GATE[i] ? " gate" : "") + '"><div class="snode"><span>' + (cls === "done" ? "✓" : "") + '</span></div><div class="slab">' + s + "</div></div>";
+    }).join("") + "</div>";
+  }
+
+  /* ---------- 页签内容 ---------- */
+  function tabOverview(b) {
+    var hint = "";
+    if (b.status === "waiting") {
+      var dead = S.invalid && b.id === "b4";
+      hint = '<div class="hintcard' + (dead ? " errc" : "") + '"><span>' + (dead ? "⚠ 审批已失效：源图谱变更，需重新打包。" : "◆ 此书正在人工门等待：" + (b.gate === "promo" ? "成品晋升审批" : "译前披露审批") + "。") + '</span><span class="spacer"></span><button class="btn sm primary" data-act="tab" data-i="3">去审批页签</button></div>';
+    }
+    if (b.status === "failed") hint = '<div class="hintcard errc"><span>✗ 第 8 块 Paddle 返回 500（第 3 次）。已保留完成的 7 块，重试只补失败块。</span><span class="spacer"></span><button class="btn sm">重试该书</button></div>';
+    if (b.status === "blocked") hint = '<div class="hintcard blockc"><span>◈ 检测到污损文本层（全角字符比 18%）。强制 OCR 会损失现有较优结果。</span><span class="spacer"></span><button class="btn sm primary">保留 MinerU 结果</button><button class="btn sm">强制 Paddle</button><button class="btn sm quiet">推迟</button></div>';
+    var evid = '<div class="panel"><h4 class="panel-title">路由证据</h4>' +
+      '<div class="evi-row"><span class="k">文本层探测</span><span class="v">' + (b.route === "paddle" ? "不可提取 · 判定扫描件" : b.route === "mineru" ? "版式复杂 · 选用精解" : b.route === "dirty" ? "全角字符比 18% · 判定污损" : "可提取 · 直读") + "</span></div>" +
+      '<div class="evi-row"><span class="k">选定路线</span><span class="v">' + ROUTE[b.route].label + "</span></div>" +
+      '<div class="evi-row"><span class="k">分块策略</span><span class="v num">12 页 / 块 · 共 ' + Math.ceil(b.pages / 12) + " 块</span></div>" +
+      '<div class="evi-row"><span class="k">源指纹</span><span class="v"><code>ea2c…a7fa</code></span></div></div>';
+    var arts = '<div class="panel"><h4 class="panel-title">工件摘要</h4>' +
+      '<div class="evi-row"><span class="k">extraction_markdown</span><span class="v">' + (b.stage > 1 || b.status === "completed" ? "✓" : b.status === "running" && b.stage === 1 ? "生成中" : "—") + "</span></div>" +
+      '<div class="evi-row"><span class="k">Zotero 子附件</span><span class="v">' + (b.stage > 1 || b.status === "completed" ? "已挂 ✓" : "—") + "</span></div>" +
+      '<div class="evi-row"><span class="k">source_map</span><span class="v">' + (b.stage > 3 || b.status === "completed" ? "✓" : "—") + "</span></div>" +
+      '<div class="evi-row"><span class="k">阅读成品</span><span class="v">' + (b.status === "completed" ? "MD / HTML / EPUB ✓" : "—") + "</span></div></div>";
+    return railH(b) + hint + '<div class="det-cards">' + evid + arts + "</div>";
+  }
+
+  function tabStages(b) {
+    return '<div class="vtl">' + STAGES.map(function (s, i) {
+      var cls = "", meta = "", open = "";
+      var doneAll = b.status === "completed" || b.status === "skipped";
+      if (i < b.stage || doneAll) { cls = "past"; meta = '<span class="vmeta">完成 · 尝试 1</span>'; }
+      else if (i === b.stage) {
+        if (b.status === "waiting") { cls = "gatewait"; meta = '<span class="vmeta" style="color:var(--amber)">等待你的决定</span>'; }
+        else if (b.status === "failed") { cls = "failnode"; meta = '<span class="vmeta" style="color:var(--err)">失败 · 尝试 3 · 可重试</span>'; }
+        else if (b.status === "blocked") { cls = "blocknode"; meta = '<span class="vmeta" style="color:var(--block)">已拦截 · 等待裁决</span>'; }
+        else if (b.status === "running") { cls = "now"; meta = '<span class="vmeta" style="color:var(--info)">进行中</span>'; }
+        if (b.id === "b2" && i === 1) open = '<div class="panel vtl-open"><div class="evi-row"><span class="k">当前块</span><span class="v num">14 / 45 · 12 页/块</span></div><div class="evi-row"><span class="k">提供方</span><span class="v">PaddleOCR-VL 1.6 · 正常</span></div><div style="margin-top:8px">' + prog(0.31) + "</div></div>";
+      }
+      return '<div class="vtl-row ' + cls + (GATE[i] ? " gate" : "") + '"><div class="vtl-node"><span>' + (cls === "past" ? "✓" : "") + '</span></div><div class="vtl-body"><div class="vh">' + s + meta + "</div>" + open + "</div></div>";
+    }).join("") + "</div>";
+  }
+
+  function tabArtifacts(b) {
+    var rows = [];
+    if (b.stage > 1 || b.status === "completed") {
+      rows.push(["extraction_markdown", b.author + "_" + b.year + "_….md", "1db6…99dc", "✓", "提取"]);
+      rows.push(["zotero_markdown_attachment", "已挂到父条目", "—", "✓", "提取"]);
+    }
+    if (b.stage > 3 || b.status === "completed") rows.push(["source_map", "chapters/src/ · 14 章", "b6a9…16c0", "✓", "分章"]);
+    if (b.status === "completed") {
+      rows.push(["reading_markdown", "output/reading/book.md", "6838…6b24", "✓", "成书"]);
+      rows.push(["reading_html", "output/reading/book.html", "155e…691f", "✓", "成书"]);
+      rows.push(["reading_epub", "output/reading/book.epub + EPUBCheck", "a9c2…40de", "✓", "成书"]);
+    }
+    if (b.status === "running" && b.stage === 1) rows.push(["extraction_markdown（部分）", "staging/….partial.md", "滚动更新", "块 14/45", "提取"]);
+    if (!rows.length) return '<p style="color:var(--muted);font-size:13px">尚无注册工件。工件在各阶段完成时登记：路径、SHA-256、产出阶段与校验状态。</p>';
+    return '<div class="panel" style="overflow-x:auto"><table class="art-table"><thead><tr><th>工件</th><th>路径 / 位置</th><th>SHA-256</th><th>校验</th><th>产自</th><th></th></tr></thead><tbody>' +
+      rows.map(function (r) {
+        return '<tr><td class="an">' + r[0] + '</td><td class="ap">' + r[1] + '</td><td class="ap">' + r[2] + "</td><td>" + r[3] + "</td><td>" + r[4] + '</td><td><button class="btn sm">打开</button></td></tr>';
+      }).join("") + "</tbody></table></div>";
+  }
+
+  /* 审批页签 · 终稿合成 */
+  function tabApproval(b) {
+    if (b.status === "completed") {
+      return '<p style="font-size:13px;color:var(--muted);margin-bottom:10px">本书两道门均已批准，记录如下（哈希绑定，不可变更）：</p>' +
+        '<div class="cklist">' +
+        '<div class="ckrow"><span class="ckicon">✓</span><div><b>译前披露审批 · 已批准</b><span>local_user · 绑定 task_manifest 2fbf…a10f</span></div></div>' +
+        '<div class="ckrow"><span class="ckicon">✓</span><div><b>成品晋升审批 · 已批准</b><span>local_user · 绑定 translation d83f…8911 · qa_control beb8…3e6d</span></div></div></div>';
+    }
+    if (b.status !== "waiting") {
+      return '<p style="font-size:13px;color:var(--muted)">此书当前没有待决审批。到达译前披露或成品晋升门时，审批包会出现在这里。</p>';
+    }
+    var promo = b.gate === "promo";
+    var dead = S.invalid && b.id === "b4";
+    var gname = promo ? "成品晋升审批" : "译前披露审批";
+    var scope = promo ? "chapter_001 – chapter_012（12 章 · 全部通过 QA）" : "chapter_001 – chapter_014（14 章 · 全书）";
+    var hashes = promo ? "chapter_translation d83f…8911 · qa_control beb8…3e6d" : "source_map b6a9…16c0 · task_manifest 604e…14e8";
+
+    var strip = '<div class="estrip">' +
+      '<div class="estep"><span class="edot">✓</span><div><div class="et">' + (promo ? "QA 全部闭环" : "分章与备译完成") + '</div><div class="ett">' + (promo ? "10:48" : "09:21") + "</div></div></div>" +
+      '<span class="esep done"></span>' +
+      '<div class="estep"><span class="edot">✓</span><div><div class="et">审批包生成 · 哈希绑定</div><div class="ett">' + (promo ? "11:02" : "09:24") + "</div></div></div>";
+    if (dead) {
+      strip += '<span class="esep done"></span><div class="estep deadstep"><span class="edot">✗</span><div><div class="et">source_map 变更 · 审批失效</div><div class="ett">11:40</div></div></div>' +
+        '<span class="esep"></span><div class="estep future"><span class="edot"></span><div><div class="et">你的决定</div><div class="ett">待重新打包</div></div></div></div>';
+    } else {
+      strip += '<span class="esep done"></span><div class="estep now"><span class="edot">…</span><div><div class="et">你的决定</div><div class="ett">现在</div></div></div>' +
+        '<span class="esep"></span><div class="estep future"><span class="edot"></span><div><div class="et">' + (promo ? "晋升与成书" : "翻译启动") + '</div><div class="ett">批准后</div></div></div></div>';
+    }
+
+    function ck(ok, t, s) { return '<div class="ckrow' + (ok ? "" : " fail") + '"><span class="ckicon">' + (ok ? "✓" : "✗") + "</span><div><b>" + t + "</b><span>" + s + "</span></div></div>"; }
+    var checks = ck(true, "审批包完整", gname + " · 范围 " + scope);
+    checks += ck(!dead, "绑定哈希与当前工件一致", dead ? "11:40 重新分章：source_map b6a9…16c0 → 9f2e…77aa" : hashes);
+    if (!promo) checks += ck(true, "提供方与配置就绪", "expert-profile · expert-cfg-2（不含密钥）· 凭证预检通过");
+    if (promo) checks += ck(true, "QA 全部闭环", "PASS 12/12 章 · 未决多义词 0 · 修复尝试与 PASS 尝试分离");
+    checks += ck(true, "范围内无未决阻塞", "无脏文本层裁决、无失败单元遗留");
+
+    var diff = '<div class="diff-grid"><div class="diff-col"><h5>批准前 · 现在</h5>' +
+      (promo
+        ? '<div class="diff-row"><span class="k">审定译文</span><span class="v">chapters/translated</span></div><div class="diff-row"><span class="k">阅读成品</span><span class="v">—</span></div>'
+        : '<div class="diff-row"><span class="k">源文本</span><span class="v">仅在本机</span></div><div class="diff-row"><span class="k">章节单元</span><span class="v">14 章 · 备译完成</span></div>') +
+      '</div><div class="diff-arrow">→</div><div class="diff-col after"><h5>批准后 · 将发生</h5>' +
+      (promo
+        ? '<div class="diff-row"><span class="k">审定译文</span><span class="v">晋升至 chapters/final</span></div><div class="diff-row"><span class="k">阅读成品</span><span class="v">MD / HTML / EPUB + EPUBCheck</span></div><div class="diff-row"><span class="k">可回退性</span><span class="v">成品可重建 · final 仅由审批产生</span></div>'
+        : '<div class="diff-row"><span class="k">源文本</span><span class="v">发往 expert-profile</span></div><div class="diff-row"><span class="k">章节单元</span><span class="v">翻译启动 · 失败单元可独立重试</span></div><div class="diff-row"><span class="k">可回退性</span><span class="v">已发送内容不可召回</span></div>') +
+      "</div></div>";
+
+    var foot = dead
+      ? '<div class="appr-foot"><button class="btn primary">基于当前哈希重新生成审批包</button><button class="btn quiet">查看变更</button><span class="summary" style="color:var(--err)">1 项检查未通过 · 批准不可用</span></div>'
+      : '<div class="appr-foot"><button class="btn primary">全部通过 · 批准</button><button class="btn danger-ghost">驳回</button><button class="btn quiet">打开审批包文件</button><span class="summary num">' + (promo ? "4 / 4" : "4 / 4") + " 项通过</span></div>";
+
+    return '<div style="display:flex;align-items:baseline;gap:10px"><span class="gate-tag' + (dead ? " dead" : "") + '">' + (dead ? "已失效 · " : "人工门 · ") + gname + '</span><span style="font-size:12px;color:var(--muted)">范围 ' + scope + "</span></div>" +
+      strip + '<div class="cklist">' + checks + "</div>" + diff + foot;
+  }
+
+  function tabLog(b) {
+    var lines = b.id === "b2"
+      ? [["09:03", "", "OCR 推进：分块 14/45（12 页/块）"], ["09:00", "", "路由完成：判定扫描件 → PaddleOCR-VL"], ["09:00", "", "发现于集合「法学翻译批次」· 源指纹登记"]]
+      : b.id === "b6"
+        ? [["09:17", "err", "第 8 块 Paddle 返回 500（第 3 次）· 暂停该书"], ["09:11", "warn", "第 8 块 Paddle 返回 500（第 2 次）· 退避重试"], ["09:05", "", "OCR 开始：23 块排队"]]
+        : [["09:24", "warn", "到达人工门 · 审批包生成（哈希绑定）"], ["09:21", "", "分章完成：source_map 14 章"], ["09:02", "", "MinerU 精解完成 · Markdown 已登记"]];
+    return lines.map(function (r) { return '<div class="feed-line ' + r[1] + '"><span class="ft num">' + r[0] + '</span><span class="fm">' + r[2] + "</span></div>"; }).join("") +
+      '<p style="font-size:11.5px;color:var(--faint);margin-top:12px">日志已脱敏：不含源文本、提供方原始响应与凭证；导出遵循 redacted-support 档。</p>';
+  }
+
+  function detailPane() {
+    var b = book();
+    var dead = S.invalid && b.id === "b4";
+    var badge = "";
+    if (b.status === "waiting") badge = dead ? '<span class="tbadge bad">!</span>' : '<span class="tbadge num">1</span>';
+    var tabs = ["总览", "阶段", "工件", "审批", "日志"].map(function (t, i) {
+      return '<button class="tab' + (i === S.tab ? " on" : "") + '" data-act="tab" data-i="' + i + '">' + t + (i === 3 ? badge : "") + "</button>";
+    }).join("");
+    var bodies = [tabOverview, tabStages, tabArtifacts, tabApproval, tabLog];
+    var st = dead ? chip("err", "审批失效") : chip(STATUS[b.status].cls, STATUS[b.status].label);
+    return '<div class="detail-pane"><div class="det-head"><div><h2>《' + b.title + '》</h2><div class="det-sub">' + b.author + " · " + b.year + ' · <span class="num">' + b.pages + "</span> 页 · Zotero <code>FAKEPDF" + b.id.slice(1) + "</code></div></div>" +
+      routeChip(b.route) + st + "</div>" +
+      '<div class="tabs">' + tabs + '</div><div class="tabbody">' + bodies[S.tab](b) + "</div></div>";
+  }
+
+  /* ---------- 向导（全屏接管，三步可走） ---------- */
+  function wizard() {
+    var steps = '<div class="wsteps">' + [["选择来源", 1], ["路由预检", 2], ["确认发车", 3]].map(function (s, i) {
+      var cls = S.wiz > s[1] ? "done" : S.wiz === s[1] ? "cur" : "";
+      var sep = i < 2 ? '<div class="wsep' + (S.wiz > s[1] ? " done" : "") + '"></div>' : "";
+      return '<div class="wstep ' + cls + '"><span class="wnum num">' + (S.wiz > s[1] ? "✓" : s[1]) + '</span><span class="wlab">' + s[0] + "</span></div>" + sep;
+    }).join("") + "</div>";
+
+    var body = "";
+    if (S.wiz === 1) {
+      body = '<div class="src-cards">' +
+        '<div class="panel src-card" data-act="wiz-step" data-n="2"><div class="sg">🗂</div><b>本地 PDF 文件夹</b><span>整个文件夹逐本探测，自动分配 OCR 路线</span></div>' +
+        '<div class="panel src-card" data-act="wiz-step" data-n="2"><div class="sg">📚</div><b>Zotero 集合</b><span>发现集合下所有 PDF 附件，成品回挂条目</span></div>' +
+        '<div class="panel src-card" data-act="wiz-step" data-n="2"><div class="sg">📄</div><b>已有 Markdown</b><span>跳过 OCR，直接进入翻译流程</span></div></div>' +
+        '<div class="panel intent-row"><label>模式 <select><option>转换 + 翻译</option><option>仅转换</option><option>仅翻译</option></select></label>' +
+        '<label>翻译档 <select><option>专家（staged-gates）</option><option>快速</option></select></label>' +
+        '<label>输出 <select multiple size="1" style="min-width:120px"><option selected>MD</option><option selected>HTML</option><option selected>EPUB</option><option>双语 EPUB</option></select></label></div>' +
+        '<div class="wiz-foot"><button class="btn" data-act="wiz-close">取消</button><span></span></div>';
+    } else if (S.wiz === 2) {
+      var rows = [
+        ["个人信息保护的理论与案例", "沈知微 · 2025 · 418 页", "直读文本层", chip("ok", "可发车")],
+        ["法学方法论（扫描本）", "贺秉衡 · 1997 · 536 页", "PaddleOCR-VL（扫描件）", chip("ok", "可发车")],
+        ["比较宪法研究（影印版）", "顾之澜 · 1986 · 602 页", "已拦截：脏文本层", chip("block", "需人工裁决")],
+        ["Institutions and Legal Reasoning", "M. Harlow · 1982 · 328 页", "MinerU 精解", chip("ok", "可发车")],
+        ["宪法学讲稿", "林一鸣 · 2018 · 390 页", "跳过：已有转换", chip("neutral", "跳过")]
+      ];
+      body = '<div class="preflight"><span class="pf">✓ Zotero API</span><span class="pf">✓ PaddleOCR-VL 凭证</span><span class="pf">✓ MinerU 凭证</span></div>' +
+        '<div class="panel budget-bar"><div class="brow"><span>本批预计 OCR 页数</span><b class="num">2,542 页 · 213 个 12 页块</b></div>' + prog(0.31) +
+        '<div class="brow" style="margin-top:6px;margin-bottom:0"><span>今日预算 <span class="num">10,000</span> 页</span><span>发车后剩余 <b class="num">4,338</b> 页</span></div></div>' +
+        '<div class="panel" style="overflow-x:auto"><table class="route-table"><thead><tr><th>书目（5 本）</th><th>自动路由</th><th>覆写</th><th>预检</th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr><td><div class="rt-t">' + r[0] + '</div><div class="rt-s">' + r[1] + "</div></td><td>" + r[2] + '</td><td><select aria-label="路线覆写"><option>自动（推荐）</option><option>强制直读文本层</option><option>强制 PaddleOCR</option><option>强制 MinerU</option><option>保留现有结果</option></select></td><td>' + r[3] + "</td></tr>";
+        }).join("") + "</tbody></table></div>" +
+        '<div class="wiz-foot"><button class="btn" data-act="wiz-step" data-n="1">← 上一步</button><button class="btn primary" data-act="wiz-step" data-n="3">下一步：确认发车 →</button></div>';
+    } else {
+      body = '<div class="confirm-grid">' +
+        '<div class="panel"><h4 class="panel-title">批次</h4>' +
+        '<div class="evi-row"><span class="k">来源</span><span class="v">Zotero 集合「法学翻译批次」</span></div>' +
+        '<div class="evi-row"><span class="k">发车</span><span class="v num">4 本（直读 1 · Paddle 1 · MinerU 1 · 跳过 1）</span></div>' +
+        '<div class="evi-row"><span class="k">留守</span><span class="v">1 本已拦截 · 等你裁决后可单独补发</span></div>' +
+        '<div class="evi-row"><span class="k">预算影响</span><span class="v num">2,542 页 · 剩余 4,338 页</span></div></div>' +
+        '<div class="panel"><h4 class="panel-title">意图</h4>' +
+        '<div class="evi-row"><span class="k">模式</span><span class="v">转换 + 翻译（专家档 · staged-gates）</span></div>' +
+        '<div class="evi-row"><span class="k">输出格式</span><span class="v">MD · HTML · EPUB</span></div>' +
+        '<div class="evi-row"><span class="k">目标语言</span><span class="v">zh-Hans</span></div>' +
+        '<div class="evi-row"><span class="k">成品回挂</span><span class="v">Markdown 子附件 · 作者_年份_题名</span></div></div>' +
+        '<div class="panel span2" style="grid-column:1/-1;padding:13px 16px"><h4 class="panel-title">将创建的任务结构</h4>' +
+        '<div class="evi-row"><span class="k">集合任务 × 1</span><span class="v">冻结成员 · 聚合状态 · 只重试失败子任务</span></div>' +
+        '<div class="evi-row"><span class="k">子任务 × 5</span><span class="v">每本书独立阶段 / 重试 / 工件登记</span></div>' +
+        '<div class="evi-row"><span class="k">人工门 × 2 / 书</span><span class="v">译前披露、成品晋升——到门即暂停，不会自动越过</span></div></div></div>' +
+        '<div class="wiz-foot"><button class="btn" data-act="wiz-step" data-n="2">← 上一步</button><button class="btn primary" data-act="wiz-launch">发车 · 创建集合任务 →</button></div>';
+    }
+    return topbar() + '<div class="takeover"><h2>新建任务</h2><p class="tsub">全屏三步 · 完成后回到收件箱 · Esc 取消</p>' + steps + body + "</div>";
+  }
+
+  /* ---------- 渲染 ---------- */
+  var stage = document.getElementById("stage");
+  function draw() {
+    stage.innerHTML = S.wiz ? wizard() : topbar() + segBar() + '<div class="body-grid">' + listPane() + detailPane() + "</div>";
+    drawScenes();
+  }
+
+  var SCENES = [
+    { label: "工作台", set: function () { S = { filter: "all", sel: "b2", tab: 0, wiz: 0, invalid: false }; } },
+    { label: "译前审批", set: function () { S = { filter: "waiting", sel: "b4", tab: 3, wiz: 0, invalid: false }; } },
+    { label: "晋升审批", set: function () { S = { filter: "waiting", sel: "b8", tab: 3, wiz: 0, invalid: false }; } },
+    { label: "失效演示", set: function () { S = { filter: "waiting", sel: "b4", tab: 3, wiz: 0, invalid: true }; } },
+    { label: "拦截裁决", set: function () { S = { filter: "blocked", sel: "b3", tab: 0, wiz: 0, invalid: false }; } },
+    { label: "新建任务", set: function () { S.wiz = 1; } }
+  ];
+  function drawScenes() {
+    var el = document.getElementById("pScenes");
+    el.innerHTML = "";
+    SCENES.forEach(function (sc) {
+      var b = document.createElement("button");
+      b.textContent = sc.label;
+      var on = (sc.label === "新建任务" && S.wiz) || (sc.label === "失效演示" && S.invalid && S.tab === 3) ||
+        (sc.label === "译前审批" && !S.invalid && !S.wiz && S.sel === "b4" && S.tab === 3) ||
+        (sc.label === "晋升审批" && !S.wiz && S.sel === "b8" && S.tab === 3) ||
+        (sc.label === "拦截裁决" && !S.wiz && S.sel === "b3") ||
+        (sc.label === "工作台" && !S.wiz && S.sel === "b2" && S.tab === 0);
+      if (on) b.className = "on";
+      b.addEventListener("click", function () { sc.set(); draw(); });
+      el.appendChild(b);
+    });
+  }
+
+  stage.addEventListener("click", function (e) {
+    var el = e.target.closest("[data-act]");
+    if (!el) return;
+    var act = el.getAttribute("data-act");
+    if (act === "filter") {
+      S.filter = el.getAttribute("data-key");
+      var f = FILTERS.filter(function (x) { return x.key === S.filter; })[0];
+      var items = BOOKS.filter(f.match);
+      if (items.length && !items.some(function (b) { return b.id === S.sel; })) S.sel = items[0].id;
+      S.tab = 0;
+    }
+    if (act === "sel") { S.sel = el.getAttribute("data-id"); }
+    if (act === "tab") { S.tab = parseInt(el.getAttribute("data-i"), 10); }
+    if (act === "wiz-open") { S.wiz = 1; }
+    if (act === "wiz-step") { S.wiz = parseInt(el.getAttribute("data-n"), 10); }
+    if (act === "wiz-close" || act === "wiz-launch") { S.wiz = 0; }
+    draw();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && S.wiz) { S.wiz = 0; draw(); }
+  });
+
+  (function () {
+    var picker = document.getElementById("picker");
+    var handle = document.getElementById("pickerDrag");
+    var sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
+    handle.addEventListener("pointerdown", function (e) {
+      dragging = true; picker.classList.add("dragging");
+      sx = e.clientX; sy = e.clientY;
+      var r = picker.getBoundingClientRect(); ox = r.left; oy = r.top;
+      handle.setPointerCapture(e.pointerId); e.preventDefault();
+    });
+    handle.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      var nx = Math.min(Math.max(4, ox + e.clientX - sx), window.innerWidth - picker.offsetWidth - 4);
+      var ny = Math.min(Math.max(4, oy + e.clientY - sy), window.innerHeight - picker.offsetHeight - 4);
+      picker.style.left = nx + "px"; picker.style.top = ny + "px";
+      picker.style.right = "auto"; picker.style.bottom = "auto";
+    });
+    handle.addEventListener("pointerup", function () { dragging = false; picker.classList.remove("dragging"); });
+  })();
+
+  draw();
+})();
+</script>

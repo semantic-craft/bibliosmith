@@ -1,0 +1,92 @@
+import { Plus } from "lucide-react";
+import type { PipelineCopy } from "./copy";
+import { stepCaption, unitProgress, type BookUnit } from "./model";
+
+function coverHue(title: string): number {
+  let hash = 0;
+  for (let index = 0; index < title.length; index += 1) {
+    hash = (hash * 31 + title.charCodeAt(index)) % 360;
+  }
+  return hash;
+}
+
+export function BookCover({ title, className }: { title: string; className?: string }) {
+  const hue = coverHue(title);
+  return (
+    <div
+      className={className ? `pl-cover ${className}` : "pl-cover"}
+      style={{ background: `linear-gradient(155deg, hsl(${hue} 38% 46%), hsl(${hue} 44% 30%))` }}
+    >
+      <span>{title}</span>
+    </div>
+  );
+}
+
+function ribbonFor(unit: BookUnit, copy: PipelineCopy): { label: string; cls: string } | null {
+  if (unit.status === "waiting_for_approval") return { label: copy.ribbonWaiting, cls: "wait" };
+  if (unit.status === "failed" || unit.status === "partial" || unit.status === "blocked") {
+    return { label: copy.ribbonProblem, cls: "bad" };
+  }
+  if (unit.status === "completed") return { label: copy.ribbonDone, cls: "done" };
+  return null;
+}
+
+function progressTone(unit: BookUnit): string {
+  if (unit.status === "failed" || unit.status === "partial") return " bad";
+  if (unit.status === "waiting_for_approval" || unit.status === "blocked") return " hot";
+  return "";
+}
+
+export function Shelf({
+  copy,
+  units,
+  selectedKey,
+  onSelect,
+  onNewJob,
+}: {
+  copy: PipelineCopy;
+  units: BookUnit[];
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
+  onNewJob: () => void;
+}) {
+  return (
+    <div className="pl-shelf">
+      {units.map((unit) => {
+        const ribbon = ribbonFor(unit, copy);
+        const progress = unitProgress(unit);
+        return (
+          <div
+            key={unit.key}
+            className={`pl-bookcard${unit.key === selectedKey ? " sel" : ""}`}
+            role="button"
+            tabIndex={0}
+            onClick={() => onSelect(unit.key)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelect(unit.key);
+              }
+            }}
+          >
+            <BookCover title={unit.title} className="shelf" />
+            {ribbon && <span className={`pl-ribbon ${ribbon.cls}`}>{ribbon.label}</span>}
+            <div className="pl-bmeta">
+              <div className="pl-bt">{unit.title}</div>
+              <div className="pl-bs">{stepCaption(unit, copy)}</div>
+            </div>
+            {progress !== null && (
+              <div className={`pl-prog pl-bprog${progressTone(unit)}`}>
+                <i style={{ width: `${Math.round(progress * 100)}%` }} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <button className="pl-addtile" type="button" onClick={onNewJob}>
+        <Plus size={26} strokeWidth={1.6} />
+        <span>{copy.newJob}</span>
+      </button>
+    </div>
+  );
+}

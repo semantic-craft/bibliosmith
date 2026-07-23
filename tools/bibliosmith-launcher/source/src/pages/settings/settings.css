@@ -1,0 +1,336 @@
+/* Settings page — System Settings style grouped inset lists. Prefix: st-. */
+
+.st-page {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2px 2px 24px;
+}
+
+.st-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--fs-title-lg);
+  font-weight: 650;
+}
+
+.st-group {
+  display: grid;
+  gap: 7px;
+}
+
+.st-group-title {
+  padding: 0 12px;
+  color: var(--muted);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.st-group-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.st-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  min-height: 44px;
+  padding: 11px 14px;
+}
+
+.st-row + .st-row,
+.st-row + .st-block,
+.st-block + .st-row {
+  border-top: 1px solid var(--line);
+}
+
+.st-row-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.st-row-copy strong {
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+.st-row-copy span {
+  color: var(--muted);
+  font-size: var(--fs-callout);
+  line-height: 1.45;
+}
+
+.st-row-copy code {
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--muted);
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: var(--fs-callout);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* macOS-style switch */
+
+.st-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 20px;
+}
+
+.st-switch input {
+  appearance: none;
+  -webkit-appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line-strong);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.st-switch input:checked {
+  background: var(--jade-bright);
+}
+
+.st-switch input::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease;
+}
+
+.st-switch input:checked::before {
+  transform: translateX(16px);
+}
+
+/* Buttons inside rows */
+
+.st-btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  background: var(--surface);
+  font-size: var(--fs-body);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.st-btn:hover:not(:disabled) {
+  background: var(--surface-muted);
+}
+
+/* Status pill inside title lines */
+
+.st-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: var(--fs-caption);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.st-pill.success {
+  color: var(--jade);
+  background: var(--jade-soft);
+}
+
+.st-pill.error {
+  color: var(--err);
+  background: var(--err-soft);
+}
+
+.st-pill.working {
+  color: var(--info);
+  background: var(--info-soft);
+}
+
+.st-pill.muted {
+  color: var(--muted);
+  background: var(--surface-muted);
+}
+
+.st-title-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.st-select {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  background: var(--surface);
+  font-size: var(--fs-body);
+}
+
+/* Blocks: multi-line content inside a group (proxy form, progress) */
+
+.st-block {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.st-field-grid {
+  display: grid;
+  grid-template-columns: 130px minmax(160px, 1fr) 110px;
+  gap: 10px;
+}
+
+.st-field-grid label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.st-field-grid label > span {
+  color: var(--muted);
+  font-size: var(--fs-caption);
+}
+
+.st-field-grid input,
+.st-field-grid select {
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  background: var(--surface);
+  font-size: var(--fs-body);
+}
+
+.st-field-grid input:focus,
+.st-field-grid select:focus {
+  outline: none;
+  border-color: var(--jade);
+  box-shadow: 0 0 0 3px var(--jade-soft);
+}
+
+.st-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.st-inline-status {
+  overflow: hidden;
+  max-width: min(420px, 100%);
+  text-overflow: ellipsis;
+}
+
+.st-code-lines {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.st-code-lines code {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: var(--fs-callout);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-progress {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+}
+
+.st-progress-detail {
+  color: var(--muted);
+  font-size: var(--fs-callout);
+}
+
+.st-progress-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Models settings panel */
+.st-models { display: flex; flex-direction: column; gap: 14px; }
+.st-models-lead { margin: 0; color: var(--muted, #6b7280); font-size: 13px; }
+.st-models-active {
+  padding: 8px 12px; border-radius: 8px; font-size: 13px;
+  background: color-mix(in srgb, currentColor 6%, transparent);
+}
+.st-models-active.muted { color: var(--muted, #6b7280); }
+.st-models-brand { display: flex; flex-direction: column; gap: 8px; }
+.st-models-brand-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+}
+.st-models-brand-head a { font-size: 12px; text-decoration: none; opacity: 0.8; }
+.st-models-slot {
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+}
+.st-models-slot.active { border-color: color-mix(in srgb, #16a34a 55%, transparent); }
+.st-models-slot-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.st-models-slot-name { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+.st-models-badge {
+  display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 600;
+  color: #16a34a; padding: 1px 7px; border-radius: 999px;
+  background: color-mix(in srgb, #16a34a 12%, transparent);
+}
+.st-models-status.ok { color: #16a34a; font-size: 12px; }
+.st-models-status.muted { color: var(--muted, #9ca3af); font-size: 12px; }
+.st-models-slot-grid { display: grid; grid-template-columns: minmax(160px, 1fr) 2fr; gap: 10px; }
+.st-models-slot-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.st-models-slot-grid select, .st-models-slot-grid input {
+  padding: 6px 8px; border-radius: 7px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: transparent; color: inherit; font-size: 13px;
+}
+.st-models-slot-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.st-models-msg { font-size: 12px; }
+.st-models-msg.ok { color: #16a34a; }
+.st-models-msg.error { color: #dc2626; }
+.st-models-msg.muted { color: var(--muted, #9ca3af); }
+@media (max-width: 640px) {
+  .st-models-slot-grid { grid-template-columns: 1fr; }
+}

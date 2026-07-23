@@ -1,0 +1,3 @@
+display_name: Local Book Reading Pipeline
+short_description: Local EPUB/PDF to clean reading outputs
+default_prompt: Use the local book reading pipeline for this local EPUB/PDF and produce a clean reading project.

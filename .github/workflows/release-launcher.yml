@@ -1,0 +1,68 @@
+name: Release Launcher
+
+# Builds the macOS (Apple Silicon) DMG on a GitHub-hosted macos-latest runner
+# and publishes it as a GitHub release on the public download repo
+# semantic-craft/bibliosmith-releases (manual download only — the app has
+# no self-update).
+#
+# One-time setup: repo secret RELEASE_TOKEN — a token with Contents: Read
+# and write on semantic-craft/bibliosmith-releases.
+#
+# Release flow: update tools/bibliosmith-launcher/source/launcher-version.json
+# and tools/bibliosmith-launcher/source/RELEASE_NOTES.md, merge to main, then push a
+# matching tag (e.g. v1.4.0). The tag runs the full CI suite first and the build
+# only starts once it is green, so a tag on a red tree publishes nothing.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.4.0); must match launcher-version.json"
+        required: true
+
+concurrency: release-launcher
+
+jobs:
+  # A tag used to go straight to build-and-release, so a red suite could still
+  # ship a DMG to the public download repo. ci.yml is reused here rather than
+  # copied so the release gate cannot drift from the pull-request gate.
+  tests:
+    uses: ./.github/workflows/ci.yml
+
+  build-and-release:
+    needs: tests
+    runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    defaults:
+      run:
+        working-directory: tools/bibliosmith-launcher/source
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify version matches tag
+        run: |
+          version=$(node -p "require('./launcher-version.json').version")
+          if [ "v$version" != "$RELEASE_TAG" ]; then
+            echo "launcher-version.json is v$version but the release tag is $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Build DMG
+        run: npx tauri build --bundles dmg
+
+      - name: Publish release
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo semantic-craft/bibliosmith-releases \
+            --title "BiblioSmith Launcher $RELEASE_TAG" \
+            --notes-file tools/bibliosmith-launcher/source/RELEASE_NOTES.md \
+            "tools/bibliosmith-launcher/source/src-tauri/target/release/bundle/dmg/"*.dmg

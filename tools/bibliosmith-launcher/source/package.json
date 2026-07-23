@@ -1,0 +1,37 @@
+{
+  "name": "bibliosmith-launcher",
+  "private": true,
+  "version": "1.12.0",
+  "type": "module",
+  "scripts": {
+    "version:sync": "node scripts/sync-version.mjs",
+    "version:check": "node scripts/sync-version.mjs --check",
+    "predev": "npm run version:sync",
+    "dev": "vite --host 127.0.0.1 --port 1420",
+    "prebuild": "npm run version:sync",
+    "build": "tsc && vite build",
+    "test:startup-contract": "node scripts/check-startup-contract.mjs",
+    "clean:cache": "node scripts/clean-build-cache.mjs",
+    "preview": "vite preview --host 127.0.0.1 --port 1420",
+    "tauri": "tauri",
+    "pretauri:dev": "npm run version:sync",
+    "tauri:dev": "tauri dev",
+    "pretauri:build": "npm run version:sync",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-autostart": "^2.5.1",
+    "lucide-react": "^1.16.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14"
+  }
+}

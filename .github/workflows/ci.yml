@@ -1,0 +1,157 @@
+name: CI
+
+# Test gate for pull requests, pushes to main, and — through workflow_call —
+# release-launcher.yml. Every suite the project has runs here, so this is the
+# workflow that has to stay green before anything ships.
+#
+# This is a public repository, so GitHub-hosted runners are free and used
+# throughout. The Python, commit-message, and launcher-frontend jobs run on
+# ubuntu-latest; launcher-backend runs on macos-latest because the Tauri crate
+# builds against macOS system frameworks. Each job gets its own hosted runner,
+# so they run in parallel.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # release-launcher.yml calls this workflow before it builds, so a v* tag
+  # cannot ship a DMG whose tests are red.
+  workflow_call:
+
+# Pushing a branch that already has a pull request open would otherwise run
+# every job twice. Restricting the push trigger to main keeps CI from doing
+# the same work twice, while still covering commits that land on main
+# directly.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The three Python suites share one job: keeping them together reuses one
+  # checkout and one uv install rather than repeating them across jobs. Each
+  # suite is its own step, so a failure still names the package it came from.
+  python:
+    name: Python suites (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # uv is not guaranteed to be on the runner's PATH, so install it
+      # explicitly. Caching is left off for simplicity; these suites are small.
+      #
+      # Pinned to an exact version, unlike the checkout pins above: setup-uv
+      # publishes no floating `v8` major tag, so `@v8` fails to resolve outright.
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: false
+
+      # --package builds and installs the workspace member, which the CLI tests
+      # need for its console-script entry points. See packages/translation-engine
+      # /pyproject.toml for why pythonpath is also set.
+      - name: Translation engine
+        run: uv run --package translation-engine pytest packages/translation-engine/tests
+
+      - name: OCR
+        run: uv run --package ocr pytest packages/ocr/tests
+
+      # The distribution is named zotero-cli-agent; the directory is zotero-cli.
+      # This package declares pytest under [project.optional-dependencies], which
+      # uv does not install by default, so --extra dev is what puts pytest in the
+      # venv; without it uv falls through to a PATH pytest that cannot import
+      # zotero_cli. --extra mcp adds the optional dependency test_mcp_server_builds
+      # needs — without it that test skips, so CI is the only place the MCP server
+      # construction is actually exercised.
+      - name: Zotero CLI
+        run: uv run --package zotero-cli-agent --extra dev --extra mcp pytest packages/zotero-cli/tests
+
+      # The repository-root tests/ tree, which is not under packages/ and so was
+      # matched by none of the steps above: the EPUB builder, the translation
+      # coverage gate, the proper-noun and note policy, the language-pair
+      # templates, and the digest package. Some of them shell out to node, which
+      # this runner provides.
+      #
+      # tools/ holds two more suites that live outside both tests/ and
+      # packages/, so nothing was running them either: the commit-message
+      # validator that the commit-messages job below depends on, and the
+      # bilingual EPUB builder script. Both are stdlib-only.
+      - name: Repository suites
+        run: |
+          uv run --package digest pytest \
+            tests \
+            tools/git \
+            tools/bibliosmith-launcher/source/scripts/tests
+
+  launcher-frontend:
+    name: Launcher frontend (tsc + startup contract)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/bibliosmith-launcher/source
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Startup contract
+        run: npm run test:startup-contract
+
+  commit-messages:
+    name: Commit messages (ZH/EN/JA)
+    # The launcher renders each commit body as its own update text and picks the
+    # section matching the UI locale — see localized_commit_summary in
+    # src-tauri/src/lib.rs, which is unit-tested. A commit without the sections
+    # still renders, but falls back to the first body line in every language, so
+    # the multilingual update view quietly degrades to English-only prose.
+    # tools/git/check_commit_messages.py has existed for a while and the rule is
+    # documented in three places, but nothing ran it, and every commit merged
+    # before this job failed it.
+    #
+    # Pull requests only: a push to main has no base ref to diff against.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The branch tip, not the synthetic merge commit GitHub creates for a
+          # pull request: that merge commit has a generated message which no
+          # author wrote and which cannot satisfy the rule. Full history so the
+          # merge base is reachable.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # Only to guarantee an interpreter; the validator is stdlib-only.
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: false
+
+      - name: Validate
+        run: |
+          git fetch --no-tags origin \
+            "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          base=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          uv run --no-project python tools/git/check_commit_messages.py --range "$base..HEAD"
+
+  launcher-backend:
+    name: Launcher backend (cargo test)
+    # rust-toolchain.toml pins Rust 1.88.0 and rustup selects it automatically.
+    # cargo test does not need the frontend bundle, so there is no build step.
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: tools/bibliosmith-launcher/source/src-tauri
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run tests
+        run: cargo test

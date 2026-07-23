@@ -1,0 +1,37 @@
+[package]
+name = "bibliosmith-launcher"
+version = "1.12.0"
+description = "BiblioSmith Launcher"
+authors = ["BiblioSmith Shufang"]
+edition = "2021"
+
+[lib]
+name = "bibliosmith_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+futures-util = "0.3"
+fs4 = "1.1.0"
+# API keys the user enters in Settings live in the macOS Keychain, never in a
+# file. apple-native binds to the system Security framework.
+keyring = { version = "3", features = ["apple-native"] }
+open = "5"
+reqwest = { version = "0.12", features = ["json", "stream", "socks", "blocking"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# Reads the engine's providers.toml registry to map a slot to its key_env.
+toml = "0.8"
+tauri = { version = "2.11.2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2.5.1"
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["fs", "io-util", "process"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

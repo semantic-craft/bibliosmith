@@ -1,0 +1,19 @@
+version: 2
+
+# Only the actions are watched here, deliberately.
+#
+# The workflows had drifted three majors behind before anyone noticed, and the
+# way that surfaces is a release failing to start rather than a test going red.
+# Dependabot opens a pull request instead, which ci.yml then has to pass — the
+# same gate every other change goes through.
+#
+# npm, cargo and uv are left out on purpose. Those updates change what the app
+# actually does, so they want a person deciding when to take them; actions only
+# change how it is built.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci

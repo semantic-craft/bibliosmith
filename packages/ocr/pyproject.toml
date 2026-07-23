@@ -1,0 +1,23 @@
+[project]
+name = "ocr"
+version = "0.1.0"
+description = "Book OCR and Zotero PDF-to-Markdown scripts"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.32",
+    "PyMuPDF>=1.24",
+    "pypdf>=4.3",
+    "markdown>=3.6",
+]
+
+# uv installs dependency groups by default, so `uv run --package ocr pytest`
+# gets pytest from the workspace venv. Without this the tests still passed
+# locally, but only by falling through to whatever pytest happened to be on
+# PATH — a Homebrew one here, and nothing at all on the CI runner.
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.uv]
+package = false
