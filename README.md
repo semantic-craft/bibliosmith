@@ -113,6 +113,6 @@ The repository itself can be synced to another machine. Real books should be cop
 
 ## Project Home
 
-Open-source home: <https://github.com/semantic-craft/bibliosmith-oss>
+Open-source home: <https://github.com/semantic-craft/bibliosmith>
 
 Earlier license texts are preserved under `license/`. Do not package sample book content, release EPUBs, covers, or translations as your own skill assets.
