@@ -46,7 +46,7 @@ jobs:
       #
       # Pinned to an exact version, unlike the checkout pins above: setup-uv
       # publishes no floating `v8` major tag, so `@v8` fails to resolve outright.
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: false
 
@@ -136,7 +136,7 @@ jobs:
           persist-credentials: false
 
       # Only to guarantee an interpreter; the validator is stdlib-only.
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: false
 
