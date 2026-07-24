@@ -160,61 +160,75 @@ function previewBookPipelineRoutes(source: BookPipelineSource, mode: string, con
       summary: "The existing local PDF conversion wrapper will decide the PDF extraction details.",
     }]);
   }
-  const selector = source.selector || "preview";
+  // Mirrors the backend: a Zotero route is only previewable from discovery
+  // evidence; without it the source stays blocked instead of fabricating demo
+  // attachments (which used to be queued as real children).
+  const items = source.fakeZoteroItems ?? [];
+  if (!items.length) {
+    return [{
+      id: "zotero-no-attachments",
+      title: source.title || source.selector || "Zotero source",
+      sourceKind: source.kind,
+      sourceRef: source.selector || "",
+      routeKind: "blocked",
+      canRun: false,
+      blockedReason: "No matching Zotero attachment was discovered for this source.",
+      summary: "Adjust the search or filter, or select a specific attachment from bibliographic discovery.",
+    }];
+  }
   const hasPaddle = Boolean(config?.hasPaddleocrCredentials);
   const hasMineru = Boolean(config?.hasMineruCredentials);
-  return withTranslationHandoff(source, mode, [
-    {
-      id: `${selector}-DIRECT`,
-      title: "Selectable born-digital PDF",
+  return withTranslationHandoff(source, mode, items.map((item) => {
+    const base = {
+      id: item.key,
+      title: item.title,
       sourceKind: source.kind,
-      sourceRef: `zotero://${selector}/direct.pdf`,
-      routeKind: "direct_text",
-      canRun: true,
-      blockedReason: null,
-      summary: "Direct embedded text extraction can run without remote OCR credentials.",
-    },
-    {
-      id: `${selector}-SCAN`,
-      title: "Scanned book PDF",
-      sourceKind: source.kind,
-      sourceRef: `zotero://${selector}/scanned.pdf`,
+      sourceRef: item.attachmentPath || `zotero://${item.key}`,
+    };
+    if (item.alreadyConverted) {
+      return {
+        ...base,
+        routeKind: "already_converted",
+        canRun: false,
+        blockedReason: "Converted Markdown already exists for this attachment.",
+        summary: "Already converted; no full conversion will start from preview.",
+      };
+    }
+    if (item.dirtyTextLayer) {
+      return {
+        ...base,
+        routeKind: "blocked_dirty_text_layer",
+        canRun: false,
+        blockedReason: "Dirty embedded text layer detected; route requires manual MinerU review.",
+        summary: "Blocked to avoid silently converting degraded Chinese text.",
+      };
+    }
+    if (item.preferMineru) {
+      return {
+        ...base,
+        routeKind: hasMineru ? "mineru" : "missing_credentials",
+        canRun: hasMineru,
+        blockedReason: hasMineru ? null : "MinerU credentials are missing.",
+        summary: hasMineru ? "Route preview selects MinerU for this layout-sensitive item." : "MinerU candidate is blocked until credentials are configured.",
+      };
+    }
+    if (item.hasTextLayer && !item.scanned) {
+      return {
+        ...base,
+        routeKind: "direct_text",
+        canRun: true,
+        blockedReason: null,
+        summary: "Direct embedded text extraction can run without remote OCR credentials.",
+      };
+    }
+    return {
+      ...base,
       routeKind: hasPaddle ? "remote_paddleocr" : "missing_credentials",
       canRun: hasPaddle,
       blockedReason: hasPaddle ? null : "Remote PaddleOCR credentials are missing.",
-      summary: hasPaddle ? "Scanned PDF will use the existing remote PaddleOCR workflow." : "Scanned PDF is blocked until OCR credentials are configured.",
-    },
-    {
-      id: `${selector}-MINERU`,
-      title: "Layout-sensitive paper",
-      sourceKind: source.kind,
-      sourceRef: `zotero://${selector}/mineru.pdf`,
-      routeKind: hasMineru ? "mineru" : "missing_credentials",
-      canRun: hasMineru,
-      blockedReason: hasMineru ? null : "MinerU credentials are missing.",
-      summary: hasMineru ? "Route preview selects MinerU for this layout-sensitive item." : "MinerU candidate is blocked until credentials are configured.",
-    },
-    {
-      id: `${selector}-DIRTY`,
-      title: "Dirty Chinese text layer",
-      sourceKind: source.kind,
-      sourceRef: `zotero://${selector}/dirty.pdf`,
-      routeKind: "blocked_dirty_text_layer",
-      canRun: false,
-      blockedReason: "Dirty embedded text layer detected; route requires manual MinerU review.",
-      summary: "Blocked to avoid silently converting degraded Chinese text.",
-    },
-    {
-      id: `${selector}-DONE`,
-      title: "Already converted attachment",
-      sourceKind: source.kind,
-      sourceRef: `zotero://${selector}/done.pdf`,
-      routeKind: "already_converted",
-      canRun: false,
-      blockedReason: "Converted Markdown already exists for this attachment.",
-      summary: "Already converted; no full conversion will start from preview.",
-    },
-  ]);
+      summary: hasPaddle ? "Scanned or low-text PDF will use the existing remote PaddleOCR workflow." : "Scanned or low-text PDF is blocked until OCR credentials are configured.",
+    };
+  }));
 }
 
 function previewBookPipelineJob(source: BookPipelineSource, mode: string, config?: BookPipelinePreviewConfig | null): BookPipelineJob {
