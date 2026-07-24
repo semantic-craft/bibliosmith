@@ -217,6 +217,27 @@ class ProperNounAndNotePolicyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_publication_lint_ignores_note_text_inside_nested_markup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            book_root = Path(tmp)
+            chapter = book_root / "chapters" / "final" / "001.md"
+            chapter.parent.mkdir(parents=True, exist_ok=True)
+            chapter.write_text(
+                '# 第一章\n\n<scr<script>ipt title="注">正文。</script>\n',
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["node", str(PUBLICATION_LINT), "--target=zh-Hans"],
+                cwd=book_root,
+                text=True,
+                encoding="utf-8",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_workflow_gate_requires_note_flag_for_policy_five(self) -> None:
         with tempfile.TemporaryDirectory(dir=REPO_ROOT / "books" / "zh-Hans") as tmp:
             book_root = Path(tmp).rename(Path(tmp).with_name(f"999_test_proper_noun_policy_{Path(tmp).name}"))

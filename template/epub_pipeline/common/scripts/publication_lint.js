@@ -189,11 +189,26 @@ function detectBodySceneSeparator(text, file) {
   });
 }
 
+function stripMarkupForTextScan(text) {
+  let depth = 0;
+  let plainText = '';
+  for (const char of text) {
+    if (char === '<') {
+      depth += 1;
+    } else if (char === '>') {
+      depth = Math.max(0, depth - 1);
+    } else if (depth === 0) {
+      plainText += char;
+    }
+  }
+  return plainText;
+}
+
 function detectDisallowedNoteMarkers(text, file) {
   const normalizedFile = file.split(path.sep).join('/');
   if (!normalizedFile.startsWith('chapters/final/') && !normalizedFile.startsWith('frontmatter/')) return [];
   const issues = [];
-  const plainText = text.replace(/<[^>]+>/g, '');
+  const plainText = stripMarkupForTextScan(text);
   const patterns = [
     {
       regex: /[\u2460-\u2473\u24eb-\u24ff\u2776-\u277f\u3250-\u325f\u329f\u32b1-\u32bf]/g,
