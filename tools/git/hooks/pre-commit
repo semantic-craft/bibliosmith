@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Stop secrets and personal information from entering history at all.
+#
+# Runs before the commit is created, so a caught mistake needs no history
+# rewrite — unlike pre-push, where the bad object already exists locally.
+#
+#   1. Hard-refuses any real .env file, even when staged with `git add -f`.
+#   2. Scans the staged diff with gitleaks, using this repo's .gitleaks.toml
+#      (secrets + the personal-info / system-info rules defined there).
+set -euo pipefail
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# 1. .env files never belong in git. .env.example is the documented template.
+offenders=$(printf '%s\n' "$staged" | grep -E '(^|/)\.env($|\.)' | grep -v '\.env\.example$' || true)
+if [ -n "$offenders" ]; then
+  echo "pre-commit: refusing to commit an environment file:" >&2
+  printf '  %s\n' "$offenders" >&2
+  echo "  Secrets belong in the gitignored .env, never in a commit." >&2
+  exit 1
+fi
+
+# 2. Secret + personal-info scan of what is actually staged.
+#    The staged tree is materialised as real files rather than piping the diff
+#    to `gitleaks stdin`: stdin mode has no file paths, so the path allowlists
+#    in .gitleaks.toml are ignored there and the config file would match its
+#    own rules, making itself impossible to commit.
+if command -v gitleaks >/dev/null 2>&1; then
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  git checkout-index -a -f --prefix="$tmp/"
+  if ! gitleaks dir "$tmp" --no-banner --redact >/tmp/gitleaks-precommit.log 2>&1; then
+    echo "pre-commit: gitleaks flagged the staged tree — commit aborted." >&2
+    sed -n '1,40p' /tmp/gitleaks-precommit.log >&2
+    exit 1
+  fi
+  rm -rf "$tmp"; trap - EXIT
+fi
+
+exit 0

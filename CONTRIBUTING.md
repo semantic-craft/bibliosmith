@@ -1,5 +1,33 @@
 # Contributing
 
+## Local safety hooks
+
+Run this once per clone, before your first commit:
+
+```sh
+git config core.hooksPath tools/git/hooks
+```
+
+Git deliberately never runs hooks straight out of a clone, so this one command
+is what activates the two versioned hooks in
+[`tools/git/hooks/`](tools/git/hooks):
+
+- **pre-commit** refuses any `.env` file — even when staged with `git add -f` —
+  and scans the staged tree with [gitleaks](https://github.com/gitleaks/gitleaks).
+- **pre-push** refuses any ref that does not descend from the clean root commit,
+  because the pre-open-source history is not publishable, and scans the tree
+  being pushed.
+
+[`.gitleaks.toml`](.gitleaks.toml) extends the default secret rules with generic
+rules for developer home paths and private network addresses — neither of which
+any secret scanner, GitHub push protection included, detects on its own. Those
+rules stay generic on purpose: a guard against publishing personal data must not
+publish that data itself, so identifier-specific checks live in
+[`tests/test_public_privacy.py`](tests/test_public_privacy.py), which compares
+hashes instead. Install the binary with `brew install gitleaks`; without it the
+hooks still block `.env` files and unpublishable history, and the `secrets` job
+in CI is the backstop that does not depend on local setup at all.
+
 ## Test suites
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs every suite below on

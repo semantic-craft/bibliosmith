@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Last line of defence before anything leaves this machine.
+#
+# The repository history was re-rooted on 2026-07-23: main descends from a clean
+# root commit, while the pre-open-source branches and tags still carry the old
+# history (copyrighted book EPUBs and build binaries). Those must never reach a
+# public remote, and GitHub's push protection cannot detect them — it only knows
+# about secrets.
+#
+#   1. Refuses to push any ref that does not descend from the clean root.
+#   2. Scans every commit reachable from the pushed ref with gitleaks, so a
+#      secret added and later deleted still blocks the push.
+#
+# Applies to every remote: after the repo consolidation `origin` IS the public
+# repository, so guarding a single remote name is no longer safe.
+set -euo pipefail
+
+CLEAN_ROOT=0bd474c3d20e808772b4ae56ed1941266e5ae2ff
+zero=0000000000000000000000000000000000000000
+
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue   # branch deletion, nothing to scan
+
+  if ! git merge-base --is-ancestor "$CLEAN_ROOT" "$local_sha" 2>/dev/null; then
+    echo "pre-push: refusing to push $local_ref — it does not descend from the" >&2
+    echo "  clean root $CLEAN_ROOT, so it still carries the pre-open-source" >&2
+    echo "  history (copyrighted book files). Push it to the private archive" >&2
+    echo "  repository instead." >&2
+    exit 1
+  fi
+
+  if command -v gitleaks >/dev/null 2>&1; then
+    if ! gitleaks git . --config .gitleaks.toml --log-opts="$local_sha" \
+      --no-banner --redact >/tmp/gitleaks-prepush.log 2>&1; then
+      echo "pre-push: gitleaks flagged reachable history — aborting." >&2
+      sed -n '1,40p' /tmp/gitleaks-prepush.log >&2
+      exit 1
+    fi
+  fi
+done
+
+exit 0

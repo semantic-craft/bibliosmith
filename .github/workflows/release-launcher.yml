@@ -24,6 +24,9 @@ on:
 
 concurrency: release-launcher
 
+permissions:
+  contents: read
+
 jobs:
   # A tag used to go straight to build-and-release, so a red suite could still
   # ship a DMG to the public download repo. ci.yml is reused here rather than
@@ -40,7 +43,9 @@ jobs:
       run:
         working-directory: tools/bibliosmith-launcher/source
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Verify version matches tag
         run: |
