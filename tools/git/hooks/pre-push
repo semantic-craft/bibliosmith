@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Last line of defence before anything leaves this machine.
 #
-# The repository history was re-rooted on 2026-07-23: main descends from a clean
-# root commit, while the pre-open-source branches and tags still carry the old
+# The repository history was re-rooted on 2026-07-23 and rebuilt on 2026-07-24
+# with noreply commit identities: main descends from a clean root commit, while the pre-open-source branches and tags still carry the old
 # history (copyrighted book EPUBs and build binaries). Those must never reach a
 # public remote, and GitHub's push protection cannot detect them — it only knows
 # about secrets.
@@ -15,7 +15,7 @@
 # repository, so guarding a single remote name is no longer safe.
 set -euo pipefail
 
-CLEAN_ROOT=0bd474c3d20e808772b4ae56ed1941266e5ae2ff
+CLEAN_ROOT=35401efd408ef12d2ebb9a1d06e5272b85529791
 zero=0000000000000000000000000000000000000000
 
 while read -r local_ref local_sha _remote_ref _remote_sha; do
