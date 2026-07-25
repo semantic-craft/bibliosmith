@@ -120,14 +120,32 @@ export async function copyTextToClipboard(text: string) {
   if (!ok) throw new Error("copy failed");
 }
 
+const INLINE_LINK = /\[([^\]]+)\]\(([^)]+)\)/g;
+
+/**
+ * Links are matched against the raw text, before escaping. Reading the href out
+ * of already-escaped text turned `?a=1&b=2` into `?a=1&amp;b=2`, which
+ * `sanitizeHref` then escaped a second time, so the anchor carried a literal
+ * `&amp;` and any link with a query string was broken. Label and surrounding
+ * text are still escaped, and the href still goes through `sanitizeHref`, so the
+ * protocol allowlist and attribute escaping are unchanged.
+ */
 function formatInlineMarkdown(value: string) {
+  let html = "";
+  let cursor = 0;
+  for (const match of value.matchAll(INLINE_LINK)) {
+    const index = match.index ?? 0;
+    html += formatInlineEmphasis(value.slice(cursor, index));
+    html += `<a href="${sanitizeHref(match[2])}">${formatInlineEmphasis(match[1])}</a>`;
+    cursor = index + match[0].length;
+  }
+  return html + formatInlineEmphasis(value.slice(cursor));
+}
+
+function formatInlineEmphasis(value: string) {
   let html = escapeHtml(value);
   html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
   html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => {
-    const safeHref = sanitizeHref(String(href));
-    return `<a href="${safeHref}">${label}</a>`;
-  });
   return html;
 }
 
