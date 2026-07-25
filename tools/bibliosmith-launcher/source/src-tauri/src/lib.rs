@@ -2424,6 +2424,16 @@ fn runtime_resolved_executable(package: RuntimePackage) -> Option<PathBuf> {
         .or_else(|| system_runtime_executable(package.kind))
 }
 
+/// The Java the launcher manages: private runtime, then `BIBLIOSMITH_JAVA`, then
+/// the system. Shared with the Book Pipeline runner so its EPUBCheck call
+/// resolves Java exactly the way `run_epubcheck.js` already does.
+pub(crate) fn managed_java_executable() -> Option<PathBuf> {
+    runtime_packages()
+        .into_iter()
+        .find(|package| matches!(package.kind, RuntimeKind::Java))
+        .and_then(runtime_resolved_executable)
+}
+
 fn explicit_runtime_env_executable(kind: RuntimeKind) -> Option<PathBuf> {
     let path = env::var_os(kind.env_name()).map(PathBuf::from)?;
     runtime_executable_is_usable(kind, &path).then_some(path)

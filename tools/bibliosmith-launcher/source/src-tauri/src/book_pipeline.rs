@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env,
+    ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -8110,9 +8112,130 @@ fn run_fake_command(command: &RunnerCommand) -> Result<RunnerCommandResult, Stri
     })
 }
 
+/// Directories a desktop launch is missing from `PATH`. A macOS `.app` started
+/// from Finder inherits the launchd default `/usr/bin:/bin:/usr/sbin:/sbin`,
+/// which holds none of the places Homebrew, uv, nvm, volta or rustup install
+/// into, so a bare `uv`/`node` fails to spawn even though the identical command
+/// works from a terminal.
+fn extra_program_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    #[cfg(unix)]
+    dirs.extend(
+        ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
+            .into_iter()
+            .map(PathBuf::from),
+    );
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local").join("bin"));
+        dirs.push(home.join(".cargo").join("bin"));
+        dirs.push(home.join(".bun").join("bin"));
+        dirs.push(home.join(".volta").join("bin"));
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(appdata) = env::var_os("APPDATA") {
+        dirs.push(PathBuf::from(appdata).join("npm"));
+    }
+    dirs
+}
+
+/// `PATH` first so a user who put a specific toolchain in front keeps it; the
+/// desktop-missing roots only fill the gap behind it.
+fn program_search_dirs_from(path_var: Option<&OsStr>, extra: Vec<PathBuf>) -> Vec<PathBuf> {
+    let inherited = path_var
+        .map(|value| env::split_paths(value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut dirs = Vec::new();
+    let mut seen = BTreeSet::new();
+    for dir in inherited.into_iter().chain(extra) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        if seen.insert(dir.clone()) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+fn program_search_dirs() -> &'static [PathBuf] {
+    static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    DIRS.get_or_init(|| {
+        program_search_dirs_from(env::var_os("PATH").as_deref(), extra_program_dirs())
+    })
+}
+
+fn program_file_names(name: &str) -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        if Path::new(name).extension().is_some() {
+            return vec![name.to_string()];
+        }
+        ["exe", "cmd", "bat"]
+            .iter()
+            .map(|extension| format!("{name}.{extension}"))
+            .chain(std::iter::once(name.to_string()))
+            .collect()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![name.to_string()]
+    }
+}
+
+fn lookup_program_in(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    let file_names = program_file_names(name);
+    dirs.iter().find_map(|dir| {
+        file_names
+            .iter()
+            .map(|file_name| dir.join(file_name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// A program that already carries a directory component is an explicit choice
+/// and is left alone; a bare name is looked up in the search dirs, and staying
+/// as the bare name when nothing matches keeps the spawn error readable.
+fn resolve_runner_program_in(dirs: &[PathBuf], program: &Path) -> PathBuf {
+    if program
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty())
+    {
+        return program.to_path_buf();
+    }
+    let Some(name) = program.file_name().and_then(OsStr::to_str) else {
+        return program.to_path_buf();
+    };
+    lookup_program_in(dirs, name).unwrap_or_else(|| program.to_path_buf())
+}
+
+/// The launcher downloads a private JRE and `run_epubcheck.js` already honours
+/// `BIBLIOSMITH_JAVA`; resolving the same way here keeps the Rust EPUBCheck call
+/// on that contract instead of whatever `java` a desktop session inherited.
+/// Resolved per call, not cached: preparing the runtime from Settings mid-session
+/// has to take effect on the next stage rather than after a restart.
+fn resolve_runner_program(program: &Path) -> PathBuf {
+    if program.as_os_str() == "java" {
+        if let Some(path) = crate::managed_java_executable() {
+            return path;
+        }
+    }
+    resolve_runner_program_in(program_search_dirs(), program)
+}
+
+/// The child needs the same search path: `uv` has to find a Python, `node` has
+/// to find its own tooling, and neither inherits anything useful from a desktop
+/// launch. `command.env` is applied afterwards so a command can still override.
+fn runner_path_env_value() -> Option<OsString> {
+    env::join_paths(program_search_dirs()).ok()
+}
+
 fn run_process_command(command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
-    let mut process = Command::new(&command.program);
+    let program = resolve_runner_program(&command.program);
+    let mut process = Command::new(&program);
     process.args(&command.args);
+    if let Some(path_value) = runner_path_env_value() {
+        process.env("PATH", path_value);
+    }
     process.envs(command.env.iter().map(|(key, value)| (key, value)));
     if let Some(cwd) = &command.cwd {
         process.current_dir(cwd);
@@ -8121,7 +8244,7 @@ fn run_process_command(command: &RunnerCommand) -> Result<RunnerCommandResult, S
         format!(
             "Failed to start {} with {}: {err}",
             command.label,
-            display_path(&command.program)
+            display_path(&program)
         )
     })?;
     command_result_from_output(command, output)
@@ -9497,9 +9620,15 @@ fn local_reading_repo_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "Could not locate bibliosmith repo root.".to_string())
 }
 
+/// The OCR and Zotero workers import PaddleOCR/PyMuPDF, which live in the
+/// Homebrew CPython 3.11 rather than the launcher's managed runtime, so that
+/// interpreter stays the first choice. Intel Macs keep Homebrew under
+/// `/usr/local`; anywhere else the caller falls back to a resolved `python3`.
 fn homebrew_python() -> Option<PathBuf> {
-    let path = PathBuf::from("/opt/homebrew/bin/python3.11");
-    path.exists().then_some(path)
+    ["/opt/homebrew/bin/python3.11", "/usr/local/bin/python3.11"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
 }
 
 fn source_title(source: &BookPipelineSource) -> String {
@@ -14526,6 +14655,130 @@ mod tests {
         let stderr = "DASHSCOPE_API_KEY=sk-abc123\n";
         let tail = stderr_tail(stderr);
         assert!(!tail.contains("sk-abc123"), "leaked a secret: {tail}");
+    }
+
+    fn executable_fixture(dir: &Path, name: &str) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn program_search_dirs_keep_inherited_path_ahead_of_the_desktop_fallbacks() {
+        let inherited = env::join_paths(["/usr/bin", "/bin"].map(PathBuf::from)).unwrap();
+        let dirs = program_search_dirs_from(
+            Some(inherited.as_os_str()),
+            vec![PathBuf::from("/opt/homebrew/bin")],
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn program_search_dirs_drop_duplicates_and_empty_entries() {
+        let inherited = env::join_paths(["/usr/bin", "", "/opt/homebrew/bin"].map(PathBuf::from))
+            .unwrap_or_else(|_| OsString::from("/usr/bin::/opt/homebrew/bin"));
+        let dirs = program_search_dirs_from(
+            Some(inherited.as_os_str()),
+            vec![PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/bin")],
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn program_search_dirs_survive_a_desktop_launch_without_path() {
+        let dirs = program_search_dirs_from(None, vec![PathBuf::from("/opt/homebrew/bin")]);
+        assert_eq!(dirs, vec![PathBuf::from("/opt/homebrew/bin")]);
+    }
+
+    // The launchd default a Finder-launched .app inherits holds no uv and no
+    // node, so a bare name has to resolve out of the fallback roots instead.
+    #[test]
+    fn runner_program_resolves_a_bare_name_a_desktop_path_cannot_reach() {
+        let root = temp_root("program-lookup");
+        let desktop_path = root.join("usr-bin");
+        let homebrew = root.join("homebrew-bin");
+        fs::create_dir_all(&desktop_path).unwrap();
+        let uv = executable_fixture(&homebrew, "uv");
+
+        let dirs = program_search_dirs_from(
+            Some(env::join_paths([&desktop_path]).unwrap().as_os_str()),
+            vec![homebrew.clone()],
+        );
+        assert_eq!(
+            resolve_runner_program_in(&dirs, Path::new("uv")),
+            uv,
+            "a bare uv should resolve out of the fallback roots"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn runner_program_keeps_an_explicit_path_untouched() {
+        let root = temp_root("program-explicit");
+        let bin = root.join("bin");
+        let shadow = executable_fixture(&bin, "python3");
+        let explicit = PathBuf::from("/opt/homebrew/bin/python3.11");
+
+        let dirs = vec![bin.clone()];
+        assert_eq!(
+            resolve_runner_program_in(&dirs, &explicit),
+            explicit,
+            "an explicit interpreter choice must not be re-resolved"
+        );
+        assert_ne!(resolve_runner_program_in(&dirs, &explicit), shadow);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    // Falling back to the bare name keeps the spawn error naming the tool the
+    // caller asked for rather than an invented path.
+    #[test]
+    fn runner_program_falls_back_to_the_bare_name_when_nothing_resolves() {
+        let root = temp_root("program-missing");
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            resolve_runner_program_in(&[root.clone()], Path::new("uv")),
+            PathBuf::from("uv")
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn runner_child_path_carries_every_search_dir() {
+        let value = runner_path_env_value().expect("search dirs should join into a PATH");
+        let carried = env::split_paths(&value).collect::<Vec<_>>();
+        assert_eq!(carried, program_search_dirs());
+    }
+
+    // Every process command the pipeline builds must be a bare name the resolver
+    // handles or an already-resolved absolute path; a relative multi-component
+    // program would silently depend on the child's cwd.
+    #[test]
+    fn pipeline_process_programs_are_resolvable() {
+        for program in ["uv", "node", "java", "python3"] {
+            let resolved = resolve_runner_program(Path::new(program));
+            assert!(
+                resolved.is_absolute() || resolved == PathBuf::from(program),
+                "{program} resolved to an unusable relative path: {}",
+                display_path(&resolved)
+            );
+        }
     }
 
     struct ArtifactFixtureRunner;
