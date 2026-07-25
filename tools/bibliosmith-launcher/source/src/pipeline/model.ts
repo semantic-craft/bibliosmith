@@ -9,6 +9,7 @@ import type {
   BookPipelineOutputFormat,
 } from "../types";
 import type { PipelineCopy } from "./copy";
+import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
 
 export type PipelineBusy =
   | "loading"
@@ -116,27 +117,22 @@ export type PipelineStageId = (typeof PIPELINE_STAGE_ORDER)[number];
 
 export const GATE_STAGE_IDS = new Set(["approve_translation", "approve_promotion"]);
 
-// The config_id each provider profile resolves to. Defined once so the new-job
-// wizard (App) and the per-book drawer cannot disagree about which config a
-// profile maps to; the keys must match the profiles in the engine's
-// providers.toml.
-export const PROVIDER_DEFAULT_CONFIG: Record<
-  PipelineDraft["providerProfileId"],
-  string
-> = {
-  "openai-compatible": "openai-default",
-  "gemini-native": "gemini-default",
-  deepseek: "deepseek-default",
-};
+// The config_id each provider profile resolves to, derived from the same catalog
+// Settings and the new-job wizard render. It used to be a hand-written map of
+// three brands while the catalog carried six, so the per-book drawer silently
+// offered half the providers the user could actually configure. A brand's first
+// slot is its default config (Qwen and MiMo bill two ways and list two slots).
+export const PROVIDER_DEFAULT_CONFIG: Record<string, string> = Object.fromEntries(
+  MODEL_BRANDS.flatMap((brand) =>
+    brand.slots[0] ? [[brand.profileId, brand.slots[0].configId] as const] : [],
+  ),
+);
 
 // A persisted job's translationProfileId is a loose string (it may predate a
 // profile being renamed), so resolve it through this rather than indexing the
-// typed map directly. The wizard, whose profile is the union, indexes the map
-// straight and stays exhaustively checked.
+// map directly.
 export function providerDefaultConfig(profileId: string): string {
-  return (
-    (PROVIDER_DEFAULT_CONFIG as Record<string, string>)[profileId] ?? "default"
-  );
+  return PROVIDER_DEFAULT_CONFIG[profileId] ?? "default";
 }
 
 // Typed as a total map over the contract, so adding a stage without giving it a
