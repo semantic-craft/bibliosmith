@@ -165,9 +165,10 @@ export function pipelineCopy(locale: PipelineLocale) {
     tabApproval: zh ? "审批" : "Approval",
     tabLogs: zh ? "日志" : "Logs",
 
-    // Stage labels (12-stage contract + auxiliary stages)
+    // Stage labels — one per PIPELINE_STAGE_ORDER entry (model.ts type-checks this)
     stageRoute: zh ? "路由" : "Route",
     stageExtract: zh ? "提取" : "Extract",
+    stageIndex: zh ? "建索引" : "Index",
     stageHandoff: zh ? "交接" : "Handoff",
     stageSplit: zh ? "分章" : "Split",
     stagePrepare: zh ? "备译" : "Prepare",
