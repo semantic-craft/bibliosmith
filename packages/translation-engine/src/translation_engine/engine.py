@@ -273,15 +273,16 @@ def _translate_unit(
     checkpoint_store = CheckpointStore(
         project_root / "chapters" / "translated" / ".partial"
     )
+    translation_pass_id = _custom_instruction_pass_id(
+        "translation-v1-text-cleanup" if text_cleanup else "translation-v1",
+        custom_translation,
+    )
     idempotency_key = UnitIdempotencyKey(
         task_manifest_sha256=_sha256(task_bytes),
         provider_profile_id=provider.profile_id,
         provider_config_id=provider.config_id,
         translation_policy_version=translation_policy_version,
-        pass_id=_custom_instruction_pass_id(
-            "translation-v1-text-cleanup" if text_cleanup else "translation-v1",
-            custom_translation,
-        ),
+        pass_id=translation_pass_id,
     )
     checkpoint = checkpoint_store.load(unit_id, idempotency_key)
     if checkpoint is not None and checkpoint.next_chunk_index > len(chunks):
@@ -370,12 +371,21 @@ def _translate_unit(
             / ".partial"
             / "reflection"
         )
+        # The reflection revises the first pass's drafts, so it inherits
+        # everything the first pass depended on. Keyed only on "reflection-v1",
+        # a resumed reflection could reuse revisions computed from drafts that a
+        # different text-cleanup or custom-translation setting had since
+        # replaced. Composing the first-pass id in makes the key describe what
+        # the checkpoint actually depends on; a mismatch now redoes the
+        # reflection instead of blending two passes.
         second_pass_idempotency_key = UnitIdempotencyKey(
             task_manifest_sha256=_sha256(task_bytes),
             provider_profile_id=provider.profile_id,
             provider_config_id=provider.config_id,
             translation_policy_version=translation_policy_version,
-            pass_id=_custom_instruction_pass_id("reflection-v1", custom_reflection),
+            pass_id=_custom_instruction_pass_id(
+                f"reflection-v1+{translation_pass_id}", custom_reflection
+            ),
         )
         second_pass_checkpoint = second_pass_checkpoint_store.load(
             unit_id,
