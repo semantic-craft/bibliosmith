@@ -4184,20 +4184,55 @@ fn queue_job_with_translation_intent_and_executor<E: RunnerCommandExecutor>(
             translation_intent,
         );
     }
-    queue_standard_job_with_translation_intent(store, source, mode, translation_intent, config)
+    queue_standard_job_with_translation_intent(
+        store,
+        executor,
+        source,
+        mode,
+        translation_intent,
+        config,
+    )
 }
 
-fn queue_standard_job_with_translation_intent(
+fn queue_standard_job_with_translation_intent<E: RunnerCommandExecutor>(
     store: &dyn BookPipelineStateStore,
+    executor: &E,
     source: BookPipelineSource,
     mode: String,
     translation_intent: BookPipelineTranslationIntent,
     config: BookPipelinePreviewConfig,
 ) -> Result<BookPipelineJob, String> {
+    queue_standard_job_for_root(
+        store,
+        executor,
+        source,
+        mode,
+        translation_intent,
+        config,
+        &book_ocr_conversion_root(),
+    )
+}
+
+fn queue_standard_job_for_root<E: RunnerCommandExecutor>(
+    store: &dyn BookPipelineStateStore,
+    executor: &E,
+    source: BookPipelineSource,
+    mode: String,
+    translation_intent: BookPipelineTranslationIntent,
+    config: BookPipelinePreviewConfig,
+    root: &Path,
+) -> Result<BookPipelineJob, String> {
     validate_translation_intent(&translation_intent)?;
     let output_formats = normalize_output_formats(&translation_intent.output_formats)?;
+    // A live Zotero source must queue the same worker-discovered route the
+    // wizard previewed; the offline preview only ever routes explicit
+    // discovery evidence and would otherwise queue phantom children.
+    let route = if is_zotero_source(&source) && source.fake_zotero_items.is_none() {
+        preview_zotero_route_from_worker(executor, &source, config, 20, root)?
+    } else {
+        preview_route(&source, &mode, config)
+    };
     let mut state = store.load()?;
-    let route = preview_route(&source, &mode, config);
     let now = now_label();
     let runnable = route_is_runnable_for_source(&source, &route);
     let job_id = new_job_id();
@@ -7867,8 +7902,14 @@ fn preview_zotero_route_from_worker<E: RunnerCommandExecutor>(
         }
     }
     if routes.is_empty() {
-        return Ok(preview_route(source, "conversion_only", config));
+        return Ok(vec![zotero_undiscovered_route_item(source)]);
     }
+    let overrides = if config.route_overrides.is_empty() {
+        &source.route_overrides
+    } else {
+        &config.route_overrides
+    };
+    apply_route_overrides(&mut routes, overrides, Some(&config));
     Ok(routes)
 }
 
@@ -8854,10 +8895,31 @@ fn preview_zotero_source(
     source: &BookPipelineSource,
     config: BookPipelinePreviewConfig,
 ) -> Vec<BookPipelineRouteItem> {
-    fake_zotero_items_for_source(source)
-        .into_iter()
+    // A Zotero route can only be previewed from discovery evidence; without it
+    // the item stays blocked. Never fabricate placeholder attachments here —
+    // they would be queued as real children and fail against the live worker.
+    let Some(items) = &source.fake_zotero_items else {
+        return vec![zotero_undiscovered_route_item(source)];
+    };
+    items
+        .iter()
+        .cloned()
         .map(|item| preview_zotero_item(source, item, &config))
         .collect()
+}
+
+fn zotero_undiscovered_route_item(source: &BookPipelineSource) -> BookPipelineRouteItem {
+    BookPipelineRouteItem {
+        id: "zotero-no-attachments".into(),
+        title: source_title(source),
+        source_kind: source.kind.clone(),
+        source_ref: source.selector.clone().unwrap_or_default(),
+        route_kind: "blocked".into(),
+        can_run: false,
+        blocked_reason: Some("No matching Zotero attachment was discovered for this source.".into()),
+        summary: "Adjust the search or filter, or select a specific attachment from bibliographic discovery.".into(),
+        route_override: None,
+    }
 }
 
 fn is_zotero_source(source: &BookPipelineSource) -> bool {
@@ -8943,65 +9005,6 @@ fn preview_zotero_item(
         summary,
         route_override: None,
     }
-}
-
-fn fake_zotero_items_for_source(source: &BookPipelineSource) -> Vec<FakeZoteroItem> {
-    if let Some(items) = &source.fake_zotero_items {
-        return items.clone();
-    }
-    let selector = source.selector.as_deref().unwrap_or("preview");
-    vec![
-        FakeZoteroItem {
-            key: format!("{selector}-DIRECT"),
-            title: "Selectable born-digital PDF".into(),
-            attachment_path: Some(format!("zotero://{selector}/direct.pdf")),
-            has_text_layer: true,
-            dirty_text_layer: false,
-            scanned: false,
-            already_converted: false,
-            prefer_mineru: false,
-        },
-        FakeZoteroItem {
-            key: format!("{selector}-SCAN"),
-            title: "Scanned book PDF".into(),
-            attachment_path: Some(format!("zotero://{selector}/scanned.pdf")),
-            has_text_layer: false,
-            dirty_text_layer: false,
-            scanned: true,
-            already_converted: false,
-            prefer_mineru: false,
-        },
-        FakeZoteroItem {
-            key: format!("{selector}-MINERU"),
-            title: "Layout-sensitive paper".into(),
-            attachment_path: Some(format!("zotero://{selector}/mineru.pdf")),
-            has_text_layer: false,
-            dirty_text_layer: false,
-            scanned: true,
-            already_converted: false,
-            prefer_mineru: true,
-        },
-        FakeZoteroItem {
-            key: format!("{selector}-DIRTY"),
-            title: "Dirty Chinese text layer".into(),
-            attachment_path: Some(format!("zotero://{selector}/dirty.pdf")),
-            has_text_layer: true,
-            dirty_text_layer: true,
-            scanned: false,
-            already_converted: false,
-            prefer_mineru: false,
-        },
-        FakeZoteroItem {
-            key: format!("{selector}-DONE"),
-            title: "Already converted attachment".into(),
-            attachment_path: Some(format!("zotero://{selector}/done.pdf")),
-            has_text_layer: true,
-            dirty_text_layer: false,
-            scanned: false,
-            already_converted: true,
-            prefer_mineru: false,
-        },
-    ]
 }
 
 fn scan_artifacts(output_dir: &Path) -> Result<Vec<BookPipelineArtifact>, String> {
@@ -20263,6 +20266,105 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    fn zotero_query_filter_source() -> BookPipelineSource {
+        BookPipelineSource {
+            kind: "zotero_filter".into(),
+            title: Some("Title search".into()),
+            path: None,
+            selector: Some("query=Der wirtschaftliche Wert".into()),
+            runner_behavior: None,
+            translation_strategy: None,
+            adapter_command: None,
+            fake_zotero_items: None,
+            route_overrides: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn zotero_filter_queue_discovers_real_children_from_worker() {
+        let root = temp_root("zotero-filter-queue-discovery");
+        let worker_root = fake_zotero_worker_root(&root);
+        let store = BookPipelineStore::for_test(&root);
+
+        let job = queue_standard_job_for_root(
+            &store,
+            &ZoteroRoutePreviewExecutor,
+            zotero_query_filter_source(),
+            "conversion_only".into(),
+            fast_translation_intent(),
+            BookPipelinePreviewConfig {
+                has_paddleocr_credentials: false,
+                has_mineru_credentials: true,
+                route_overrides: BTreeMap::from([("SCAN".into(), "direct".into())]),
+            },
+            &worker_root,
+        )
+        .unwrap();
+
+        assert_eq!(job.kind, "collection");
+        assert_eq!(job.status, STATUS_READY);
+        let route_ids: Vec<&str> = job.route.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(route_ids, ["DIRECT", "SCAN", "MINERU", "DIRTY", "DONE"]);
+        assert!(job.route.iter().all(|item| !item.id.contains("query=")));
+        let scan = job.route.iter().find(|item| item.id == "SCAN").unwrap();
+        assert_eq!(scan.route_kind, "direct_text");
+        assert!(scan.can_run);
+        assert_eq!(scan.route_override.as_deref(), Some("direct"));
+
+        assert_eq!(job.children.len(), 5);
+        for child in &job.children {
+            assert_eq!(child.source.kind, "zotero_attachment");
+            let selector = child.source.selector.as_deref().unwrap();
+            assert!(route_ids.contains(&selector));
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    struct ZoteroEmptyDiscoveryExecutor;
+
+    impl RunnerCommandExecutor for ZoteroEmptyDiscoveryExecutor {
+        fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+            assert_eq!(command.label, "Zotero discovery dry-run");
+            Ok(RunnerCommandResult {
+                stdout: String::new(),
+                stderr: String::new(),
+                log_summary: vec!["Zotero dry-run found nothing".into()],
+            })
+        }
+    }
+
+    #[test]
+    fn zotero_filter_queue_with_no_matches_blocks_without_demo_children() {
+        let root = temp_root("zotero-filter-queue-no-matches");
+        let worker_root = fake_zotero_worker_root(&root);
+        let store = BookPipelineStore::for_test(&root);
+
+        let job = queue_standard_job_for_root(
+            &store,
+            &ZoteroEmptyDiscoveryExecutor,
+            zotero_query_filter_source(),
+            "conversion_only".into(),
+            fast_translation_intent(),
+            BookPipelinePreviewConfig::default(),
+            &worker_root,
+        )
+        .unwrap();
+
+        assert_eq!(job.status, STATUS_BLOCKED);
+        assert_eq!(job.route.len(), 1);
+        assert_eq!(job.route[0].route_kind, "blocked");
+        assert!(!job.route[0].can_run);
+        assert!(job.route[0]
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("No matching Zotero attachment")));
+        assert!(job
+            .children
+            .iter()
+            .all(|child| !child.id.contains("-DIRECT") && child.status != STATUS_READY));
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn zotero_conversion_records_markdown_artifact_and_upload_key() {
         let root = temp_root("zotero-conversion-success");
@@ -21287,17 +21389,7 @@ mod tests {
 
     #[test]
     fn zotero_preview_blocks_only_items_that_need_credentials_or_manual_review() {
-        let source = BookPipelineSource {
-            kind: "zotero_collection".into(),
-            title: Some("Queue".into()),
-            path: None,
-            selector: Some("COLLECTION".into()),
-            runner_behavior: None,
-            translation_strategy: None,
-            adapter_command: None,
-            fake_zotero_items: None,
-            route_overrides: BTreeMap::new(),
-        };
+        let source = fake_collection_source();
 
         let route = preview_route(
             &source,
