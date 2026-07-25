@@ -259,6 +259,20 @@ function SourceStep({ copy, draft, busy, onDraftChange, onChooseFolder, onChoose
             {copy.textCleanup}
           </label>
         )}
+        {/* secondPassEnabled was wired end to end but had no control anywhere, so
+            every job ran the reflection pass at its default and nobody could
+            decline the extra spend. Expert mode drives its own passes and forces
+            this off in the intent, so the box only applies to fast mode. */}
+        {draft.mode !== "conversion_only" && draft.translationMode === "fast" && (
+          <label>
+            <input
+              type="checkbox"
+              checked={draft.secondPassEnabled}
+              onChange={(event) => onDraftChange({ secondPassEnabled: event.target.checked })}
+            />
+            {copy.secondPass}
+          </label>
+        )}
         {draft.mode !== "conversion_only" && (
           <span className="pl-format-checks">
             {copy.intentOutput}

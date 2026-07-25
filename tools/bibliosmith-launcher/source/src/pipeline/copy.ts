@@ -7,6 +7,7 @@ export function pipelineCopy(locale: PipelineLocale) {
     title: zh ? "Book Pipeline" : "Book Pipeline",
     provider: zh ? "模型后端" : "Model provider",
     textCleanup: zh ? "翻译时修复段内 OCR / 排版瑕疵" : "Fix within-paragraph OCR / layout defects while translating",
+    secondPass: zh ? "反思二遍（更慢，约两倍模型开销）" : "Reflection second pass (slower, roughly double the model spend)",
     continueStage: zh ? "继续下一阶段" : "Continue",
     recheckHandoff: zh ? "重新检查交接" : "Recheck handoff",
     runTranslation: zh ? "运行翻译（将发送正文）" : "Run translation (sends source text)",
