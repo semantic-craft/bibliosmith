@@ -99,7 +99,7 @@ import {
   type TutorialHistoryEntry,
   type TutorialKind,
 } from "./shell";
-import { commitDate, formatDownloadProgress, nowLabel, sleep, versionFromDate } from "./lib/format";
+import { UNKNOWN_VALUE, commitDate, formatDownloadProgress, nowLabel, sleep, versionFromDate } from "./lib/format";
 import launcherVersionManifest from "../launcher-version.json";
 import {
   PipelineWorkbench,
@@ -1099,6 +1099,10 @@ export default function App() {
     }
   }, [addActivity, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, startBiblioSmithProgress]);
 
+  // The outcome is read off the response instead of being asserted: this used to
+  // log "up to date" unconditionally, so a reported update was still announced as
+  // latest. `promptWhenUpdate` was accepted and then never used, which left the
+  // two user-initiated call sites with no feedback beyond the activity list.
   const checkLauncher = useCallback(async (promptWhenUpdate = false, background = false) => {
     if (launcherCheckInProgressRef.current) return;
     launcherCheckInProgressRef.current = true;
@@ -1107,14 +1111,18 @@ export default function App() {
     try {
       const info = await checkLauncherUpdates();
       setLauncherUpdate(info);
-      addActivity("success", copy.launcherLatest);
+      const message = info.hasUpdate ? copy.launcherFound(info.latestVersion) : copy.launcherLatest;
+      addActivity(info.hasUpdate ? "warning" : "success", message);
+      if (promptWhenUpdate) showFloatingToast(message, info.hasUpdate ? "warning" : "success");
     } catch (error) {
-      addActivity("error", copy.launcherCheckFailed(String(error)));
+      const message = copy.launcherCheckFailed(String(error));
+      addActivity("error", message);
+      if (promptWhenUpdate) showFloatingToast(message, "error");
     } finally {
       launcherCheckInProgressRef.current = false;
       if (!background) setBusy((value) => (value === "launcher-check" ? null : value));
     }
-  }, [addActivity, copy]);
+  }, [addActivity, copy, showFloatingToast]);
 
   useEffect(() => {
     const unlistenRuntime = listenRuntimeProgress((progress) => {
@@ -1646,7 +1654,10 @@ export default function App() {
   const firstCommit = commits[0];
   const repoReady = Boolean(state?.repoReady);
   const repoStatus = state?.repoStatus ?? "missing";
-  const repoPath = state?.repoRoot || "D:\\BiblioSmith";
+  // Only empty when the launcher state could not be read at all, so there is no
+  // path to name. It used to fall back to a Windows path, which Settings and the
+  // workspace-unavailable copy then showed verbatim on macOS.
+  const repoPath = state?.repoRoot || UNKNOWN_VALUE;
   const repoCanAutoPrepare = !repoReady && (repoStatus === "missing" || repoStatus === "empty");
   const repoIsEmpty = !repoReady && repoStatus === "empty";
   const repoIsOccupied = !repoReady && repoStatus === "occupied";
@@ -1672,7 +1683,14 @@ export default function App() {
       : unavailableRepoLabel;
   const biblioSmithStatus = biblioSmithBusy ? copy.preparing : repoReady ? copy.projectReady : unavailableRepoLabel;
   const biblioSmithStatusTone: "success" | "warning" | "muted" = biblioSmithBusy ? "warning" : repoReady ? "success" : "muted";
-  const latestBiblioSmithUpdated = firstCommit ? commitDate(firstCommit) : repoReady ? commitDate(firstCommit) : unavailableRepoLabel;
+  // A ready repo with no commit list yet has no timestamp to show. This used to
+  // call commitDate(undefined) on purpose, which returned a hardcoded date the
+  // card then presented as the project's real last-updated time.
+  const latestBiblioSmithUpdated = firstCommit
+    ? commitDate(firstCommit)
+    : repoReady
+      ? UNKNOWN_VALUE
+      : unavailableRepoLabel;
   const biblioSmithPrimaryLabel = repoReady ? copy.openBooks : repoCanAutoPrepare ? copy.prepareProject : copy.changeProjectPath;
   const BiblioSmithPrimaryIcon = repoReady ? FolderOpen : repoCanAutoPrepare ? Download : FolderOpen;
   const biblioSmithSecondaryLabel = repoReady ? copy.viewProject : repoCanAutoPrepare ? copy.changeProjectPath : copy.viewProject;
