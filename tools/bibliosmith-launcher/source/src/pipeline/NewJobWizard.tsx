@@ -477,12 +477,17 @@ export function NewJobWizard(props: WizardProps) {
   const [step, setStep] = useState(1);
   const [launching, setLaunching] = useState(false);
 
-  // Entering the preflight step refreshes the route preview once; the user can
-  // re-enter the step to re-run it after changing the source or intent.
+  // Entering the preflight step refreshes the route preview, and so does
+  // changing anything this step feeds into it. The credential chips below are
+  // the only such control, and every draft change clears the preview upstream,
+  // so without re-running here a chip would empty the route table and leave
+  // "Next" disabled with no way back except stepping out of the step and in
+  // again. Keyed on the committed draft, so the request carries the new value
+  // rather than racing it.
   useEffect(() => {
     if (step === 2) onPreview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }, [step, draft.hasPaddleocrCredentials, draft.hasMineruCredentials]);
 
   const missing = sourceMissing(draft);
   const nextDisabled = missing || busy === "folder" || busy === "markdown" || busy === "zotero";
