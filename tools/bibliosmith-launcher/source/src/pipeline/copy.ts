@@ -56,7 +56,6 @@ export function pipelineCopy(locale: PipelineLocale) {
     // Shelf frame
     inboxTitle: zh ? "书架" : "Bookshelf",
     newJob: zh ? "添加书" : "Add a book",
-    ocrBudget: zh ? "今日 OCR 预算" : "OCR budget today",
     inboxEmptyTitle: zh ? "你的书架还空着" : "Your shelf is empty",
     inboxEmptyBody: zh
       ? "放一本书上来，BiblioSmith 会整理文字、翻译成中文、做成电子书。开始翻译前、成书前会各问你一次，其余都自动。"
@@ -271,13 +270,11 @@ export function pipelineCopy(locale: PipelineLocale) {
     thSha: zh ? "SHA-256" : "SHA-256",
     thValidation: zh ? "校验" : "Validation",
     thProducer: zh ? "产自" : "Produced by",
-    thOpen: zh ? "打开" : "Open",
     formatBilingualShort: zh ? "双语EPUB" : "Bilingual EPUB",
     artifactsEmpty: zh ? "尚无注册工件。工件在各阶段完成时登记：路径、SHA-256、产出阶段与校验状态。" : "No registered artifacts yet. Artifacts are registered as stages complete: path, SHA-256, producer stage, and validation state.",
     validationOk: zh ? "✓" : "✓",
     validationFailed: zh ? "✗" : "✗",
     validationUnknown: zh ? "—" : "—",
-    openDisabledNote: zh ? "逐工件打开等待 runner 导航命令；请用任务级打开。" : "Per-artifact open waits on a runner navigation command; use the job-level open.",
 
     // Approval tab
     gateTranslation: zh ? "译前披露审批" : "Translation disclosure",

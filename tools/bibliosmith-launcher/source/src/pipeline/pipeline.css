@@ -117,18 +117,6 @@
 .pl-topbar h1 { margin: 0; color: var(--ink); font-size: 19px; }
 .pl-topbar .pl-crumb { color: var(--muted); font-size: 12.5px; }
 .pl-spacer { flex: 1; }
-.pl-budget-pill {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 190px;
-  padding: 6px 12px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--surface);
-}
-.pl-budget-pill .pl-bl { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
-.pl-budget-pill .pl-bl b { color: var(--ink); }
 
 /* ---------- shelf ---------- */
 

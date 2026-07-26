@@ -73,12 +73,6 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
       <div className="pl-topbar">
         <h1>{copy.inboxTitle}</h1>
         <span className="pl-spacer" />
-        <div className="pl-budget-pill" title={copy.ocrBudget}>
-          <div className="pl-bl">
-            <span>{copy.ocrBudget}</span>
-            <b className="pl-num">—</b>
-          </div>
-        </div>
         {!wizardOpen && (
           <button className="pl-btn primary" type="button" onClick={() => setWizardOpen(true)}>
             <Plus size={15} />

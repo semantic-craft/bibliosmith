@@ -31,7 +31,6 @@ export function ArtifactsTab({ unit, copy }: TabProps) {
             <th>{copy.thSha}</th>
             <th>{copy.thValidation}</th>
             <th>{copy.thProducer}</th>
-            <th>{copy.thOpen}</th>
           </tr>
         </thead>
         <tbody>
@@ -49,9 +48,6 @@ export function ArtifactsTab({ unit, copy }: TabProps) {
                   {artifact.producer
                     ? `${stageLabel(artifact.producer.stageId, copy)} · ${copy.attemptLabel(artifact.producer.attempt)}`
                     : "—"}
-                </td>
-                <td>
-                  <span className="pl-muted-note" title={copy.openDisabledNote}>—</span>
                 </td>
               </tr>
             );

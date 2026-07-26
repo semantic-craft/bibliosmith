@@ -1751,7 +1751,6 @@ export default function App() {
   const showingBiblioSmithDownloadHud = biblioSmithDownloadState !== "idle" && !biblioSmithDownloadDismissed;
   const biblioSmithProgressLabel = formatDownloadProgress(copy, biblioSmithProgress);
   const biblioSmithHudMessage = biblioSmithDownloadMessage || biblioSmithProgressLabel || copy.biblioSmithProgressDefault;
-  const activeGlobalProgress = null;
   const nodeModulesProgressLabel = formatDownloadProgress(copy, nodeModulesProgress);
   const nodeModulesHudMessage = nodeModulesDownloadMessage || nodeModulesProgressLabel || copy.nodeModulesInstalling;
   const runtimeProgressLabel = formatDownloadProgress(copy, runtimeProgress);
@@ -1839,7 +1838,6 @@ export default function App() {
         <section className="workspace">
           <FloatingFeedback
             toast={floatingToast}
-            globalProgress={activeTab === "overview" || activeTab === "updates" ? activeGlobalProgress : null}
             biblioSmithVisible={showingBiblioSmithDownloadHud}
             biblioSmithTitle={copy.biblioSmithProgressTitle}
             biblioSmithState={biblioSmithDownloadState}

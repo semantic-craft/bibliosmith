@@ -1437,18 +1437,6 @@ export function readBookPipelineTranslationSample(jobId: string, childId: string
   return invoke<BookPipelineTranslationSampleReport>("read_book_pipeline_translation_sample", { jobId, childId });
 }
 
-export function exportBookPipelineDiagnostic(jobId: string, profile: "local-full" | "redacted-support" | "public-issue") {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<Record<string, unknown>>({
-      schemaVersion: BOOK_PIPELINE_JOB_SCHEMA_VERSION,
-      profile,
-      status: "completed",
-      currentStageId: "validate_reading",
-      stages: [],
-    });
-  }
-  return invoke<Record<string, unknown>>("export_book_pipeline_diagnostic", { jobId, profile });
-}
 
 export function listenOpenCodeDownloadProgress(
   callback: (payload: DownloadProgress) => void,
