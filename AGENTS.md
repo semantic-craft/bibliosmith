@@ -53,12 +53,14 @@ Keep upstream license files. Do not copy upstream sample books, release EPUBs, c
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues; external PRs are not a triage request surface. See `docs/agents/issue-tracker.md`.
+Issues are tracked in GitHub Issues; external PRs are not a triage request surface.
+
+New issues and all live work go in `semantic-craft/bibliosmith`. Pass `--repo` explicitly instead of inferring it from `git remote -v`. `semantic-craft/bibliosmith-private-archive` is a read-only historical reference — GitHub has it archived, so creating issues, commenting, and closing are all rejected there; read it with `gh issue view <N> --repo semantic-craft/bibliosmith-private-archive`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-Use the canonical labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+Use the labels that exist: `ready-for-agent`, `needs-decision`, `blocked`, `wontfix`, plus the kind labels. An untriaged issue carries no workflow label. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-This repo uses a single-context layout: root `CONTEXT.md` plus `docs/adr/`. See `docs/agents/domain.md`.
+This repo uses a single-context layout: root `CONTEXT.md` plus `docs/adr/`. See `docs/agents/domain.md`. Migrated planning documents (the PRD and the Wayfinder map) live in `docs/planning/`.

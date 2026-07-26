@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-17
-- Decision ticket: #51
+- Decision ticket: archive #51 (`semantic-craft/bibliosmith-private-archive`)
 
 ## Context
 
@@ -53,6 +53,21 @@ The existing staged runner remains gated independently from notification scope.
 The launcher exposes separate Continue and Approve actions: approval records a
 current hash-bound decision but does not execute the next stage, and the
 translation action explicitly warns that it sends source text.
+
+### Reaffirmed against the PRD's story 16 (2026-07-26)
+
+The migrated PRD asked, in its story 16, for the whole chain after handoff to
+advance automatically to a quiescent point. That wording conflicts with the
+paragraph above. The conflict was raised as archive issue `#88`, which offered
+two options: add a separate loop-advance command, or treat the PRD wording as
+outdated and rewrite it.
+
+**Option B was chosen: the PRD wording changes and no code is written.** This
+ADR is the later and more authoritative decision, one stage per `advance` call
+is the intended shape rather than a gap, and
+`docs/planning/prd-monorepo-dual-mode-pipeline.md` now states story 16 as
+"advance stage by stage, stop at the gates". Archive `#88` cannot be closed —
+that repository is read-only — so this is where the decision lives.
 
 ## Consequences
 

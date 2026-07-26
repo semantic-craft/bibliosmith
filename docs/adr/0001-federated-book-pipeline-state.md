@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-17
-- Decision ticket: #50
+- Decision ticket: archive #50 (`semantic-craft/bibliosmith-private-archive`)
 
 ## Context
 
