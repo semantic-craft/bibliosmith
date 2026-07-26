@@ -9,9 +9,10 @@ name: Release Launcher
 # and write on semantic-craft/bibliosmith-releases.
 #
 # Release flow: update tools/bibliosmith-launcher/source/launcher-version.json
-# and tools/bibliosmith-launcher/source/RELEASE_NOTES.md, merge to main, then push a
-# matching tag (e.g. v1.4.0). The tag runs the full CI suite first and the build
-# only starts once it is green, so a tag on a red tree publishes nothing.
+# and tools/bibliosmith-launcher/source/RELEASE_NOTES.md — whose first line must
+# read `# v<version>` — merge to main, then push a matching tag (e.g. v1.4.0).
+# The tag runs the full CI suite first and the build only starts once it is
+# green, so a tag on a red tree publishes nothing.
 
 on:
   push:
@@ -47,13 +48,40 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify version matches tag
+      # Two independent checks, both reported before the step exits: a run that
+      # fails one still tells you where the other stands, which is what makes a
+      # throwaway `-f tag=v0.0.0-gate-check` dispatch worth running.
+      #
+      # The notes check exists because only the tag used to be verified. The
+      # release body is whatever RELEASE_NOTES.md happens to say, and nothing
+      # tied the two together, so a tag could publish a download page describing
+      # an older version — v1.12.1 was one step away from shipping v1.12.0's
+      # notes, which mentioned none of its changes. The file names its own
+      # version on the first line and that is what gets compared; it is compared
+      # against launcher-version.json rather than the tag so the verdict is the
+      # same whether or not the tag itself is right.
+      - name: Verify version and release notes match the tag
         run: |
+          failed=0
           version=$(node -p "require('./launcher-version.json').version")
+
           if [ "v$version" != "$RELEASE_TAG" ]; then
             echo "launcher-version.json is v$version but the release tag is $RELEASE_TAG" >&2
-            exit 1
+            failed=1
+          else
+            echo "launcher-version.json matches the release tag ($RELEASE_TAG)"
           fi
+
+          heading=$(head -n 1 RELEASE_NOTES.md)
+          if [ "$heading" != "# v$version" ]; then
+            echo "RELEASE_NOTES.md starts with '$heading', expected '# v$version'" >&2
+            echo "Rewrite the notes for this version before tagging: they become the release body verbatim." >&2
+            failed=1
+          else
+            echo "RELEASE_NOTES.md is written for v$version"
+          fi
+
+          exit "$failed"
 
       - name: Install JS dependencies
         run: npm ci
