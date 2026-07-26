@@ -8,7 +8,6 @@ import {
   hashShort,
   pendingGates,
   routeKindLabel,
-  routeTone,
   stageLabel,
   statusLabel,
   unitAdvanceAction,

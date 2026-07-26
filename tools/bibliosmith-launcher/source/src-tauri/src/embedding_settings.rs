@@ -88,7 +88,9 @@ pub fn delete_embedding_credential() -> Result<(), String> {
 /// lets the UI test a key the user just typed but has not saved yet; when
 /// absent the stored key is used.
 #[tauri::command]
-pub fn test_embedding_connection(api_key: Option<String>) -> Result<EmbeddingConnectionResult, String> {
+pub fn test_embedding_connection(
+    api_key: Option<String>,
+) -> Result<EmbeddingConnectionResult, String> {
     let key = match api_key {
         Some(key) if !key.trim().is_empty() => key.trim().to_string(),
         _ => keychain_read().ok_or_else(|| "No API key stored for this slot.".to_string())?,

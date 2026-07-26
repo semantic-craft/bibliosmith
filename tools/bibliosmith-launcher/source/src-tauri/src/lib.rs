@@ -324,8 +324,14 @@ struct RuntimeProgressEmitter {
     app: tauri::AppHandle,
 }
 
+// Pull and Http11 are never constructed: these enums enumerate the phases and
+// HTTP versions the helpers below know how to map, and the current tests only
+// exercise a subset. Kept rather than trimmed to the tested subset so the
+// mapping each helper implements stays readable as a whole; allowed explicitly
+// so `-D warnings` does not have to be relaxed for the whole crate.
 #[cfg(test)]
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum GitProgressPhase {
     Clone,
     Fetch,
@@ -334,6 +340,7 @@ enum GitProgressPhase {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 enum GitHttpMode {
     Http2,
     Http11,
@@ -797,7 +804,10 @@ fn set_repo_folder(repo_root: String) -> Result<ActionResult, String> {
         write_launcher_config(&existing_repo)?;
         return Ok(ActionResult {
             ok: true,
-            message: format!("已设置 BiblioSmith 项目目录：{}", display_path(&existing_repo)),
+            message: format!(
+                "已设置 BiblioSmith 项目目录：{}",
+                display_path(&existing_repo)
+            ),
             repo_root: Some(display_path(&existing_repo)),
             requires_download: Some(false),
         });
@@ -818,7 +828,9 @@ fn set_repo_folder(repo_root: String) -> Result<ActionResult, String> {
 }
 
 #[tauri::command]
-async fn check_bibliosmith_updates(locale: Option<String>) -> Result<BiblioSmithUpdateInfo, String> {
+async fn check_bibliosmith_updates(
+    locale: Option<String>,
+) -> Result<BiblioSmithUpdateInfo, String> {
     run_blocking(move || {
         let repo_root = active_bibliosmith_repo_root()?;
         if let Ok(_guard) = BiblioSmithUpdateGuard::try_acquire() {
@@ -873,7 +885,11 @@ async fn prepare_bibliosmith_project(
             Ok(guard) => guard,
             Err(error) => {
                 if is_bibliosmith_repo(&repo_root) {
-                    return bibliosmith_update_info_best_effort(&repo_root, false, locale.as_deref());
+                    return bibliosmith_update_info_best_effort(
+                        &repo_root,
+                        false,
+                        locale.as_deref(),
+                    );
                 }
                 return Err(error);
             }
@@ -916,7 +932,11 @@ async fn sync_bibliosmith_project(
             Ok(guard) => guard,
             Err(error) => {
                 if is_bibliosmith_repo(&repo_root) {
-                    return bibliosmith_update_info_best_effort(&repo_root, false, locale.as_deref());
+                    return bibliosmith_update_info_best_effort(
+                        &repo_root,
+                        false,
+                        locale.as_deref(),
+                    );
                 }
                 return Err(error);
             }
@@ -1559,7 +1579,8 @@ fn launch_opencode_client() -> Result<ActionResult, String> {
     if is_opencode_process_running() {
         return Ok(ActionResult {
             ok: true,
-            message: "OpenCode 已在运行，但未找到可重新打开 BiblioSmith 工作目录的客户端入口。".into(),
+            message: "OpenCode 已在运行，但未找到可重新打开 BiblioSmith 工作目录的客户端入口。"
+                .into(),
             repo_root: None,
             requires_download: None,
         });
@@ -1654,7 +1675,7 @@ fn launch_opencode_candidate(candidate: &Path, working_dir: &Path) -> Result<(),
         command
             .spawn()
             .map_err(|err| format!("无法启动 OpenCode：{err}"))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
@@ -1700,6 +1721,9 @@ fn git_transfer_args_for_mode(args: &[&str], http_mode: GitHttpMode) -> Vec<Stri
     git_args
 }
 
+// Only terminate_process_tree's Windows branch calls this, so it is dead code
+// on the macOS build CI lints; the unit test below covers it on every platform.
+#[cfg(any(target_os = "windows", test))]
 fn taskkill_tree_args(pid: u32) -> Vec<String> {
     vec![
         "/PID".to_string(),
@@ -1764,8 +1788,9 @@ fn git_output(repo_root: &Path, args: &[&str]) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     command.creation_flags(0x08000000);
     let output = command.output().map_err(|err| {
-        let message =
-            format!("无法执行 git：{err}。请确认已安装 Git，或重新运行 BiblioSmith Launcher 安装包。");
+        let message = format!(
+            "无法执行 git：{err}。请确认已安装 Git，或重新运行 BiblioSmith Launcher 安装包。"
+        );
         append_launcher_log(
             "ERROR",
             format!(
@@ -1788,7 +1813,7 @@ fn git_output(repo_root: &Path, args: &[&str]) -> Result<String, String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let message = if stderr.is_empty() {
-            format!("git {:?} 执行失败", args)
+            format!("git {args:?} 执行失败")
         } else {
             stderr
         };
@@ -2955,7 +2980,7 @@ fn download_runtime_archive_from_url(
     }
     file.flush().map_err(|err| err.to_string())?;
     if total > 0 && downloaded < total {
-        return Err(format!("下载未完成：{} / {} bytes", downloaded, total));
+        return Err(format!("下载未完成：{downloaded} / {total} bytes"));
     }
     if let Some(emitter) = progress {
         emitter.emit(
@@ -3943,7 +3968,10 @@ fn launcher_config_path() -> Result<PathBuf, String> {
     let base = dirs::config_local_dir()
         .or_else(dirs::data_local_dir)
         .ok_or_else(|| "无法定位用户配置目录。".to_string())?;
-    Ok(base.join("BiblioSmith").join("launcher").join("config.json"))
+    Ok(base
+        .join("BiblioSmith")
+        .join("launcher")
+        .join("config.json"))
 }
 
 fn read_launcher_config() -> Option<LauncherConfig> {
@@ -4276,6 +4304,9 @@ fn registry_value_tail(output: &str, name: &str) -> Option<String> {
     })
 }
 
+// Only the Windows system_proxy_candidates reads the registry values this
+// parses; the non-Windows build has no caller and no test.
+#[cfg(target_os = "windows")]
 fn parse_proxy_server_list(value: &str) -> Vec<NetworkProxySettings> {
     let mut proxies = Vec::new();
     for part in value.split(';') {
@@ -4487,7 +4518,10 @@ fn persist_user_bibliosmith_home_env(repo_root: &Path) {
             );
         }
         Err(error) => {
-            append_launcher_log("WARN", format!("setx BIBLIOSMITH_HOME spawn failed: {error}"));
+            append_launcher_log(
+                "WARN",
+                format!("setx BIBLIOSMITH_HOME spawn failed: {error}"),
+            );
         }
     }
 }
@@ -5450,7 +5484,10 @@ fn opencode_asset_name() -> Result<String, String> {
 
 fn opencode_install_root() -> Result<PathBuf, String> {
     let base = dirs::data_local_dir().ok_or_else(|| "无法定位用户本地数据目录。".to_string())?;
-    Ok(base.join("BiblioSmith").join("tools").join("opencode-desktop"))
+    Ok(base
+        .join("BiblioSmith")
+        .join("tools")
+        .join("opencode-desktop"))
 }
 
 fn opencode_client_candidates(install_root: &Path) -> Vec<PathBuf> {
@@ -5847,8 +5884,7 @@ async fn download_file(
             ),
         );
         return Err(format!(
-            "{label} 下载未完成，已保留临时文件以便下次继续：{} / {} bytes",
-            downloaded, progress_total
+            "{label} 下载未完成，已保留临时文件以便下次继续：{downloaded} / {progress_total} bytes"
         ));
     }
     if destination.exists() {
@@ -5975,7 +6011,10 @@ pub fn run() {
         ))
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window missing");
-            let _ = window.set_title(&format!("BiblioSmith Launcher {}", launcher_current_version()));
+            let _ = window.set_title(&format!(
+                "BiblioSmith Launcher {}",
+                launcher_current_version()
+            ));
             append_launcher_log(
                 "INFO",
                 format!(
@@ -6510,7 +6549,10 @@ mod tests {
 
     #[test]
     fn bibliosmith_home_repo_root_ignores_blank_values() {
-        assert_eq!(bibliosmith_home_repo_root_from_value(Some("  ".into())), None);
+        assert_eq!(
+            bibliosmith_home_repo_root_from_value(Some("  ".into())),
+            None
+        );
         assert_eq!(bibliosmith_home_repo_root_from_value(None), None);
     }
 
@@ -6755,7 +6797,8 @@ EN:
 
     #[test]
     fn bibliosmith_diverged_message_includes_safe_counts() {
-        let message = bibliosmith_diverged_message(Path::new(r"D:\BiblioSmith"), "origin/main", 3, 64);
+        let message =
+            bibliosmith_diverged_message(Path::new(r"D:\BiblioSmith"), "origin/main", 3, 64);
 
         assert!(message.contains("本地分支和 GitHub 已分叉"));
         assert!(message.contains("本地多 3 个 commit"));
@@ -6944,7 +6987,8 @@ EN:
         let export_parent = temp_test_path("diagnostic-export-target");
         fs::create_dir_all(&log_dir).expect("log directory should be created");
         fs::create_dir_all(&export_parent).expect("export directory should be created");
-        fs::write(log_dir.join("bibliosmith-launcher.log"), "current").expect("current log written");
+        fs::write(log_dir.join("bibliosmith-launcher.log"), "current")
+            .expect("current log written");
         fs::write(log_dir.join("bibliosmith-launcher.log.1"), "previous")
             .expect("rotated log written");
 
@@ -6979,7 +7023,8 @@ EN:
             "second update job should be rejected while the first job is active"
         );
         drop(first);
-        let second = BiblioSmithUpdateGuard::try_acquire().expect("guard should release after drop");
+        let second =
+            BiblioSmithUpdateGuard::try_acquire().expect("guard should release after drop");
         drop(second);
     }
 }

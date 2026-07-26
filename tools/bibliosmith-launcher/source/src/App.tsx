@@ -4,7 +4,6 @@ import {
   BookOpen,
   Download,
   FolderOpen,
-  RefreshCcw,
 } from "lucide-react";
 import {
   BOOK_PIPELINE_STATE_SCHEMA_VERSION,
@@ -65,7 +64,6 @@ import {
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
-  CommitInfo,
   DiagnosticLogSettings,
   LauncherSettings,
   LauncherState,
@@ -80,7 +78,7 @@ import {
   RuntimeStatus,
   RuntimeToolStatus,
 } from "./types";
-import { copies, detectLocale, type Copy, type LanguageSetting, type Locale } from "./i18n";
+import { copies, detectLocale, type LanguageSetting, type Locale } from "./i18n";
 import { type ProductCardProps } from "./components";
 import { OverviewPage } from "./pages/overview";
 import { UpdatesPage } from "./pages/updates";
@@ -463,7 +461,10 @@ export default function App() {
     } finally {
       setPipelineBusy(null);
     }
-  }, [addActivity, buildPipelineSource, pipelineConfig, pipelineDraft.digestMode, pipelineDraft.mode, pipelineDraft.outputFormats, pipelineDraft.providerProfileId, pipelineDraft.secondPassEnabled, pipelineDraft.textCleanup, pipelineDraft.translationMode, showFloatingToast]);
+    // providerConfigId selects the billing slot within a brand and is read at
+    // the fast-route branch above; leaving it out of the deps kept the memoized
+    // callback on the slot that was selected when the profile last changed.
+  }, [addActivity, buildPipelineSource, pipelineConfig, pipelineDraft.digestMode, pipelineDraft.mode, pipelineDraft.outputFormats, pipelineDraft.providerConfigId, pipelineDraft.providerProfileId, pipelineDraft.secondPassEnabled, pipelineDraft.textCleanup, pipelineDraft.translationMode, showFloatingToast]);
 
   const retryPipeline = useCallback(async (jobId: string) => {
     setPipelineBusy("retry");
@@ -907,7 +908,7 @@ export default function App() {
   }, [copy.biblioSmithUpdateStarted, copy.preparingBiblioSmith]);
 
   const finishBiblioSmithProgress = useCallback((message: string) => {
-    setBiblioSmithProgress((current) => ({
+    setBiblioSmithProgress(() => ({
       percent: 100,
       downloadedBytes: 100,
       totalBytes: 100,
@@ -1342,7 +1343,7 @@ export default function App() {
       setRefreshInProgress(false);
       setLastRefreshAt(nowLabel());
     }
-  }, [addActivity, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, showFloatingToast, startBiblioSmithProgress]);
+  }, [addActivity, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, startBiblioSmithProgress]);
 
   const stopBiblioSmithDownload = useCallback(async (dismissAfterStop = false) => {
     if (biblioSmithDownloadState !== "downloading" && biblioSmithDownloadState !== "cancelling") return;

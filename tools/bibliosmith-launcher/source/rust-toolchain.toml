@@ -1,3 +1,7 @@
 [toolchain]
 channel = "1.88.0"
 profile = "minimal"
+# The minimal profile ships neither, and rustup installs this toolchain on
+# demand on a hosted runner, so cargo fmt and cargo clippy in CI would fail
+# with "'cargo-fmt' is not installed for the toolchain" without this line.
+components = ["rustfmt", "clippy"]
