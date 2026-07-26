@@ -593,6 +593,16 @@ describe("route vocabulary", () => {
     expect(routeKindLabel("some_future_route", copy)).toBe("some future route");
   });
 
+  // Regression: an empty Zotero discovery used to arrive as the bare "blocked"
+  // kind, which no label covered, so a Chinese UI showed the raw wire string.
+  // The tone was right the whole time — only the label was missing.
+  it("labels an empty discovery in the user's language", () => {
+    const zh = pipelineCopy("zh");
+    expect(routeKindLabel("blocked_no_attachment", zh)).toBe(zh.routeNoAttachment);
+    expect(routeKindLabel("blocked_no_attachment", zh)).not.toBe("blocked no attachment");
+    expect(routeKindLabel("blocked_no_attachment", copy)).toBe(copy.routeNoAttachment);
+  });
+
   it("tones a route by what it means for the user", () => {
     expect(routeTone("direct_text")).toBe("ok");
     expect(routeTone("translation_ready")).toBe("ok");

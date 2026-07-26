@@ -185,6 +185,7 @@ export function pipelineCopy(locale: PipelineLocale) {
     routeRemotePaddle: zh ? "PaddleOCR-VL" : "PaddleOCR-VL",
     routeMineru: zh ? "MinerU 精解" : "MinerU",
     routeDirty: zh ? "脏文本层·已拦截" : "Dirty text layer · blocked",
+    routeNoAttachment: zh ? "未找到附件" : "No attachment found",
     routeAlreadyConverted: zh ? "已有转换" : "Already converted",
     routeMissingCredentials: zh ? "缺少凭证" : "Missing credentials",
     routeTranslationHandoff: zh ? "翻译交接" : "Translation handoff",
