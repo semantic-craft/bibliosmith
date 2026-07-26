@@ -15876,6 +15876,37 @@ mod tests {
         assert!(error.to_string().contains("timed out"), "{error}");
     }
 
+    // A timeout must fire for a child that hung, and only for that. A pipe holds
+    // about 64 KB before `write` blocks, so a child that merely says a lot used
+    // to be indistinguishable from one that stopped responding: nothing read the
+    // pipe until the child exited, and the child could not exit until something
+    // read the pipe. The engine prints its entire run report to stdout at once —
+    // ~474 bytes per chapter, so a book past roughly 140 of them crosses the
+    // buffer — which made this reachable by a long book rather than by a bug.
+    #[test]
+    fn a_talkative_child_is_not_mistaken_for_a_hung_one() {
+        use std::time::Instant;
+
+        const VOLUME: usize = 1024 * 1024;
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(format!(
+            "head -c {VOLUME} /dev/zero | tr '\\0' 'x'; \
+             head -c {VOLUME} /dev/zero | tr '\\0' 'y' >&2"
+        ));
+
+        let started = Instant::now();
+        let output = crate::command_output_with_timeout(&mut process, Duration::from_secs(30))
+            .expect("a child that exits on its own must not be reported as timed out");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), VOLUME, "stdout was truncated");
+        assert_eq!(output.stderr.len(), VOLUME, "stderr was truncated");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the child finished promptly; only a blocked pipe makes this slow"
+        );
+    }
+
     // Every process command the pipeline builds must be a bare name the resolver
     // handles or an already-resolved absolute path; a relative multi-component
     // program would silently depend on the child's cwd.
