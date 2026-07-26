@@ -9,9 +9,13 @@ from pathlib import Path
 from typing import Callable
 
 from .embed import EmbedderProtocol
-from .fulltext import chunk_text, resolve_fulltext, resolve_fulltext_artifact
+from .fulltext import (
+    chunk_text,
+    resolve_fulltext,
+    resolve_fulltext_artifacts,
+)
 from .vector_store import SQLiteVecStore
-from .zotero_db import ZoteroItem, iter_items
+from .zotero_db import ZoteroItem, filtered_item_keys, iter_items
 
 
 ITEM_INDEX_CONTRACT_VERSION = "zfulltext-item-index-v1"
@@ -88,8 +92,12 @@ def sync(
     # dateModified value because a Markdown attachment can arrive later.
     chunk_count = 0
     embedding_profile_id = f"{embedder.cfg.model}:{embedder.cfg.dimensions}"
+    fulltext_artifacts = resolve_fulltext_artifacts(
+        [item.key for item in items],
+        db_path,
+    )
     for it in items:
-        resolved = resolve_fulltext_artifact(it.key, db_path)
+        resolved = fulltext_artifacts.get(it.key)
         if resolved is None:
             store.remove_sync_managed_item_chunks(it.key)
             continue
@@ -300,16 +308,35 @@ def query(
     tag: str | None = None,
     rerank: bool = False,
     candidate_pool: int = 50,
+    db_path: Path | None = None,
 ) -> list[dict]:
     """Top-K semantic search. Supports metadata filters and optional reranking.
 
     Results are deduplicated by parent item key — if both a metadata vector
     and a fulltext chunk match, the best distance wins.
     """
+    filters_active = item_type is not None or year is not None or tag is not None
+    allowed_parent_keys = (
+        filtered_item_keys(
+            db_path,
+            item_type=item_type,
+            year=year,
+            tag=tag,
+        )
+        if filters_active
+        else None
+    )
+    if allowed_parent_keys is not None and not allowed_parent_keys:
+        return []
+
     qv = embedder.embed_query(text)
     can_rerank = rerank and hasattr(embedder, "rerank")
     pool = max(top_k * 3, candidate_pool) if (can_rerank or item_type or year or tag) else top_k
-    raw = store.query(qv, top_k=pool)
+    raw = store.query(
+        qv,
+        top_k=pool,
+        allowed_parent_keys=allowed_parent_keys,
+    )
 
     # Deduplicate by parent key — keep best distance per item
     seen: dict[str, dict] = {}
@@ -352,10 +379,28 @@ def query_fulltext(
     Each result includes ``chunk_text`` (the matched chunk) and optionally
     surrounding chunks via ``context_before`` / ``context_after``.
     """
+    filters_active = item_type is not None or year is not None or tag is not None
+    allowed_parent_keys = (
+        filtered_item_keys(
+            db_path,
+            item_type=item_type,
+            year=year,
+            tag=tag,
+        )
+        if filters_active
+        else None
+    )
+    if allowed_parent_keys is not None and not allowed_parent_keys:
+        return []
+
     qv = embedder.embed_query(text)
     can_rerank = rerank and hasattr(embedder, "rerank")
     pool = max(top_k * 5, candidate_pool)
-    raw = store.query(qv, top_k=pool)
+    raw = store.query(
+        qv,
+        top_k=pool,
+        allowed_parent_keys=allowed_parent_keys,
+    )
 
     # Only keep chunk vectors (key contains #c)
     chunk_hits: list[dict] = []

@@ -344,7 +344,7 @@ def recent(limit: int) -> None:
 @click.argument("query")
 @click.option("-n", "--limit", default=30, type=int)
 def grep(query: str, limit: int) -> None:
-    """Substring search over title + abstract (literal, no embedding)."""
+    """Literal SQL substring search over title, abstract, and creators."""
     items = zotero_db.grep_items(query, limit=limit)
     table = Table(title=f"{len(items)} items match \"{query}\"")
     table.add_column("key", style="green")
