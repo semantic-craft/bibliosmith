@@ -491,6 +491,10 @@ pub struct BookPipelineApprovalReference {
     pub decision: String,
     #[serde(default)]
     pub bound_artifact_hashes: BTreeMap<String, String>,
+    /// When the decision was taken. `#[serde(default)]` because the two pipeline
+    /// gates have been writing this record without one since before it existed.
+    #[serde(default)]
+    pub decided_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -5328,6 +5332,30 @@ fn approve_cleanup_candidate(
         .position(|job| job.id == candidate.job_id)
         .ok_or_else(|| "Book Pipeline job not found for cleanup approval.".to_string())?;
     let now = now_label();
+    // The log is a ring buffer; a record that only lives there is a record that
+    // expires. The two pipeline gates already persist their decisions as
+    // approval references, and a decision to delete someone's source PDF is not
+    // a weaker claim than a decision to promote a translation.
+    let child_job_id = state.jobs[index]
+        .children
+        .first()
+        .map(|child| child.id.clone())
+        .unwrap_or_default();
+    let bound_artifact_hashes = cleanup_bound_artifact_hashes(&state.jobs[index]);
+    state.jobs[index]
+        .approval_references
+        .retain(|approval| approval.gate_id != CLEANUP_GATE_ID);
+    state.jobs[index]
+        .approval_references
+        .push(BookPipelineApprovalReference {
+            approval_id: new_approval_id(),
+            gate_id: CLEANUP_GATE_ID.into(),
+            child_job_id,
+            stage_id: "validate_reading".into(),
+            decision: "approved".into(),
+            bound_artifact_hashes,
+            decided_at: now.clone(),
+        });
     state.jobs[index].log_summary.push(format!(
         "Cleanup approval recorded at {now} for {}; existing cleanup wrapper remains the deletion path",
         candidate.source_ref
@@ -5343,6 +5371,114 @@ fn approve_cleanup_candidate(
                 .into(),
         path: candidate.source_path.or(candidate.markdown_path),
     })
+}
+
+const CLEANUP_GATE_ID: &str = "source_cleanup";
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BookPipelineCleanupApprovalStatus {
+    pub source_ref: String,
+    #[serde(default)]
+    pub job_id: String,
+    #[serde(default)]
+    pub approval_id: String,
+    #[serde(default)]
+    pub decided_at: String,
+    pub approved: bool,
+    pub reason: String,
+}
+
+/// The reading artifacts a cleanup decision is taken against, keyed by artifact
+/// id. Deleting a source PDF is only safe while *these* are the files on disk, so
+/// rebuilding the book invalidates the approval rather than silently carrying it.
+fn cleanup_bound_artifact_hashes(job: &BookPipelineJob) -> BTreeMap<String, String> {
+    job.children
+        .iter()
+        .flat_map(|child| child.artifacts.iter())
+        .chain(job.artifacts.iter())
+        .filter(|artifact| artifact.kind.starts_with("reading_"))
+        .filter_map(|artifact| {
+            artifact
+                .sha256
+                .as_deref()
+                .map(|sha256| (artifact.artifact_id.clone(), sha256.to_string()))
+        })
+        .collect()
+}
+
+/// Whether a recorded cleanup approval still describes the book on disk. This is
+/// the check an out-of-band deletion script needs: an approval is a statement
+/// about specific bytes, and it stops applying the moment those bytes change.
+fn cleanup_approval_is_current(job: &BookPipelineJob) -> bool {
+    let Some(approval) = job
+        .approval_references
+        .iter()
+        .find(|approval| approval.gate_id == CLEANUP_GATE_ID)
+    else {
+        return false;
+    };
+    if approval.bound_artifact_hashes.is_empty() {
+        return false;
+    }
+    let current = cleanup_bound_artifact_hashes(job);
+    approval.bound_artifact_hashes == current
+}
+
+/// Read-only entry point for the out-of-band cleanup scripts: given a source
+/// reference they already know, say whether a still-current approval exists. The
+/// launcher deletes nothing here and never has.
+#[tauri::command]
+pub fn verify_book_pipeline_cleanup_approval(
+    source_ref: String,
+) -> Result<BookPipelineCleanupApprovalStatus, String> {
+    let store = BookPipelineStore::default()?;
+    Ok(cleanup_approval_status(&store.load()?, &source_ref))
+}
+
+fn cleanup_approval_status(
+    state: &BookPipelineState,
+    source_ref: &str,
+) -> BookPipelineCleanupApprovalStatus {
+    let matched = state.jobs.iter().find(|job| {
+        job.source.selector.as_deref() == Some(source_ref)
+            || job.source.path.as_deref() == Some(source_ref)
+            || job.id == source_ref
+    });
+    let Some(job) = matched else {
+        return BookPipelineCleanupApprovalStatus {
+            source_ref: source_ref.to_string(),
+            approved: false,
+            reason: "No Book Pipeline job matches this source reference.".into(),
+            ..BookPipelineCleanupApprovalStatus::default()
+        };
+    };
+    let approval = job
+        .approval_references
+        .iter()
+        .find(|approval| approval.gate_id == CLEANUP_GATE_ID);
+    let Some(approval) = approval else {
+        return BookPipelineCleanupApprovalStatus {
+            source_ref: source_ref.to_string(),
+            job_id: job.id.clone(),
+            approved: false,
+            reason: "No source-cleanup approval has been recorded for this book.".into(),
+            ..BookPipelineCleanupApprovalStatus::default()
+        };
+    };
+    let current = cleanup_approval_is_current(job);
+    BookPipelineCleanupApprovalStatus {
+        source_ref: source_ref.to_string(),
+        job_id: job.id.clone(),
+        approval_id: approval.approval_id.clone(),
+        decided_at: approval.decided_at.clone(),
+        approved: current,
+        reason: if current {
+            "A source-cleanup approval is recorded and still matches the built artifacts.".into()
+        } else {
+            "The approved artifacts changed since the approval; re-approve before deleting.".into()
+        },
+    }
 }
 
 fn cleanup_candidates_from_jobs(jobs: &[BookPipelineJob]) -> Vec<BookPipelineCleanupCandidate> {
@@ -5369,6 +5505,7 @@ fn cleanup_candidate_for_job(job: &BookPipelineJob) -> Option<BookPipelineCleanu
         cleanup_markdown_check(markdown),
         cleanup_local_output_check(job),
         cleanup_zotero_child_check(zotero_child_attachment_key.as_deref()),
+        cleanup_validated_reading_check(job),
     ];
     let can_approve = checks.iter().all(|check| check.ok);
     let source_ref = job
@@ -5425,12 +5562,16 @@ fn cleanup_local_output_check(job: &BookPipelineJob) -> BookPipelineCleanupEvide
             );
         }
     }
-    if let Some(artifact) = job.artifacts.iter().find(|artifact| {
-        matches!(
-            artifact.kind.as_str(),
-            "html" | "epub" | "translation_source"
-        )
-    }) {
+    // `html`/`epub`/`translation_source` are conversion-stage outputs; the built
+    // book is `reading_*`. Accepting the former let a book whose reading build
+    // never ran look like it had a deliverable worth deleting the source for.
+    if let Some(artifact) = job
+        .children
+        .iter()
+        .flat_map(|child| child.artifacts.iter())
+        .chain(job.artifacts.iter())
+        .find(|artifact| artifact.kind.starts_with("reading_"))
+    {
         return cleanup_artifact_file_check(
             "local_output",
             artifact,
@@ -5445,6 +5586,32 @@ fn cleanup_local_output_check(job: &BookPipelineJob) -> BookPipelineCleanupEvide
         None,
         None,
     )
+}
+
+/// The candidate list never looked at a single stage status, so a book whose
+/// reading validation failed — or which never reached `build_reading` at all —
+/// counted as "evidence complete" and offered to have its source PDF deleted.
+fn cleanup_validated_reading_check(job: &BookPipelineJob) -> BookPipelineCleanupEvidence {
+    let validated = job.children.iter().any(|child| {
+        stage_ref(child, "validate_reading").is_some_and(|stage| stage.status == STATUS_COMPLETED)
+    });
+    if validated {
+        cleanup_evidence(
+            "validated_reading",
+            true,
+            "Reading validation completed for this book.",
+            None,
+            None,
+        )
+    } else {
+        cleanup_evidence(
+            "validated_reading",
+            false,
+            "Reading validation has not completed for this book.",
+            None,
+            None,
+        )
+    }
 }
 
 fn cleanup_zotero_child_check(zotero_key: Option<&str>) -> BookPipelineCleanupEvidence {
@@ -13151,6 +13318,7 @@ fn approve_translation_gate(job: &mut BookPipelineJob, child_index: usize) -> bo
         stage_id: "approve_translation".into(),
         decision: "approved".into(),
         bound_artifact_hashes,
+        decided_at: now_label(),
     });
 
     let child = &mut job.children[child_index];
@@ -13501,6 +13669,7 @@ fn approve_promotion_gate(job: &mut BookPipelineJob, child_index: usize) -> bool
         stage_id: "approve_promotion".into(),
         decision: "approved".into(),
         bound_artifact_hashes,
+        decided_at: now_label(),
     });
 
     let child = &mut job.children[child_index];
@@ -18434,6 +18603,7 @@ mod tests {
                 "task-manifest".into(),
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             )]),
+            decided_at: now_label(),
         }];
         store.save(&state).unwrap();
 
@@ -22695,22 +22865,170 @@ mod tests {
         let preview = preview_cleanup_candidates(&store).unwrap();
         let candidate = preview.candidates[0].clone();
 
-        assert!(candidate.can_approve);
-        assert!(candidate.checks.iter().all(|check| check.ok));
+        // This fixture never built or validated a reading output, so it is not a
+        // candidate at all: the evidence used to ignore every stage status, and
+        // a book whose validation never ran offered up its source PDF anyway.
+        assert!(!candidate.can_approve);
+        assert!(candidate
+            .checks
+            .iter()
+            .any(|check| check.kind == "validated_reading" && !check.ok));
+        let blocked = approve_cleanup_candidate(&store, &candidate.id, true).unwrap_err();
+        assert!(blocked.contains("validated_reading"), "got: {blocked}");
         assert!(approve_cleanup_candidate(&store, &candidate.id, false)
             .unwrap_err()
             .contains("Explicit cleanup approval"));
+        assert!(source_pdf.is_file(), "nothing may be deleted either way");
+        let _ = fs::remove_dir_all(root);
+    }
 
-        let result = approve_cleanup_candidate(&store, &candidate.id, true).unwrap();
+    /// A book that really did build and validate a reading output. Queued
+    /// normally, then decorated, so the evidence logic is exercised against a
+    /// job shaped the way the pipeline shapes them.
+    fn cleanup_ready_job(root: &Path, store: &MemoryStateStore) -> BookPipelineJob {
+        let output_dir = root.join("reading-output");
+        fs::create_dir_all(&output_dir).unwrap();
+        let markdown = output_dir.join("book.md");
+        fs::write(&markdown, "# Clean Markdown\n").unwrap();
+        let epub = output_dir.join("book.epub");
+        fs::write(&epub, "epub bytes").unwrap();
+        let source_pdf = root.join("source.pdf");
+        fs::write(&source_pdf, "%PDF fixture").unwrap();
+        let mut source = fake_direct_zotero_source();
+        source.path = Some(display_path(&source_pdf));
 
-        assert!(result.ok);
-        assert!(result.message.contains("launcher did not delete"));
-        assert!(source_pdf.is_file());
-        let state = store.load().unwrap();
-        assert!(state.jobs[0]
-            .log_summary
+        let job = queue_job(
+            store,
+            source,
+            "conversion_only".into(),
+            BookPipelinePreviewConfig::default(),
+        )
+        .unwrap();
+        let mut state = store.load().unwrap();
+        let stored = state
+            .jobs
+            .iter_mut()
+            .find(|stored| stored.id == job.id)
+            .unwrap();
+        stored.status = STATUS_COMPLETED.into();
+        stored.output_dir = Some(display_path(&output_dir));
+        stored.artifacts = vec![BookPipelineArtifact {
+            kind: "markdown".into(),
+            path: display_path(&markdown),
+            sha256: Some(sha256_file(&markdown).unwrap()),
+            zotero_key: Some("MDKEY123".into()),
+            ..BookPipelineArtifact::default()
+        }];
+        let child = &mut stored.children[0];
+        child.stages.push(BookPipelineStage {
+            stage_id: "validate_reading".into(),
+            status: STATUS_COMPLETED.into(),
+            ..BookPipelineStage::default()
+        });
+        child.artifacts = vec![
+            required_stage_artifact("reading_epub", &epub, "build_reading").unwrap(),
+            required_stage_artifact("reading_markdown", &markdown, "build_reading").unwrap(),
+        ];
+        let ready = stored.clone();
+        store.save(&state).unwrap();
+        ready
+    }
+
+    // The evidence accepted `html`/`epub`/`translation_source` — conversion-stage
+    // outputs — and never looked at a stage status, so a book that never built a
+    // reading output counted as safe to delete the source PDF for.
+    #[test]
+    fn cleanup_evidence_requires_a_validated_reading_build() {
+        let root = temp_root("cleanup-evidence-reading");
+        let store = MemoryStateStore::new(&root);
+        let ready = cleanup_ready_job(&root, &store);
+        let candidate = cleanup_candidate_for_job(&ready).unwrap();
+        assert!(
+            candidate.can_approve,
+            "a validated reading build is the case that should pass: {:?}",
+            candidate.checks
+        );
+
+        // Same book, validation not completed.
+        let mut unvalidated = ready.clone();
+        stage_mut(&mut unvalidated.children[0], "validate_reading")
+            .unwrap()
+            .status = STATUS_FAILED.into();
+        let candidate = cleanup_candidate_for_job(&unvalidated).unwrap();
+        assert!(!candidate.can_approve);
+        assert!(candidate
+            .checks
             .iter()
-            .any(|line| line.contains("Cleanup approval recorded")));
+            .any(|check| check.kind == "validated_reading" && !check.ok));
+
+        // Same book, conversion-stage deliverables only.
+        let mut conversion_only = ready.clone();
+        conversion_only.output_dir = None;
+        for artifact in &mut conversion_only.children[0].artifacts {
+            artifact.kind = artifact.kind.replace("reading_", "");
+        }
+        let candidate = cleanup_candidate_for_job(&conversion_only).unwrap();
+        assert!(
+            !candidate.can_approve,
+            "conversion output is not a built book: {:?}",
+            candidate.checks
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // The approval only ever existed as a log line, and the log is a ring buffer
+    // that trims. A decision to delete someone's source PDF has to outlive it.
+    #[test]
+    fn cleanup_approval_persists_as_a_bound_record() {
+        let root = temp_root("cleanup-approval-record");
+        let store = MemoryStateStore::new(&root);
+        cleanup_ready_job(&root, &store);
+        let candidate = preview_cleanup_candidates(&store).unwrap().candidates[0].clone();
+
+        approve_cleanup_candidate(&store, &candidate.id, true).unwrap();
+
+        let stored = store.load().unwrap().jobs[0].clone();
+        let approval = stored
+            .approval_references
+            .iter()
+            .find(|approval| approval.gate_id == CLEANUP_GATE_ID)
+            .expect("the decision must be a record, not a log line");
+        assert_eq!(approval.decision, "approved");
+        assert!(!approval.approval_id.is_empty());
+        assert!(!approval.decided_at.is_empty());
+        assert_eq!(
+            approval.bound_artifact_hashes,
+            cleanup_bound_artifact_hashes(&stored),
+            "the approval binds the reading artifacts it was taken against"
+        );
+        assert!(cleanup_approval_is_current(&stored));
+
+        // Trimming the log must not take the record with it.
+        let mut state = store.load().unwrap();
+        state.jobs[0].log_summary.clear();
+        store.save(&state).unwrap();
+        assert!(cleanup_approval_is_current(&store.load().unwrap().jobs[0]));
+
+        // The out-of-band deletion path asks this question before deleting.
+        let selector = stored.source.selector.clone().unwrap();
+        let status = cleanup_approval_status(&store.load().unwrap(), &selector);
+        assert!(status.approved, "{}", status.reason);
+        assert_eq!(status.approval_id, approval.approval_id);
+
+        // Rebuild the book and the approval stops applying.
+        let mut state = store.load().unwrap();
+        for artifact in &mut state.jobs[0].children[0].artifacts {
+            artifact.sha256 = Some("0".repeat(64));
+        }
+        store.save(&state).unwrap();
+        let state = store.load().unwrap();
+        assert!(!cleanup_approval_is_current(&state.jobs[0]));
+        assert!(!cleanup_approval_status(&state, &selector).approved);
+        assert!(cleanup_approval_status(&state, "no-such-source")
+            .reason
+            .contains("No Book Pipeline job"));
+
         let _ = fs::remove_dir_all(root);
     }
 
