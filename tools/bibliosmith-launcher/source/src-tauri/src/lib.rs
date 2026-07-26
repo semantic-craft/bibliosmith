@@ -235,7 +235,7 @@ fn auto_install_node_modules_enabled_from_config(config: &LauncherConfig) -> boo
     config.auto_install_node_modules.unwrap_or(true)
 }
 
-async fn run_blocking<T, F>(work: F) -> Result<T, String>
+pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -2525,8 +2525,14 @@ fn java_home_executable_from_value(java_home: &Path) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<Output> {
+pub(crate) fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> io::Result<Output> {
     command.stdout(Stdio::piped());
+    // The Book Pipeline reads stderr for its failure diagnosis, and
+    // `wait_with_output` only captures what was piped.
+    command.stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let started_at = Instant::now();
     loop {

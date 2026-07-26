@@ -3608,22 +3608,25 @@ fn is_allowed_stage_transition(previous: &BookPipelineStage, next: &BookPipeline
 }
 
 #[tauri::command]
-pub fn get_book_pipeline_state() -> Result<BookPipelineState, String> {
-    BookPipelineStore::default()?.load()
+pub async fn get_book_pipeline_state() -> Result<BookPipelineState, String> {
+    crate::run_blocking(move || BookPipelineStore::default()?.load()).await
 }
 
 #[tauri::command]
-pub fn preview_book_pipeline_route(
+pub async fn preview_book_pipeline_route(
     source: BookPipelineSource,
     mode: String,
     config: Option<BookPipelinePreviewConfig>,
 ) -> Result<Vec<BookPipelineRouteItem>, String> {
-    preview_book_pipeline_route_with_executor(
-        &SystemCommandExecutor,
-        &source,
-        &mode,
-        config.unwrap_or_default(),
-    )
+    crate::run_blocking(move || {
+        preview_book_pipeline_route_with_executor(
+            &SystemCommandExecutor,
+            &source,
+            &mode,
+            config.unwrap_or_default(),
+        )
+    })
+    .await
 }
 
 fn preview_book_pipeline_route_with_executor<E: RunnerCommandExecutor>(
@@ -3655,30 +3658,36 @@ fn preview_book_pipeline_route_with_executor<E: RunnerCommandExecutor>(
 }
 
 #[tauri::command]
-pub fn queue_book_pipeline_job(
+pub async fn queue_book_pipeline_job(
     source: BookPipelineSource,
     mode: String,
     translation_intent: BookPipelineTranslationIntent,
     config: Option<BookPipelinePreviewConfig>,
 ) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    queue_job_with_translation_intent(
-        &store,
-        source,
-        mode,
-        translation_intent,
-        config.unwrap_or_default(),
-    )
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        queue_job_with_translation_intent(
+            &store,
+            source,
+            mode,
+            translation_intent,
+            config.unwrap_or_default(),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn save_book_pipeline_custom_instructions(
+pub async fn save_book_pipeline_custom_instructions(
     job_id: String,
     child_id: Option<String>,
     custom_instructions: BookPipelineCustomInstructions,
 ) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    save_book_custom_instructions(&store, &job_id, child_id.as_deref(), custom_instructions)
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        save_book_custom_instructions(&store, &job_id, child_id.as_deref(), custom_instructions)
+    })
+    .await
 }
 
 fn save_book_custom_instructions(
@@ -3717,29 +3726,38 @@ fn save_book_custom_instructions(
 }
 
 #[tauri::command]
-pub fn run_book_pipeline_job(job_id: String) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    let job = run_job_to_quiescence(&store, &SystemPipelineRunner, &job_id)?;
-    dispatch_configured_terminal_notification(&store, job)
+pub async fn run_book_pipeline_job(job_id: String) -> Result<BookPipelineJob, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let job = run_job_to_quiescence(&store, &SystemPipelineRunner, &job_id)?;
+        dispatch_configured_terminal_notification(&store, job)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn retry_book_pipeline_job(job_id: String) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    let job = retry_job_to_quiescence(&store, &SystemPipelineRunner, &job_id)?;
-    dispatch_configured_terminal_notification(&store, job)
+pub async fn retry_book_pipeline_job(job_id: String) -> Result<BookPipelineJob, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let job = retry_job_to_quiescence(&store, &SystemPipelineRunner, &job_id)?;
+        dispatch_configured_terminal_notification(&store, job)
+    })
+    .await
 }
 
 /// Remove a job from the shelf. Files on disk (extraction output, the local
 /// reading project, Zotero attachments) are deliberately left untouched — this
 /// only forgets the job, so a re-queued book can reuse the converted Markdown.
 #[tauri::command]
-pub fn delete_book_pipeline_job(
+pub async fn delete_book_pipeline_job(
     job_id: String,
     explicit_approval: bool,
 ) -> Result<BookPipelineState, String> {
-    let store = BookPipelineStore::default()?;
-    delete_job(&store, &job_id, explicit_approval)
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        delete_job(&store, &job_id, explicit_approval)
+    })
+    .await
 }
 
 fn delete_job(
@@ -3773,19 +3791,22 @@ fn job_is_actively_running(job: &BookPipelineJob) -> bool {
 }
 
 #[tauri::command]
-pub fn advance_book_pipeline_job(
+pub async fn advance_book_pipeline_job(
     job_id: String,
     child_id: Option<String>,
     invalidate_downstream: Option<bool>,
 ) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    let job = advance_job(
-        &store,
-        &job_id,
-        child_id.as_deref(),
-        invalidate_downstream.unwrap_or(false),
-    )?;
-    dispatch_configured_terminal_notification(&store, job)
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let job = advance_job(
+            &store,
+            &job_id,
+            child_id.as_deref(),
+            invalidate_downstream.unwrap_or(false),
+        )?;
+        dispatch_configured_terminal_notification(&store, job)
+    })
+    .await
 }
 
 fn approve_job_gate(
@@ -3829,20 +3850,23 @@ fn approve_job_gate(
 }
 
 #[tauri::command]
-pub fn approve_book_pipeline_gate(
+pub async fn approve_book_pipeline_gate(
     job_id: String,
     child_id: Option<String>,
     stage_id: String,
     explicit_approval: bool,
 ) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    approve_job_gate(
-        &store,
-        &job_id,
-        child_id.as_deref(),
-        &stage_id,
-        explicit_approval,
-    )
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        approve_job_gate(
+            &store,
+            &job_id,
+            child_id.as_deref(),
+            &stage_id,
+            explicit_approval,
+        )
+    })
+    .await
 }
 
 /// Re-route a book the pipeline held back, in place. Before this the Overview
@@ -3850,22 +3874,25 @@ pub fn approve_book_pipeline_gate(
 /// every button disabled, so a held book could only be dealt with by deleting it
 /// and queueing it again — which for a collection took the whole batch with it.
 #[tauri::command]
-pub fn set_book_pipeline_route_override(
+pub async fn set_book_pipeline_route_override(
     job_id: String,
     child_id: Option<String>,
     route_item_id: String,
     route_override: String,
     config: Option<BookPipelinePreviewConfig>,
 ) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    set_route_override(
-        &store,
-        &job_id,
-        child_id.as_deref(),
-        &route_item_id,
-        &route_override,
-        &config.unwrap_or_default(),
-    )
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        set_route_override(
+            &store,
+            &job_id,
+            child_id.as_deref(),
+            &route_item_id,
+            &route_override,
+            &config.unwrap_or_default(),
+        )
+    })
+    .await
 }
 
 fn set_route_override(
@@ -3957,7 +3984,7 @@ fn set_route_override(
 /// Record that a person opened the built book in a real reader. Optional by
 /// design: never calling this leaves promotion exactly as it was.
 #[tauri::command]
-pub fn record_book_pipeline_reader_evidence(
+pub async fn record_book_pipeline_reader_evidence(
     job_id: String,
     child_id: Option<String>,
     artifact_kind: String,
@@ -3965,16 +3992,19 @@ pub fn record_book_pipeline_reader_evidence(
     reader_version: String,
     conclusion: String,
 ) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    record_reader_evidence(
-        &store,
-        &job_id,
-        child_id.as_deref(),
-        &artifact_kind,
-        &reader,
-        &reader_version,
-        &conclusion,
-    )
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        record_reader_evidence(
+            &store,
+            &job_id,
+            child_id.as_deref(),
+            &artifact_kind,
+            &reader,
+            &reader_version,
+            &conclusion,
+        )
+    })
+    .await
 }
 
 /// Sampling is a "try before you decide" action, so by default it leaves the
@@ -3982,23 +4012,26 @@ pub fn record_book_pipeline_reader_evidence(
 /// for the explicit "translate this book with this model" action, which goes
 /// through `set_book_pipeline_translation_provider` in the normal case.
 #[tauri::command]
-pub fn run_book_pipeline_translation_sample(
+pub async fn run_book_pipeline_translation_sample(
     job_id: String,
     child_id: String,
     provider_profile_id: String,
     provider_config_id: String,
     apply_to_job: bool,
 ) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    run_translation_sample_with_executor(
-        &store,
-        &job_id,
-        Some(&child_id),
-        &provider_profile_id,
-        &provider_config_id,
-        apply_to_job,
-        &SystemCommandExecutor,
-    )
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        run_translation_sample_with_executor(
+            &store,
+            &job_id,
+            Some(&child_id),
+            &provider_profile_id,
+            &provider_config_id,
+            apply_to_job,
+            &SystemCommandExecutor,
+        )
+    })
+    .await
 }
 
 /// Adopt a provider slot as the job's own, which is what the full-book run will
@@ -4006,20 +4039,23 @@ pub fn run_book_pipeline_translation_sample(
 /// redirect the book; the approval gate is rebound here exactly as it is after a
 /// sample, so an approval that predates the change does not survive it.
 #[tauri::command]
-pub fn set_book_pipeline_translation_provider(
+pub async fn set_book_pipeline_translation_provider(
     job_id: String,
     child_id: String,
     provider_profile_id: String,
     provider_config_id: String,
 ) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    set_translation_provider_in_store(
-        &store,
-        &job_id,
-        Some(&child_id),
-        &provider_profile_id,
-        &provider_config_id,
-    )
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        set_translation_provider_in_store(
+            &store,
+            &job_id,
+            Some(&child_id),
+            &provider_profile_id,
+            &provider_config_id,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -4072,37 +4108,43 @@ pub fn choose_book_pipeline_markdown_source() -> Result<Option<BookPipelineSourc
 }
 
 #[tauri::command]
-pub fn discover_book_pipeline_zotero_sources(
+pub async fn discover_book_pipeline_zotero_sources(
     source: BookPipelineSource,
     limit: Option<u32>,
 ) -> Result<BookPipelineZoteroDiscoveryResult, String> {
-    discover_zotero_sources(&SystemCommandExecutor, &source, limit.unwrap_or(20))
+    crate::run_blocking(move || {
+        discover_zotero_sources(&SystemCommandExecutor, &source, limit.unwrap_or(20))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn open_book_pipeline_output(job_id: String) -> Result<BookPipelineActionResult, String> {
-    let store = BookPipelineStore::default()?;
-    let state = store.load()?;
-    let job = state
-        .jobs
-        .iter()
-        .find(|job| job.id == job_id)
-        .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
-    let mut allowed_roots = vec![store.job_output_dir(&job.id)];
-    if let Ok(repo_root) = local_reading_repo_root() {
-        allowed_roots.push(repo_root.join("books").join("local"));
-    }
-    let resolved = resolve_book_pipeline_open_target(job, &allowed_roots)?;
-    open::that(&resolved.path).map_err(|err| err.to_string())?;
-    Ok(BookPipelineActionResult {
-        ok: true,
-        message: format!(
-            "{}: {}",
-            resolved.action_label,
-            display_path(&resolved.path)
-        ),
-        path: Some(display_path(&resolved.path)),
+pub async fn open_book_pipeline_output(job_id: String) -> Result<BookPipelineActionResult, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let state = store.load()?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
+        let mut allowed_roots = vec![store.job_output_dir(&job.id)];
+        if let Ok(repo_root) = local_reading_repo_root() {
+            allowed_roots.push(repo_root.join("books").join("local"));
+        }
+        let resolved = resolve_book_pipeline_open_target(job, &allowed_roots)?;
+        open::that(&resolved.path).map_err(|err| err.to_string())?;
+        Ok(BookPipelineActionResult {
+            ok: true,
+            message: format!(
+                "{}: {}",
+                resolved.action_label,
+                display_path(&resolved.path)
+            ),
+            path: Some(display_path(&resolved.path)),
+        })
     })
+    .await
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -4118,38 +4160,44 @@ const ARTIFACT_EXCERPT_DEFAULT_CHARS: usize = 800;
 const ARTIFACT_EXCERPT_MAX_CHARS: usize = 4000;
 
 #[tauri::command]
-pub fn read_book_pipeline_artifact_excerpt(
+pub async fn read_book_pipeline_artifact_excerpt(
     job_id: String,
     artifact_id: String,
     max_chars: Option<usize>,
 ) -> Result<BookPipelineArtifactExcerpt, String> {
-    let store = BookPipelineStore::default()?;
-    let state = store.load()?;
-    let job = state
-        .jobs
-        .iter()
-        .find(|job| job.id == job_id)
-        .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
-    let mut allowed_roots = vec![store.job_output_dir(&job.id)];
-    if let Ok(repo_root) = local_reading_repo_root() {
-        allowed_roots.push(repo_root.join("books").join("local"));
-    }
-    read_artifact_excerpt(job, &artifact_id, max_chars, &allowed_roots)
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let state = store.load()?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
+        let mut allowed_roots = vec![store.job_output_dir(&job.id)];
+        if let Ok(repo_root) = local_reading_repo_root() {
+            allowed_roots.push(repo_root.join("books").join("local"));
+        }
+        read_artifact_excerpt(job, &artifact_id, max_chars, &allowed_roots)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn read_book_pipeline_translation_sample(
+pub async fn read_book_pipeline_translation_sample(
     job_id: String,
     child_id: String,
 ) -> Result<BookPipelineTranslationSampleReport, String> {
-    let store = BookPipelineStore::default()?;
-    let state = store.load()?;
-    let job = state
-        .jobs
-        .iter()
-        .find(|job| job.id == job_id)
-        .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
-    read_translation_sample_report(job, &child_id)
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let state = store.load()?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
+        read_translation_sample_report(job, &child_id)
+    })
+    .await
 }
 
 /// Read the head of a registered artifact for on-screen preview. The content is
@@ -4191,54 +4239,60 @@ fn read_artifact_excerpt(
 }
 
 #[tauri::command]
-pub fn export_book_pipeline_diagnostic(
+pub async fn export_book_pipeline_diagnostic(
     job_id: String,
     profile: String,
 ) -> Result<serde_json::Value, String> {
-    let store = BookPipelineStore::default()?;
-    let state = store.load()?;
-    let job = state
-        .jobs
-        .iter()
-        .find(|job| job.id == job_id)
-        .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
-    build_book_pipeline_diagnostic(job, &profile)
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let state = store.load()?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
+        build_book_pipeline_diagnostic(job, &profile)
+    })
+    .await
 }
 
 /// The same three profiles, written to a folder the user picks, because a
 /// diagnostic bundle is only useful if it can be attached to a report. The
 /// command above returns the value in-process and stays as it is.
 #[tauri::command]
-pub fn save_book_pipeline_diagnostic(
+pub async fn save_book_pipeline_diagnostic(
     job_id: String,
     profile: String,
 ) -> Result<BookPipelineActionResult, String> {
-    let store = BookPipelineStore::default()?;
-    let state = store.load()?;
-    let job = state
-        .jobs
-        .iter()
-        .find(|job| job.id == job_id)
-        .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
-    // Build before the dialog: an unsupported profile should fail immediately
-    // rather than after the user has picked a folder.
-    let document = build_book_pipeline_diagnostic(job, &profile)?;
-    let Some(folder) = rfd::FileDialog::new()
-        .set_title("Save Book Pipeline diagnostic bundle")
-        .pick_folder()
-    else {
-        return Ok(BookPipelineActionResult {
-            ok: false,
-            message: "Diagnostic export cancelled.".into(),
-            path: None,
-        });
-    };
-    let path = write_book_pipeline_diagnostic(&folder, &job.id, &profile, &document)?;
-    Ok(BookPipelineActionResult {
-        ok: true,
-        message: format!("Diagnostic bundle written to {}", display_path(&path)),
-        path: Some(display_path(&path)),
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let state = store.load()?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
+        // Build before the dialog: an unsupported profile should fail immediately
+        // rather than after the user has picked a folder.
+        let document = build_book_pipeline_diagnostic(job, &profile)?;
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Save Book Pipeline diagnostic bundle")
+            .pick_folder()
+        else {
+            return Ok(BookPipelineActionResult {
+                ok: false,
+                message: "Diagnostic export cancelled.".into(),
+                path: None,
+            });
+        };
+        let path = write_book_pipeline_diagnostic(&folder, &job.id, &profile, &document)?;
+        Ok(BookPipelineActionResult {
+            ok: true,
+            message: format!("Diagnostic bundle written to {}", display_path(&path)),
+            path: Some(display_path(&path)),
+        })
     })
+    .await
 }
 
 fn write_book_pipeline_diagnostic(
@@ -4447,32 +4501,41 @@ fn diagnostic_redacted_path(job: &BookPipelineJob, path: &str) -> String {
 }
 
 #[tauri::command]
-pub fn handoff_book_pipeline_markdown(
+pub async fn handoff_book_pipeline_markdown(
     job_id: String,
     artifact_path: Option<String>,
 ) -> Result<BookPipelineJob, String> {
-    let store = BookPipelineStore::default()?;
-    handoff_job_markdown(
-        &store,
-        &job_id,
-        artifact_path.as_deref(),
-        &local_reading_repo_root()?,
-    )
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        handoff_job_markdown(
+            &store,
+            &job_id,
+            artifact_path.as_deref(),
+            &local_reading_repo_root()?,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn preview_book_pipeline_cleanup() -> Result<BookPipelineCleanupPreview, String> {
-    let store = BookPipelineStore::default()?;
-    preview_cleanup_candidates(&store)
+pub async fn preview_book_pipeline_cleanup() -> Result<BookPipelineCleanupPreview, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        preview_cleanup_candidates(&store)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn approve_book_pipeline_cleanup(
+pub async fn approve_book_pipeline_cleanup(
     candidate_id: String,
     explicit_approval: bool,
 ) -> Result<BookPipelineActionResult, String> {
-    let store = BookPipelineStore::default()?;
-    approve_cleanup_candidate(&store, &candidate_id, explicit_approval)
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        approve_cleanup_candidate(&store, &candidate_id, explicit_approval)
+    })
+    .await
 }
 
 fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result<(), String> {
@@ -5429,11 +5492,14 @@ fn cleanup_approval_is_current(job: &BookPipelineJob) -> bool {
 /// reference they already know, say whether a still-current approval exists. The
 /// launcher deletes nothing here and never has.
 #[tauri::command]
-pub fn verify_book_pipeline_cleanup_approval(
+pub async fn verify_book_pipeline_cleanup_approval(
     source_ref: String,
 ) -> Result<BookPipelineCleanupApprovalStatus, String> {
-    let store = BookPipelineStore::default()?;
-    Ok(cleanup_approval_status(&store.load()?, &source_ref))
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        Ok(cleanup_approval_status(&store.load()?, &source_ref))
+    })
+    .await
 }
 
 fn cleanup_approval_status(
@@ -8979,14 +9045,39 @@ fn run_process_command(command: &RunnerCommand) -> Result<RunnerCommandResult, S
     if let Some(cwd) = &command.cwd {
         process.current_dir(cwd);
     }
-    let output = process.output().map_err(|err| {
-        format!(
-            "Failed to start {} with {}: {err}",
-            command.label,
-            display_path(&program)
-        )
+    let timeout = runner_command_timeout(command);
+    let output = crate::command_output_with_timeout(&mut process, timeout).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::TimedOut {
+            // Named, not folded into a generic IO failure: a stage that stops
+            // because a provider hung is a different problem from one that
+            // could not start, and only one of them is worth retrying as-is.
+            format!(
+                "{} timed out after {}s and was stopped.",
+                command.label,
+                timeout.as_secs()
+            )
+        } else {
+            format!(
+                "Failed to start {} with {}: {err}",
+                command.label,
+                display_path(&program)
+            )
+        }
     })?;
     command_result_from_output(command, output)
+}
+
+/// A stalled child used to hold its stage `running` forever, because nothing
+/// ever stopped waiting for it. Translation gets hours because that is how long
+/// a real book legitimately takes; everything else is minutes, and a bound that
+/// generous is still a bound.
+fn runner_command_timeout(command: &RunnerCommand) -> Duration {
+    let hours = match command.label.as_str() {
+        TRANSLATION_ENGINE_COMMAND_LABEL => 12,
+        ZOTERO_CONVERSION_COMMAND_LABEL => 6,
+        _ => 2,
+    };
+    Duration::from_secs(hours * 60 * 60)
 }
 
 fn command_result_from_output(
@@ -15738,6 +15829,51 @@ mod tests {
     fn nvm_bin_dirs_are_empty_without_nvm() {
         let root = temp_root("nvm-absent");
         assert!(nvm_bin_dirs(&root.join(".nvm")).is_empty());
+    }
+
+    // Nothing ever stopped waiting for a child, so one that hung held its stage
+    // `running` forever. Translation gets hours because a real book takes them;
+    // the point is that "hours" is a number and "forever" was not.
+    #[test]
+    fn every_runner_command_has_a_bounded_timeout() {
+        let labelled = |label: &str| RunnerCommand {
+            kind: RunnerCommandKind::Process,
+            label: label.into(),
+            program: PathBuf::from("uv"),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            output_dir: PathBuf::new(),
+            attempts: 0,
+            accepted_exit_codes: vec![0],
+        };
+        let translation = runner_command_timeout(&labelled(TRANSLATION_ENGINE_COMMAND_LABEL));
+        let conversion = runner_command_timeout(&labelled(ZOTERO_CONVERSION_COMMAND_LABEL));
+        let other = runner_command_timeout(&labelled(EPUBCHECK_COMMAND_LABEL));
+
+        assert!(translation > conversion, "translation needs the most room");
+        assert!(conversion > other);
+        for timeout in [translation, conversion, other] {
+            assert!(timeout.as_secs() > 0);
+            assert!(
+                timeout <= Duration::from_secs(24 * 60 * 60),
+                "a day is already generous; anything longer is 'forever' spelled differently"
+            );
+        }
+    }
+
+    // A stage that stops because a child hung is a different problem from one
+    // that could not start, and the message has to say which.
+    #[test]
+    fn a_timed_out_child_reports_the_timeout_by_name() {
+        let mut process = Command::new("sleep");
+        process.arg("30");
+
+        let error = crate::command_output_with_timeout(&mut process, Duration::from_millis(150))
+            .expect_err("a 30s sleep must not finish inside 150ms");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("timed out"), "{error}");
     }
 
     // Every process command the pipeline builds must be a bare name the resolver
