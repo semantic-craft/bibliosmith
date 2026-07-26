@@ -12,6 +12,10 @@ name: Release Launcher
 # and tools/bibliosmith-launcher/source/RELEASE_NOTES.md, merge to main, then push a
 # matching tag (e.g. v1.4.0). The tag runs the full CI suite first and the build
 # only starts once it is green, so a tag on a red tree publishes nothing.
+#
+# RELEASE_NOTES.md must start with "# BiblioSmith Launcher <version>" matching
+# launcher-version.json, and carry ## ZH, ## EN, and ## JA sections. Both are
+# checked before the build; see "Verify release notes are not stale" below.
 
 on:
   push:
@@ -46,6 +50,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      # Bumping the version proved nothing about the notes. RELEASE_NOTES.md is
+      # the text the download page shows, and nothing checked it: v1.12.1 would
+      # have shipped v1.12.0's OCR-settings copy and said nothing about the one
+      # fix in the release. Require the file to name the version it describes.
+      # Only the heading and the three language sections are pinned; the prose
+      # under them is free.
+      #
+      # Deliberately before the tag check, not after. A dispatch with a throwaway
+      # tag (-f tag=v0.0.0-gate-check) is how this gate gets exercised without
+      # publishing anything: the tag check below then fails and the job stops
+      # well before the build and release steps. If the tag check ran first, a
+      # throwaway tag could never reach this step and the gate would be
+      # unverifiable except by cutting a real release.
+      - name: Verify release notes are not stale
+        run: |
+          version=$(node -p "require('./launcher-version.json').version")
+          expected="# BiblioSmith Launcher $version"
+          if ! head -n 1 RELEASE_NOTES.md | grep -Fqx "$expected"; then
+            echo "RELEASE_NOTES.md must start with: $expected" >&2
+            echo "It currently starts with: $(head -n 1 RELEASE_NOTES.md)" >&2
+            echo "Rewrite the notes for $version before tagging." >&2
+            exit 1
+          fi
+          for section in ZH EN JA; do
+            if ! grep -Fqx "## $section" RELEASE_NOTES.md; then
+              echo "RELEASE_NOTES.md is missing its ## $section section" >&2
+              exit 1
+            fi
+          done
 
       - name: Verify version matches tag
         run: |
