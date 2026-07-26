@@ -15,7 +15,6 @@ export function Titlebar({
   onSelectRepo,
   onOpenRepo,
   onOpenBooks,
-  onCheckLauncher,
 }: {
   copy: Copy;
   version: string;
@@ -28,7 +27,6 @@ export function Titlebar({
   onSelectRepo: () => void;
   onOpenRepo: () => void;
   onOpenBooks: () => void;
-  onCheckLauncher: () => void;
 }) {
   return (
     <header className="sh-toolbar">
@@ -62,7 +60,6 @@ export function Titlebar({
             <button type="button" onClick={onSelectRepo}>{copy.selectRepo}</button>
             <button type="button" onClick={onOpenRepo}>{copy.viewProject}</button>
             <button type="button" disabled={!projectReady} onClick={onOpenBooks}>{copy.openBooks}</button>
-            <button type="button" onClick={onCheckLauncher}>{copy.checkUpdates} Launcher</button>
           </div>
         )}
       </div>

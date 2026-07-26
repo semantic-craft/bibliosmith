@@ -20,7 +20,6 @@ import {
   DownloadProgress,
   EmbeddingConnectionResult,
   EmbeddingStatus,
-  LauncherUpdateInfo,
   LauncherState,
   BiblioSmithUpdateInfo,
   ModelCatalog,
@@ -921,25 +920,6 @@ export function readProjectDocumentPath(relativePath: string, locale: string) {
     return readProjectDocument(relativePath.toLowerCase().includes("how-to-use") ? "howto" : "readme", locale);
   }
   return invoke<ProjectDocument>("read_project_document_path", { relativePath, locale });
-}
-
-export function checkLauncherUpdates() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<LauncherUpdateInfo>({
-      installedVersion: "v1.4.0",
-      latestVersion: "v1.4.0",
-      hasUpdate: false,
-      releaseNotes: null,
-      assetName: "",
-      assetSize: 0,
-      assetUrl: "",
-      installRoot: "",
-      installerPath: null,
-      installerDownloaded: false,
-      partialDownloadedBytes: 0,
-    });
-  }
-  return invoke<LauncherUpdateInfo>("check_launcher_updates");
 }
 
 export function minimizeMainWindow() {

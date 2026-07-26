@@ -102,7 +102,6 @@ export function SettingsPage({
             </select>
           </div>
           <SettingToggle title={copy.autoStartTitle} description={copy.autoStartDescription} checked={settings.autoStart} onChange={(value) => onUpdateSetting("autoStart", value)} />
-          <SettingToggle title={copy.checkLauncherTitle} description={copy.checkLauncherDescription} checked={settings.checkLauncherOnLaunch} onChange={(value) => onUpdateSetting("checkLauncherOnLaunch", value)} />
         </div>
       </div>
 

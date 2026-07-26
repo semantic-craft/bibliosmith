@@ -29,20 +29,6 @@ export type BiblioSmithUpdateInfo = {
   commits: CommitInfo[];
 };
 
-export type LauncherUpdateInfo = {
-  installedVersion: string;
-  latestVersion: string;
-  hasUpdate: boolean;
-  releaseNotes?: string | null;
-  assetName: string;
-  assetSize: number;
-  assetUrl: string;
-  installRoot: string;
-  installerPath?: string | null;
-  installerDownloaded: boolean;
-  partialDownloadedBytes: number;
-};
-
 export type ActionResult = {
   ok: boolean;
   message: string;
@@ -125,7 +111,6 @@ export type RuntimeStatus = {
 
 export type LauncherSettings = {
   autoStart: boolean;
-  checkLauncherOnLaunch: boolean;
   saveLogsToLocal: boolean;
 };
 

@@ -11,7 +11,6 @@ import {
   cancelBiblioSmithUpdate,
   cancelNodeModulesInstall,
   chooseRepoFolder,
-  checkLauncherUpdates,
   chooseBookPipelineMarkdownSource,
   chooseBookPipelinePdfFolder,
   advanceBookPipelineJob,
@@ -68,7 +67,6 @@ import {
   DiagnosticLogSettings,
   LauncherSettings,
   LauncherState,
-  LauncherUpdateInfo,
   BiblioSmithUpdateInfo,
   ModelSlotView,
   NetworkProxySettings,
@@ -120,7 +118,6 @@ const LAUNCHER_VERSION = `v${launcherVersionManifest.version}`;
 
 const defaultSettings: LauncherSettings = {
   autoStart: false,
-  checkLauncherOnLaunch: true,
   saveLogsToLocal: true,
 };
 
@@ -195,7 +192,6 @@ export default function App() {
   const bookPipelineCopy = useMemo(() => pipelineCopy(locale), [locale]);
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [state, setState] = useState<LauncherState | null>(null);
-  const [launcherUpdate, setLauncherUpdate] = useState<LauncherUpdateInfo | null>(null);
   const [biblioSmithUpdate, setBiblioSmithUpdate] = useState<BiblioSmithUpdateInfo | null>(null);
   const [tutorialKind, setTutorialKind] = useState<TutorialKind>("howto");
   const [tutorialDoc, setTutorialDoc] = useState<ProjectDocument | null>(null);
@@ -288,7 +284,6 @@ export default function App() {
   const biblioSmithDownloadDismissedRef = useRef(false);
   const nodeModulesAutoStartRef = useRef(false);
   const startupInitializedRef = useRef(false);
-  const launcherCheckInProgressRef = useRef(false);
   const floatingToastTimer = useRef<number | null>(null);
 
   const addActivity = useCallback((level: ActivityItem["level"], message: string) => {
@@ -1179,31 +1174,6 @@ export default function App() {
     }
   }, [addActivity, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, startBiblioSmithProgress]);
 
-  // The outcome is read off the response instead of being asserted: this used to
-  // log "up to date" unconditionally, so a reported update was still announced as
-  // latest. `promptWhenUpdate` was accepted and then never used, which left the
-  // two user-initiated call sites with no feedback beyond the activity list.
-  const checkLauncher = useCallback(async (promptWhenUpdate = false, background = false) => {
-    if (launcherCheckInProgressRef.current) return;
-    launcherCheckInProgressRef.current = true;
-    if (!background) setBusy("launcher-check");
-    addActivity("info", copy.checkingLauncher);
-    try {
-      const info = await checkLauncherUpdates();
-      setLauncherUpdate(info);
-      const message = info.hasUpdate ? copy.launcherFound(info.latestVersion) : copy.launcherLatest;
-      addActivity(info.hasUpdate ? "warning" : "success", message);
-      if (promptWhenUpdate) showFloatingToast(message, info.hasUpdate ? "warning" : "success");
-    } catch (error) {
-      const message = copy.launcherCheckFailed(String(error));
-      addActivity("error", message);
-      if (promptWhenUpdate) showFloatingToast(message, "error");
-    } finally {
-      launcherCheckInProgressRef.current = false;
-      if (!background) setBusy((value) => (value === "launcher-check" ? null : value));
-    }
-  }, [addActivity, copy, showFloatingToast]);
-
   useEffect(() => {
     const unlistenRuntime = listenRuntimeProgress((progress) => {
       setRuntimeProgress(progress);
@@ -1690,12 +1660,8 @@ export default function App() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void recordFrontendActivity(
-        "info",
-        `frontend startup automation begin checkLauncher=${settings.checkLauncherOnLaunch}`,
-      ).catch(() => undefined);
+      void recordFrontendActivity("info", "frontend startup automation begin").catch(() => undefined);
       void prepareBiblioSmithInBackground();
-      if (settings.checkLauncherOnLaunch) void checkLauncher(false, true);
     }, 600);
     return () => window.clearTimeout(timer);
     // Startup automation should run once after first paint using the initial persisted settings.
@@ -1846,10 +1812,6 @@ export default function App() {
           setQuickActionsOpen(false);
           void doOpenBooksFolder();
         }}
-        onCheckLauncher={() => {
-          setQuickActionsOpen(false);
-          void checkLauncher(true);
-        }}
       />
 
       <main className="app-shell">
@@ -1859,7 +1821,7 @@ export default function App() {
           version={LAUNCHER_VERSION}
           activeTab={activeTab}
           pipelineLoading={pipelineBusy === "loading"}
-          updateAvailable={Boolean(launcherUpdate?.hasUpdate || biblioSmithUpdate?.hasUpdate)}
+          updateAvailable={Boolean(biblioSmithUpdate?.hasUpdate)}
           onSelectTab={setActiveTab}
         />
 
@@ -1898,9 +1860,6 @@ export default function App() {
               copy={copy}
               biblioSmithCard={biblioSmithCard}
               launcherVersion={LAUNCHER_VERSION}
-              launcherLatest={launcherUpdate?.latestVersion ?? ""}
-              launcherBusy={busy === "launcher-check"}
-              onCheckLauncher={() => void checkLauncher(true)}
               commits={commits}
               displayedCommits={displayedCommits}
               latestBiblioSmithVersion={latestBiblioSmithVersion}

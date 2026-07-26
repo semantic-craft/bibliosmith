@@ -363,22 +363,6 @@ struct BiblioSmithUpdateInfo {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LauncherUpdateInfo {
-    installed_version: String,
-    latest_version: String,
-    has_update: bool,
-    release_notes: Option<String>,
-    asset_name: String,
-    asset_size: u64,
-    asset_url: String,
-    install_root: String,
-    installer_path: Option<String>,
-    installer_downloaded: bool,
-    partial_downloaded_bytes: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ActionResult {
     ok: bool,
     message: String,
@@ -1211,24 +1195,6 @@ fn read_project_document_path(
     }
     let kind = document_kind_from_path(&safe_path);
     read_project_document_file(&repo_root, &safe_path, &kind)
-}
-
-#[tauri::command]
-fn check_launcher_updates() -> Result<LauncherUpdateInfo, String> {
-    let installed_version = launcher_current_version();
-    Ok(LauncherUpdateInfo {
-        installed_version: installed_version.clone(),
-        latest_version: installed_version,
-        has_update: false,
-        release_notes: None,
-        asset_name: String::new(),
-        asset_size: 0,
-        asset_url: String::new(),
-        install_root: String::new(),
-        installer_path: None,
-        installer_downloaded: false,
-        partial_downloaded_bytes: 0,
-    })
 }
 
 #[tauri::command]
@@ -4787,7 +4753,6 @@ pub fn run() {
             update_bibliosmith,
             read_project_document,
             read_project_document_path,
-            check_launcher_updates,
             minimize_main_window,
             toggle_main_window_maximized,
             close_main_window_to_tray,
