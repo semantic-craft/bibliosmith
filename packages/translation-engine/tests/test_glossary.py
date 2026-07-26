@@ -3,7 +3,11 @@ import re
 import tempfile
 import unittest
 
-from translation_engine.engine import run_manifest
+from translation_engine.engine import (
+    MAX_VIOLATION_OCCURRENCES,
+    VIOLATION_EXCERPT_CHARACTERS,
+    run_manifest,
+)
 from translation_engine.placeholders import PLACEHOLDER_PATTERN
 from translation_engine.providers import TranslationRequest
 from tests.fixtures import build_run_fixture
@@ -304,6 +308,92 @@ class GlossaryOutputCheckTests(unittest.TestCase):
         self.assertEqual(unit["glossaryViolations"][0]["translation"], "风扇")
         # The wrong term is left exactly where the model put it.
         self.assertEqual(translated, "电扇 keeps turning.\n")
+
+    def test_a_violation_carries_the_place_and_what_the_model_wrote_instead(
+        self,
+    ) -> None:
+        """The term and the expected translation say a book drifted; they do not
+        say what it drifted to. Without that, the finding costs a reader a trip
+        into the chapter before they can judge whether it is even real."""
+        unit, _ = self._run(
+            GlossarySubstitutingProvider({"Fan": "电扇", "Secret": "机密"}),
+            source_text="The Fan turns.\n\nNothing here.\n\nThe Secret holds.\n",
+            max_tokens=20,
+            glossary_text=(
+                "source,translation,category,note\n"
+                "Fan,风扇,item,\n"
+                "Secret,秘密,other,\n"
+            ),
+        )
+
+        findings = {
+            violation["source"]: violation for violation in unit["glossaryViolations"]
+        }
+        self.assertEqual(sorted(findings), ["Fan", "Secret"])
+        self.assertGreater(unit["metrics"]["chunkCount"], 1)
+        for source, expected, wrote in (
+            ("Fan", "风扇", "电扇"),
+            ("Secret", "秘密", "机密"),
+        ):
+            occurrence = findings[source]["occurrences"][0]
+            self.assertEqual(findings[source]["translation"], expected)
+            self.assertIn(source, occurrence["sourceExcerpt"])
+            # Aligned by paragraph, so this is the model's rendering of the very
+            # text the term appeared in -- not the whole chunk, not a guess.
+            self.assertIn(wrote, occurrence["translatedExcerpt"])
+            self.assertNotIn(expected, occurrence["translatedExcerpt"])
+            self.assertNotIn("Nothing here", occurrence["translatedExcerpt"])
+        # The two terms are in different chunks, and each finding says which.
+        self.assertNotEqual(
+            findings["Fan"]["occurrences"][0]["chunkIndex"],
+            findings["Secret"]["occurrences"][0]["chunkIndex"],
+        )
+
+    def test_repeated_and_long_violations_stay_bounded(self) -> None:
+        """The report is JSON on stdout that the launcher folds into job state, so
+        a four-hundred-page book has to stay something a person can read."""
+        markers = ["alpha", "bravo", "delta", "gamma", "kappa"]
+        unit, _ = self._run(
+            GlossaryIgnoringProvider(),
+            source_text="\n\n".join(
+                # Twice per paragraph, so the cap has to survive repetition too.
+                f"Fan {marker}. {'padding words here. ' * 40} Fan again."
+                for marker in markers
+            )
+            + "\n",
+            max_tokens=8000,
+            glossary_text="source,translation,category,note\nFan,风扇,item,\n",
+        )
+
+        occurrences = unit["glossaryViolations"][0]["occurrences"]
+        self.assertEqual(len(occurrences), MAX_VIOLATION_OCCURRENCES)
+        # Two different paragraphs, not the same paragraph reported twice.
+        self.assertEqual(
+            [occurrence["sourceExcerpt"][:9] for occurrence in occurrences],
+            ["Fan alpha", "Fan bravo"],
+        )
+        for occurrence in occurrences:
+            for key in ("sourceExcerpt", "translatedExcerpt"):
+                self.assertLessEqual(
+                    len(occurrence[key]), VIOLATION_EXCERPT_CHARACTERS + 2
+                )
+                self.assertTrue(occurrence[key].endswith("…"), occurrence[key])
+
+    def test_a_violation_never_blocks_the_chapter_it_is_found_in(self) -> None:
+        """Recorded as evidence, not as a gate. CJK compounding gives this check
+        known false positives, and a gate that cries wolf gets clicked through."""
+        unit, translated = self._run(
+            GlossaryIgnoringProvider(),
+            source_text="Fan keeps Secret.\n",
+            max_tokens=100,
+            glossary_text="source,translation,category,note\nFan,风扇,item,\n",
+        )
+
+        self.assertEqual(unit["status"], "completed")
+        self.assertTrue(unit["artifact"]["complete"])
+        self.assertNotIn("error", unit)
+        self.assertEqual(unit["glossaryViolations"][0]["source"], "Fan")
+        self.assertEqual(translated, "Fan keeps Secret.\n")
 
     def test_following_the_glossary_reports_nothing(self) -> None:
         unit, _ = self._run(

@@ -177,6 +177,35 @@ If a reviewer changes `glossary/terms.csv`, the old prepared task fails with
 `glossary_hash_mismatch`. Rerun the launcher's prepare stage before translation
 so its task manifests and approval gate bind the new glossary hash.
 
+What comes back is checked against what was demanded, and a term whose required
+translation is missing is reported on the unit as `glossaryViolations`:
+
+```json
+{
+  "source": "Zettelkasten",
+  "translation": "卡片盒",
+  "occurrences": [
+    {
+      "chunkIndex": 0,
+      "sourceExcerpt": "The Zettelkasten is a slip box.",
+      "translatedExcerpt": "笔记盒是一只卡片箱。"
+    }
+  ]
+}
+```
+
+`chunkIndex` is a zero-based index into the unit's chunks. The excerpts are the
+matching paragraph on each side: a candidate is only accepted when it carries the
+chunk's protected placeholders once each and in order, and paragraph breaks are
+themselves placeholders, so the *i*-th segment of the output is the model's
+rendering of the *i*-th segment of the source. At most two paragraphs are
+reported per term and each excerpt is capped at 200 characters.
+
+This is evidence, never a gate. Chinese word formation can put a required form
+inside a longer compound, and a term can be legitimately absent where the source
+form was part of a larger name, so a violation never fails, degrades, or rewrites
+a chapter — the unit still completes.
+
 ## On-demand NER candidates
 
 NER is a separate, manually triggered command. It samples the first 6000
