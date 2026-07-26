@@ -661,6 +661,8 @@ function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement
 
 export function BookDrawer(props: BookDrawerProps) {
   const { copy, units, unit, busy, onSelect, onClose, onDelete } = props;
+  // Delete removes the job, and a collection job holds every book it queued.
+  const batchSize = unit.job.children.length;
   const index = units.findIndex((candidate) => candidate.key === unit.key);
   const step = (offset: number) => {
     if (!units.length) return;
@@ -695,7 +697,7 @@ export function BookDrawer(props: BookDrawerProps) {
         <div className="pl-dbody">
           {confirmingDelete && (
             <div className="pl-hintcard errc">
-              <span>{copy.deleteBookConfirmHint}</span>
+              <span>{batchSize > 1 ? copy.deleteBookBatchConfirmHint(batchSize) : copy.deleteBookConfirmHint}</span>
               <span className="pl-spacer" />
               <button
                 className="pl-btn sm danger-ghost"
@@ -703,7 +705,7 @@ export function BookDrawer(props: BookDrawerProps) {
                 disabled={busy === "delete"}
                 onClick={() => onDelete(unit.job.id)}
               >
-                {copy.deleteBookConfirm}
+                {batchSize > 1 ? copy.deleteBookBatchConfirm(batchSize) : copy.deleteBookConfirm}
               </button>
               <button
                 className="pl-btn sm quiet"

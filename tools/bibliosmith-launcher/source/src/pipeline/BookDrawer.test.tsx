@@ -269,6 +269,31 @@ describe("BookDrawer gate card", () => {
     expect(props.onRouteOverride).toHaveBeenCalledWith("job-1", "child-1", "DIRTY", "mineru");
   });
 
+  // Delete removes the whole job, and a collection queues many books under one.
+  // The confirmation used to say "this book" while taking the entire batch.
+  it("says how many books a batch delete actually removes", async () => {
+    const user = userEvent.setup();
+    const batch = bookUnit({ status: "completed" });
+    batch.job.children = [batch.child!, { ...batch.child!, id: "child-2" }, { ...batch.child!, id: "child-3" }];
+
+    const { container } = renderDrawer(batch);
+    await user.click(within(container).getByRole("button", { name: copy.deleteBook }));
+
+    expect(screen.getByText(copy.deleteBookBatchConfirmHint(3))).toBeTruthy();
+    expect(screen.getByRole("button", { name: copy.deleteBookBatchConfirm(3) })).toBeTruthy();
+    expect(screen.queryByText(copy.deleteBookConfirmHint)).toBeNull();
+  });
+
+  // A single-book job keeps the original wording, which was already accurate.
+  it("keeps the single-book wording when the job holds one book", async () => {
+    const user = userEvent.setup();
+    const { container } = renderDrawer(bookUnit({ status: "completed" }));
+    await user.click(within(container).getByRole("button", { name: copy.deleteBook }));
+
+    expect(screen.getByText(copy.deleteBookConfirmHint)).toBeTruthy();
+    expect(screen.getByRole("button", { name: copy.deleteBookConfirm })).toBeTruthy();
+  });
+
   it("reports the gate's approval to the caller with the focused child", async () => {
     const user = userEvent.setup();
     const { card, props } = renderDrawer(gateUnit());
