@@ -7517,6 +7517,22 @@ fn build_external_adapter_command(
     })
 }
 
+/// The OCR and Zotero wrappers import PyMuPDF, pypdf, requests and markdown,
+/// which the `ocr` workspace member declares and uv installs into the repo-root
+/// `.venv`. A bare interpreter only ever found them where a machine happened to
+/// have them installed globally, so these scripts go through `uv run --package`
+/// exactly like the translation, index and digest stages already do. The command
+/// runs from the OCR root, from which uv discovers the enclosing workspace.
+fn ocr_python_args(script: &Path) -> Vec<String> {
+    vec![
+        "run".into(),
+        "--package".into(),
+        "ocr".into(),
+        "python".into(),
+        display_path(script),
+    ]
+}
+
 fn build_local_pdf_folder_command(
     job: &BookPipelineJob,
     output_dir: &Path,
@@ -7544,14 +7560,17 @@ fn build_local_pdf_folder_command_for_root(
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: "local PDF conversion wrapper".into(),
-        program: homebrew_python().unwrap_or_else(|| PathBuf::from("python3")),
-        args: vec![
-            display_path(&script),
-            "--input-dir".into(),
-            input_dir.into(),
-            "--output-dir".into(),
-            display_path(output_dir),
-        ],
+        program: PathBuf::from("uv"),
+        args: {
+            let mut args = ocr_python_args(&script);
+            args.extend([
+                "--input-dir".into(),
+                input_dir.into(),
+                "--output-dir".into(),
+                display_path(output_dir),
+            ]);
+            args
+        },
         env: Vec::new(),
         cwd: Some(root.to_path_buf()),
         output_dir: output_dir.to_path_buf(),
@@ -7624,7 +7643,7 @@ fn build_zotero_worker_conversion_command_for_source(
             display_path(&script)
         ));
     }
-    let mut args = vec![display_path(&script)];
+    let mut args = ocr_python_args(&script);
     match source.kind.as_str() {
         "zotero_attachment" => {
             let selector = non_empty(source.selector.as_deref())
@@ -7670,7 +7689,7 @@ fn build_zotero_worker_conversion_command_for_source(
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: ZOTERO_CONVERSION_COMMAND_LABEL.into(),
-        program: homebrew_python().unwrap_or_else(|| PathBuf::from("python3")),
+        program: PathBuf::from("uv"),
         args,
         env: vec![("OCR_OUTPUT_ROOT".into(), display_path(output_dir))],
         cwd: Some(root.to_path_buf()),
@@ -7694,14 +7713,17 @@ fn build_mineru_command_for_root(
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: "MinerU extraction wrapper".into(),
-        program: homebrew_python().unwrap_or_else(|| PathBuf::from("python3")),
-        args: vec![
-            display_path(&script),
-            "--attachment-key".into(),
-            selector.to_string(),
-            "--output-dir".into(),
-            display_path(output_dir),
-        ],
+        program: PathBuf::from("uv"),
+        args: {
+            let mut args = ocr_python_args(&script);
+            args.extend([
+                "--attachment-key".into(),
+                selector.to_string(),
+                "--output-dir".into(),
+                display_path(output_dir),
+            ]);
+            args
+        },
         env: vec![("OCR_OUTPUT_ROOT".into(), display_path(output_dir))],
         cwd: Some(root.to_path_buf()),
         output_dir: output_dir.to_path_buf(),
@@ -7738,12 +7760,12 @@ fn build_zotero_discovery_command_for_root(
             display_path(&script)
         ));
     }
-    let mut args = vec![
-        display_path(&script),
+    let mut args = ocr_python_args(&script);
+    args.extend([
         "--dry-run".into(),
         "--limit".into(),
         limit.clamp(1, 100).to_string(),
-    ];
+    ]);
     if source.kind == "zotero_attachment" {
         if let Some(selector) = non_empty(source.selector.as_deref()) {
             args.push("--attachment-key".into());
@@ -7764,7 +7786,7 @@ fn build_zotero_discovery_command_for_root(
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: "Zotero discovery dry-run".into(),
-        program: homebrew_python().unwrap_or_else(|| PathBuf::from("python3")),
+        program: PathBuf::from("uv"),
         args,
         env: Vec::new(),
         cwd: Some(root.to_path_buf()),
@@ -8130,12 +8152,67 @@ fn extra_program_dirs() -> Vec<PathBuf> {
         dirs.push(home.join(".cargo").join("bin"));
         dirs.push(home.join(".bun").join("bin"));
         dirs.push(home.join(".volta").join("bin"));
+        dirs.extend(nvm_bin_dirs(&home.join(".nvm")));
     }
     #[cfg(target_os = "windows")]
     if let Some(appdata) = env::var_os("APPDATA") {
         dirs.push(PathBuf::from(appdata).join("npm"));
     }
     dirs
+}
+
+/// nvm keeps every Node under a version directory, so unlike the other roots its
+/// `bin` cannot be written as a constant. The installed versions are the ground
+/// truth; `~/.nvm/alias/default` only chooses among them, and because it may name
+/// something not installed (a bare `22`, an `lts/*`, a version since removed) the
+/// remaining installs stay behind it newest-first rather than leaving no Node.
+fn nvm_bin_dirs(nvm_root: &Path) -> Vec<PathBuf> {
+    let mut versions = fs::read_dir(nvm_root.join("versions").join("node"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join("bin").is_dir())
+        .collect::<Vec<_>>();
+    versions.sort_by_key(|path| std::cmp::Reverse(nvm_version_key(path)));
+    if let Some(position) = nvm_default_alias(nvm_root).and_then(|alias| {
+        versions
+            .iter()
+            .position(|path| nvm_version_matches(path, &alias))
+    }) {
+        versions.swap(0, position);
+    }
+    versions.into_iter().map(|path| path.join("bin")).collect()
+}
+
+fn nvm_default_alias(nvm_root: &Path) -> Option<String> {
+    let alias = fs::read_to_string(nvm_root.join("alias").join("default")).ok()?;
+    let alias = alias.trim().trim_start_matches('v').to_string();
+    (!alias.is_empty()).then_some(alias)
+}
+
+fn nvm_version_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .map(|name| name.trim_start_matches('v'))
+        .unwrap_or_default()
+}
+
+/// `v9.1.0` sorts below `v24.0.0`, which a plain string comparison gets backwards.
+fn nvm_version_key(path: &Path) -> Vec<u64> {
+    nvm_version_name(path)
+        .split('.')
+        .map(|part| part.parse().unwrap_or_default())
+        .collect()
+}
+
+/// A `22` alias means the `v22.*` install, not `v22` exactly and not `v220.*`.
+fn nvm_version_matches(path: &Path, alias: &str) -> bool {
+    let name = nvm_version_name(path);
+    name == alias
+        || name
+            .strip_prefix(alias)
+            .is_some_and(|rest| rest.starts_with('.'))
 }
 
 /// `PATH` first so a user who put a specific toolchain in front keeps it; the
@@ -8208,16 +8285,20 @@ fn resolve_runner_program_in(dirs: &[PathBuf], program: &Path) -> PathBuf {
     lookup_program_in(dirs, name).unwrap_or_else(|| program.to_path_buf())
 }
 
-/// The launcher downloads a private JRE and `run_epubcheck.js` already honours
-/// `BIBLIOSMITH_JAVA`; resolving the same way here keeps the Rust EPUBCheck call
-/// on that contract instead of whatever `java` a desktop session inherited.
-/// Resolved per call, not cached: preparing the runtime from Settings mid-session
-/// has to take effect on the next stage rather than after a restart.
+/// The launcher downloads a private JRE and CPython, and `run_epubcheck.js` /
+/// `run_python.js` already honour `BIBLIOSMITH_JAVA` / `BIBLIOSMITH_PYTHON`;
+/// resolving the same way here keeps the Rust EPUBCheck and bilingual-build
+/// calls on that contract instead of whatever interpreter a desktop session
+/// inherited. Resolved per call, not cached: preparing a runtime from Settings
+/// mid-session has to take effect on the next stage rather than after a restart.
 fn resolve_runner_program(program: &Path) -> PathBuf {
-    if program.as_os_str() == "java" {
-        if let Some(path) = crate::managed_java_executable() {
-            return path;
-        }
+    let managed = match program.as_os_str().to_str() {
+        Some("java") => crate::managed_java_executable(),
+        Some("python3") => crate::managed_python_executable(),
+        _ => None,
+    };
+    if let Some(path) = managed {
+        return path;
     }
     resolve_runner_program_in(program_search_dirs(), program)
 }
@@ -9600,10 +9681,10 @@ fn local_reading_repo_root() -> Result<PathBuf, String> {
     // self-hosted CI runner's own checkout sitting on the same disk); it stays
     // here purely as the dev/test fallback when no runtime config exists yet.
     if let Some(repo_root) = crate::configured_repo_root() {
-        return Ok(repo_root);
+        return existing_repo_root(repo_root);
     }
     if let Some(repo_root) = crate::bibliosmith_home_repo_root() {
-        return Ok(repo_root);
+        return existing_repo_root(repo_root);
     }
 
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -9620,15 +9701,18 @@ fn local_reading_repo_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "Could not locate bibliosmith repo root.".to_string())
 }
 
-/// The OCR and Zotero workers import PaddleOCR/PyMuPDF, which live in the
-/// Homebrew CPython 3.11 rather than the launcher's managed runtime, so that
-/// interpreter stays the first choice. Intel Macs keep Homebrew under
-/// `/usr/local`; anywhere else the caller falls back to a resolved `python3`.
-fn homebrew_python() -> Option<PathBuf> {
-    ["/opt/homebrew/bin/python3.11", "/usr/local/bin/python3.11"]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| path.is_file())
+/// The repo root is the cwd of nearly every runner command, and the default one
+/// (`~/BiblioSmith`) is a guess that need not exist. Left unchecked the spawn
+/// itself fails and the user reads an errno about a directory they never chose,
+/// so the missing root is named here together with the settings that fix it.
+fn existing_repo_root(repo_root: PathBuf) -> Result<PathBuf, String> {
+    if repo_root.is_dir() {
+        return Ok(repo_root);
+    }
+    Err(format!(
+        "BiblioSmith 仓库目录不存在：{}。请在设置里选择本地 bibliosmith 仓库目录，或把 BIBLIOSMITH_HOME 指向已有的仓库。",
+        display_path(&repo_root)
+    ))
 }
 
 fn source_title(source: &BookPipelineSource) -> String {
@@ -14766,6 +14850,68 @@ mod tests {
         assert_eq!(carried, program_search_dirs());
     }
 
+    fn nvm_fixture(root: &Path, versions: &[&str], default_alias: Option<&str>) -> PathBuf {
+        let nvm_root = root.join(".nvm");
+        for version in versions {
+            fs::create_dir_all(
+                nvm_root
+                    .join("versions")
+                    .join("node")
+                    .join(version)
+                    .join("bin"),
+            )
+            .unwrap();
+        }
+        if let Some(alias) = default_alias {
+            let alias_dir = nvm_root.join("alias");
+            fs::create_dir_all(&alias_dir).unwrap();
+            fs::write(alias_dir.join("default"), format!("{alias}\n")).unwrap();
+        }
+        nvm_root
+    }
+
+    // A machine whose only node came from nvm has it under a versioned directory
+    // no constant can spell, so `build_reading` used to fail to spawn there.
+    #[test]
+    fn nvm_bin_dirs_lead_with_the_default_alias() {
+        let root = temp_root("nvm-default-alias");
+        let nvm_root = nvm_fixture(&root, &["v18.20.4", "v22.11.0", "v24.17.0"], Some("22"));
+
+        let dirs = nvm_bin_dirs(&nvm_root);
+
+        assert_eq!(
+            dirs.first(),
+            Some(&nvm_root.join("versions/node/v22.11.0/bin")),
+            "the default alias should win over the newest install"
+        );
+        assert_eq!(dirs.len(), 3, "the other installs stay as fallbacks");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    // This machine's own `~/.nvm/alias/default` says `22` while only v24 is
+    // installed; naming nothing installed must not leave the search without node.
+    #[test]
+    fn nvm_bin_dirs_fall_back_to_the_newest_install() {
+        let root = temp_root("nvm-stale-alias");
+        let nvm_root = nvm_fixture(&root, &["v9.11.2", "v24.17.0"], Some("22"));
+
+        assert_eq!(
+            nvm_bin_dirs(&nvm_root),
+            vec![
+                nvm_root.join("versions/node/v24.17.0/bin"),
+                nvm_root.join("versions/node/v9.11.2/bin"),
+            ],
+            "v24 outranks v9 numerically, not as a string"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn nvm_bin_dirs_are_empty_without_nvm() {
+        let root = temp_root("nvm-absent");
+        assert!(nvm_bin_dirs(&root.join(".nvm")).is_empty());
+    }
+
     // Every process command the pipeline builds must be a bare name the resolver
     // handles or an already-resolved absolute path; a relative multi-component
     // program would silently depend on the child's cwd.
@@ -19726,6 +19872,117 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    fn zotero_route(route_kind: &str) -> BookPipelineRouteItem {
+        BookPipelineRouteItem {
+            id: "ATTACH1".into(),
+            title: "Fixture attachment".into(),
+            source_kind: "zotero_attachment".into(),
+            source_ref: "ATTACH1".into(),
+            route_kind: route_kind.into(),
+            can_run: true,
+            blocked_reason: None,
+            summary: "fixture route".into(),
+            route_override: None,
+        }
+    }
+
+    fn assert_runs_in_the_ocr_workspace(command: &RunnerCommand, script: &str) {
+        assert_eq!(
+            command.program,
+            PathBuf::from("uv"),
+            "{}: a bare interpreter only finds PyMuPDF where it happens to be installed globally",
+            command.label
+        );
+        assert_eq!(
+            command.args[..4],
+            [
+                "run".to_string(),
+                "--package".to_string(),
+                "ocr".to_string(),
+                "python".to_string(),
+            ],
+            "{} must resolve its imports from the workspace venv",
+            command.label
+        );
+        assert!(
+            command.args[4].ends_with(script),
+            "{} should run {script}, got {}",
+            command.label,
+            command.args[4]
+        );
+    }
+
+    // The OCR line was the one pipeline stage still spawning a bare interpreter,
+    // so its imports came from whatever the machine happened to have installed.
+    #[test]
+    fn every_ocr_entry_point_runs_through_the_workspace_venv() {
+        let root = temp_root("ocr-workspace-venv");
+        let input = root.join("input");
+        let output = root.join("output");
+        fs::create_dir_all(&input).unwrap();
+        let worker_root = fake_full_worker_root(&root);
+        fake_wrapper_root(&root);
+        let store = BookPipelineStore::for_test(&root);
+        let job = queue_job(
+            &store,
+            local_pdf_source(&input),
+            "conversion_only".into(),
+            BookPipelinePreviewConfig::default(),
+        )
+        .unwrap();
+
+        assert_runs_in_the_ocr_workspace(
+            &build_local_pdf_folder_command_for_root(&job, &output, &worker_root).unwrap(),
+            "pdf_to_html_paddleocr.py",
+        );
+        assert_runs_in_the_ocr_workspace(
+            &build_zotero_conversion_command_for_source(
+                &fake_direct_zotero_source(),
+                &zotero_route("direct_text"),
+                0,
+                &output,
+                &worker_root,
+            )
+            .unwrap(),
+            "zotero_llm_worker.py",
+        );
+        assert_runs_in_the_ocr_workspace(
+            &build_zotero_conversion_command_for_source(
+                &fake_direct_zotero_source(),
+                &zotero_route("mineru"),
+                0,
+                &output,
+                &worker_root,
+            )
+            .unwrap(),
+            "mineru.py",
+        );
+        assert_runs_in_the_ocr_workspace(
+            &build_zotero_discovery_command_for_root(&fake_direct_zotero_source(), 5, &worker_root)
+                .unwrap(),
+            "zotero_llm_worker.py",
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    // `~/BiblioSmith` is a guess, not a promise. Handing a missing directory to
+    // the runner as its cwd only produced an errno about a path the user never
+    // picked, so the check has to name the settings that fix it instead.
+    #[test]
+    fn missing_repo_root_names_the_settings_that_fix_it() {
+        let missing = temp_root("repo-root-absent");
+        let error = existing_repo_root(missing.clone()).unwrap_err();
+
+        assert!(error.contains(&display_path(&missing)), "{error}");
+        assert!(error.contains("设置"), "{error}");
+        assert!(error.contains("BIBLIOSMITH_HOME"), "{error}");
+
+        fs::create_dir_all(&missing).unwrap();
+        assert_eq!(existing_repo_root(missing.clone()).unwrap(), missing);
+        fs::remove_dir_all(&missing).ok();
+    }
+
     #[test]
     fn local_pdf_runner_command_uses_existing_wrapper_contract() {
         let root = temp_root("local-pdf-command");
@@ -19753,7 +20010,17 @@ mod tests {
         assert_eq!(command.label, "local PDF conversion wrapper");
         assert_eq!(command.cwd, Some(wrapper_root));
         assert_eq!(command.output_dir, output);
-        assert_eq!(command.args[0], display_path(&wrapper_script));
+        assert_eq!(command.program, PathBuf::from("uv"));
+        assert_eq!(
+            command.args[..5],
+            [
+                "run".to_string(),
+                "--package".to_string(),
+                "ocr".to_string(),
+                "python".to_string(),
+                display_path(&wrapper_script),
+            ]
+        );
         assert!(has_arg_pair(
             &command.args,
             "--input-dir",
