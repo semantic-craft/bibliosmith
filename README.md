@@ -4,15 +4,14 @@
 
 目标很简单：把你电脑上已有的 EPUB、PDF、论文和书稿，整理成干净的 Markdown、中文译稿、HTML、EPUB 或双语 EPUB，方便自己阅读和研究。
 
-## What Changed
+## Scope
 
-- 默认流程不再做公版书搜索、版权状态判断、public-domain release 或 private-use declaration。
-- 新书默认放在 `books/local/{target}/{number}_{title_author}/`。
-- 本地书源复制到 `source/original.*`，只记录文件名、格式、SHA-256、语言和抽取状态。
-- 最终阅读产物放在 `output/reading/`，不再使用 `output/release/` 或 `output/private_artifacts/` 作为完成标准。
-- 上游 `template/epub_pipeline/` 和旧 `skills/public-domain-epub-pipeline/` 保留作参考，不是本仓库的默认启动路径。
+- New projects live under `books/local/{target}/{number}_{title_author}/`.
+- The local source is copied to `source/original.*`; its manifest records only file identity and processing state.
+- Reading artifacts are written to `output/reading/`.
+- The repository contains no book-discovery, source-rights review, or book-publication pipeline.
 
-本仓库不提供 DRM 移除、绕过访问控制、盗版全文查找或公开发布授权判断。
+The project does not remove DRM, bypass access controls, locate unauthorized full text, or decide whether a book may be published.
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md)。
 
@@ -146,6 +145,20 @@ Extract source/original.epub to source/source.md, split chapters, translate to C
 
 For long academic books, keep one book per project and one major translation run per thread.
 
+## Optional Digest
+
+Enable **BiblioSmith Digest** when you want a compact reading edition in
+addition to the regular outputs. The Launcher exposes this as an explicit
+output choice. For a manual run, write `digest.config.json` in the book project
+and run:
+
+```sh
+python -m digest.bibliosmith_digest --book-root books/local/{target}/{number}_{title_author}
+```
+
+The result remains a standard EPUB. See the
+[Digest guide](readme/digest/README.en.md) for configuration and review steps.
+
 ## Skills
 
 Default skill:
@@ -157,8 +170,6 @@ Useful supporting skills:
 - `skills/expert-translation-quality/SKILL.md`
 - `skills/translation-quality-defect-families/SKILL.md`
 - `skills/print-compatible-book-layout/SKILL.md`
-
-Do not use `skills/public-domain-epub-pipeline/SKILL.md` unless you intentionally want to work on the upstream public-domain workflow.
 
 Skill source files live under `skills/`, and that is the only skill directory a
 fresh clone has. `.agents/skills` and `.claude/skills` are a per-developer
@@ -192,9 +203,6 @@ cd tools/bibliosmith-launcher/source/src-tauri && cargo test
 cd tools/bibliosmith-launcher/source && npm ci && npx tsc --noEmit && npm test && npm run test:startup-contract
 ```
 
-Expected counts, measured 2026-07-26: translation engine 81, OCR 18, Zotero CLI
-62, repository suites 89, launcher backend 209, launcher frontend 122.
-
 `--package translation-engine` is not optional: it installs the workspace member
 so the CLI tests can reach its console scripts. A plain `uv sync` at the
 repository root uninstalls that member, after which a bare `pytest` fails to
@@ -215,4 +223,4 @@ The repository itself can be synced to another machine. Real books should be cop
 
 Open-source home: <https://github.com/semantic-craft/bibliosmith>
 
-Earlier license texts are preserved under `license/`. Do not package sample book content, release EPUBs, covers, or translations as your own skill assets.
+Inherited license texts are preserved under `license/`. Do not package sample book content, generated EPUBs, covers, or translations as your own skill assets.

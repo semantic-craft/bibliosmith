@@ -394,8 +394,8 @@ If the round found only format, asset, path, EPUB structure, or other non-transl
   发现方式：先把源文标题与译文标题配对，扫描 `1.67`、`2.56`、缺失 `2.45a` 等编号空洞或替换；再检查源文有具体地名处，译文是否变成现代概括句。逐句细读前，先对照每章开端与结尾的叙事弧线。
 - Low-token audit: Use heading counts and exact scans before asking an agent to reread prose, for example `rg -n "^## " chapters/src chapters/final`, `rg -n "1\\.67|2\\.56|2\\.45a|归期|现代|告诉她|愿你" chapters/final chapters/translated`, plus a small-context source comparison around the first confirmed drift.
   低 token 审计：先用标题计数和精确扫描，不要让 agent 盲读整章，例如 `rg -n "^## " chapters/src chapters/final`、`rg -n "1\\.67|2\\.56|2\\.45a|归期|现代|告诉她|愿你" chapters/final chapters/translated`，再只对首个确认漂移点附近做小上下文源文对照。
-- Fix by: Restore one target unit per source verse or documented variant, keep the source chapter boundary, and rebuild the target prose from the local verse and its neighboring arc. If a public-domain reference translation is used, treat it as a witness, not as wording to copy.
-  修复方式：恢复每个源诗节或已登记异文对应一个目标语单元，保住源文章界，并从本节源文与邻近弧线重建中文。若使用公版参考译本，只作 witness，不复制措辞。
+- Fix by: Restore one target unit per source verse or documented variant, keep the source chapter boundary, and rebuild the target prose from the local verse and its neighboring arc. If an external reference translation is used, treat it as a witness, not as wording to copy.
+  修复方式：恢复每个源诗节或已登记异文对应一个目标语单元，保住源文章界，并从本节源文与邻近弧线重建中文。若使用外部参考译本，只作 witness，不复制措辞。
 - Recheck: Rerun heading-count comparison, scan for invented verse ids, then perform a full-chapter source-to-target pass. The fixing round must be `FIXED_RECHECK_REQUIRED`; only the following full-chapter zero-issue round can PASS.
   复查：重跑标题计数，扫描自创节号，再做整章源文对译文复查。修复轮必须记为 `FIXED_RECHECK_REQUIRED`；只有随后新增的整章零问题轮才能 PASS。
 

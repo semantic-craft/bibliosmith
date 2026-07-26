@@ -1,14 +1,11 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
-  // Thin OpenCode adapter only. The authoritative workflow remains AGENTS.md
-  // plus template/epub_pipeline/** so Codex App, Claude Code, aider, and other
-  // local-file clients keep using the same project rules.
+  // Thin OpenCode adapter. AGENTS.md and the local-reading skill are the
+  // shared entrypoints for every local-file client.
   "instructions": [
     "AGENTS.md",
-    "template/epub_pipeline/README.md",
-    "template/epub_pipeline/common/README.md",
-    "skills/public-domain-epub-pipeline/SKILL.md"
+    "skills/local-book-reading-pipeline/SKILL.md"
   ],
 
   "share": "disabled",

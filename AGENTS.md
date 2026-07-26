@@ -1,6 +1,6 @@
 # Local Reading Agent Instructions
 
-本仓库的默认任务是本地书籍/论文阅读与翻译，不是公版书发布。
+本仓库只处理用户已经拥有的本地书籍、论文和文稿。
 
 ## Default Workflow
 
@@ -11,11 +11,12 @@
 - Keep final reading outputs under `output/reading/`.
 - Keep book-specific source text, translations, QA, and EPUBs out of Git.
 
-## Do Not Start The Upstream Rights Workflow
+## Repository Scope
 
-Do not run public-domain search, rights checks, `metadata/rights_checklist.md`, private-use declarations, `output/release/`, or `output/private_artifacts/` unless the user explicitly asks to work on the upstream public-domain BiblioSmith workflow.
-
-The upstream files under `template/epub_pipeline/` remain for reference and possible reuse. They are not the source of truth for this local-reading fork.
+- Do not search for book-length source text or bypass DRM/access controls.
+- Do not make publication or licensing decisions.
+- Do not publish or commit real source text, translations, QA, or generated EPUBs unless the user explicitly requests a scoped export.
+- Keep repository work on the local-reading pipeline and its supporting launcher, translation, OCR, Zotero, digest, and layout components.
 
 ## Local Project Contract
 
@@ -34,7 +35,7 @@ qa/
 output/reading/
 ```
 
-`metadata/source_manifest.json` records local-file evidence only: file name, SHA-256, format, source language, target language, extraction status, and notes. It must not contain public-domain conclusions or copyright legal analysis.
+`metadata/source_manifest.json` records local-file identity only: file name, SHA-256, format, source language, target language, extraction status, and notes.
 
 ## Quality Bar
 
@@ -45,9 +46,9 @@ output/reading/
 - Use `skills/translation-quality-defect-families/SKILL.md` only for recurring translation-quality lessons.
 - Use `skills/print-compatible-book-layout/SKILL.md` when building EPUB/HTML layout.
 
-## Upstream Boundary
+## License Boundary
 
-Keep upstream license files. Do not copy upstream sample books, release EPUBs, covers, or translations into local skill packages.
+Keep inherited license files. Do not copy sample books, generated EPUBs, covers, or translations into local skill packages.
 
 ## Agent skills
 

@@ -889,28 +889,28 @@ export function recordFrontendActivity(level: string, message: string) {
 export function readProjectDocument(kind: "readme" | "howto", locale: string) {
   if (!isTauriRuntime()) {
     const content = kind === "readme"
-      ? `# BiblioSmith 书坊公版书翻译项目
+      ? `# BiblioSmith 本地阅读翻译工作台
 
 <table align="center">
   <tr>
     <td align="center"><h3><a href="./README.zh-CN.md">简体中文</a></h3></td>
-    <td align="center"><h3><a href="./doc/public/how-to-use-prompts.zh-CN.md">How to use</a></h3></td>
+    <td align="center"><h3><a href="./docs/guides/how-to-use-local-reading.zh-CN.md">How to use</a></h3></td>
   </tr>
 </table>
 
-BiblioSmith 书坊是一个多语言公版书翻译与 EPUB 制作流程。
+BiblioSmith 用于处理用户已经拥有的本地 EPUB、PDF、论文和书稿。
 
 ## 快速开始
 
-- 打开 [How to use](./doc/public/how-to-use-prompts.zh-CN.md)
-- 查看 \`template/epub_pipeline\`
+- 打开 [How to use](./docs/guides/how-to-use-local-reading.zh-CN.md)
+- 从本地文件创建 \`books/local/\` 项目
 `
       : `# How to use
 
-## 选择客户端
+## 处理本地书籍
 
-- 使用 BiblioSmith Launcher 安装 OpenCode Desktop。
-- 阅读 [README](./README.zh-CN.md)。
+- 在 Launcher 中选择本地 EPUB、PDF 或 Markdown。
+- 完成抽取、翻译、审校后，从 output/reading/ 打开产物。
 `;
     return Promise.resolve<ProjectDocument>({
       kind,

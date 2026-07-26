@@ -43,7 +43,7 @@ successor exists. The mapping, established 2026-07-26:
 | `#96` reader-verification evidence slot | #29 | |
 | `#97` Windows worker runbook paths | #34 | |
 | `#98` glossary output-side check | #32 | |
-| `#99` two bilingual builders | #35 | Requalified: they are two tools, not a fork. Closed out by `docs/bilingual-epub-builders.md`. |
+| `#99` two bilingual builders | #35 | Resolved: the old manual publishing builder was removed; the Launcher builder is documented in `docs/bilingual-epub-builder.md`. |
 | `#41`–`#51`, `#80`, `#87` | — | Closed map tickets; archive numbering, cited for their decisions. |
 
 Numbers written as `archive #NN` below always mean the archived repository.

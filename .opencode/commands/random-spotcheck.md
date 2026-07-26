@@ -1,34 +1,20 @@
 ---
-description: Run or plan the post-EPUB stratified random spot-check gate.
+description: Review representative local-reading samples against their source.
 agent: book-runner
 ---
 
-在 `$ARGUMENTS` 指定的书籍工程目录内执行或规划 EPUB 后分层随机抽检。
+在 `$ARGUMENTS` 指定的本地书籍工程内执行或规划代表性抽检。
 
 执行前必须读取：
 
 - `AGENTS.md`
-- `template/epub_pipeline/README.md`
-- `template/epub_pipeline/common/README.md`
-- `template/epub_pipeline/common/references/stratified_random_spotcheck.md`
-- `template/epub_pipeline/common/prompts/16a_stratified_random_spotcheck.md`
-- 书籍工程内复制后的对应 references/prompts/state 文件
-
-默认流程：
-
-```powershell
-npm run review:random-samples
-npm run review:random-validate
-```
-
-最终 release 前必须通过：
-
-```powershell
-npm run review:random-validate:pass
-```
+- `skills/local-book-reading-pipeline/SKILL.md`
+- `skills/expert-translation-quality/SKILL.md`
+- 书籍工程内的 `metadata/source_manifest.json`、`chapters/src/`、`chapters/final/` 和 `qa/status.md`
 
 注意：
 
-- 样本必须来自读者可见 audit units，不是人工挑选的“看起来没问题”的段落。
-- 至少两个独立 agent 审查样本；主执行 agent 不能自证通过。
-- 任一 P0/P1/P2 必须写入修复路径、fix log 和 closure check；修复后使用新 seed 重新抽检。
+- 样本至少覆盖开头、中段、结尾，以及脚注、表格、长段落或高术语密度等风险单元。
+- 每个样本必须能回到对应源文，检查漏译、误译、结构、注释和术语。
+- 发现的问题先在同类范围内扩查，修复后重新抽检。
+- 结果写入 `qa/`；不要把抽检写成公开发布门禁。

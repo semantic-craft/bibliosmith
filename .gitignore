@@ -8,10 +8,6 @@
 # macOS Finder metadata.
 .DS_Store
 
-books/tools/
-**/tools/zulu17-jre/
-**/tools/zulu17-jre.zip
-
 # Local credentials and machine-specific environment. Commit only the empty
 # repository-wide registry.
 .env
@@ -29,32 +25,6 @@ launcher-console.txt
 .opencode/package.json
 .opencode/package-lock.json
 .opencode/bun.lock
-books/*/*/output/epub_work/
-books/*/*/state/*.log
-books/*/*/assets/**/cover_source*.png
-books/*/*/assets/**/cover_background*.png
-books/*/*/output/cover_source*.png
-books/*/*/output/cover_source_prompt.txt
-books/*/*/output/cover_fixed_centered*.png
-
-# Repository-level checks must not create a confusing shared book output dir.
-books/output/
-
-# Large source/QA evidence stays local; keep rights/source notes, checksums,
-# small necessary crops, and final EPUB-facing assets in Git.
-books/zh-Hans/6_天文学大成_托勒密/source/facsimile/*.pdf
-books/zh-Hans/6_天文学大成_托勒密/qa/technical/page_screenshots/almagest-pdf-page-*.png
-books/zh-Hans/6_天文学大成_托勒密/qa/technical/page_screenshots/*contact_sheet*.jpg
-books/zh-Hans/6_天文学大成_托勒密/qa/technical/page_screenshots/*contact_sheet*.png
-books/zh-Hans/6_天文学大成_托勒密/qa/technical/page_screenshots/book_i11_page_028_large.jpg
-books/zh-Hans/6_天文学大成_托勒密/preproduction/stage2_sample/facsimile_work/source_pages/
-books/zh-Hans/6_天文学大成_托勒密/preproduction/stage2_sample/facsimile_work/*contact*.jpg
-books/zh-Hans/6_天文学大成_托勒密/preproduction/stage2_sample/facsimile_work/*contact*.png
-books/zh-Hans/6_天文学大成_托勒密/preproduction/stage2_sample/facsimile_work/debug_*.png
-
-# Legacy large fallback cover; final cover.jpg remains tracked.
-books/zh-Hans/1_黑人北极探险家_马修·A·汉森/assets/cover.png
-
 # Launcher installers are published as project release attachments.
 tools/bibliosmith-launcher/*.exe
 
@@ -67,13 +37,6 @@ tools/bibliosmith-launcher/*.exe
 # Local private docs should never be tracked.
 doc/private/
 
-# User-provided non-public-domain book projects are private local output.
-# Scripts and templates may be tracked, but private source text, translations,
-# QA records, and EPUB artifacts under this tree must never be published.
-books/private/**
-!books/private/
-!books/private/.gitignore
-
 # Real local reading projects: source books, extracted text, translations, QA,
 # and generated EPUBs stay machine-local unless explicitly synced.
 books/local/**
@@ -81,12 +44,7 @@ books/local/**
 !books/local/.gitignore
 
 # Book-specific screenshot/debug captures must stay under the matching book project.
-/almagest-*.png
 /bibliosmith-*.png
-
-# Temporary local book clones used for validation or comparison.
-tmp_*_book_clone/
-books/*/99_tmp_*/
 # >>> dev-link (Matt Pocock skills — machine-local symlinks, do not commit) >>>
 /.agents/skills/ask-matt
 /.agents/skills/code-review

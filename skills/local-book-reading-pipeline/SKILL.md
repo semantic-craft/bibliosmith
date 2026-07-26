@@ -1,6 +1,6 @@
 ---
 name: local-book-reading-pipeline
-description: Use when processing local EPUB, PDF, HTML, Markdown, TXT, or academic paper files into clean reading projects, translated manuscripts, HTML, EPUB, bilingual EPUB, digest-style reading editions, or QA-checked local outputs. This is the default skill for this fork; it bypasses upstream public-domain search, rights checks, private-use declarations, and release publishing.
+description: Use when processing user-provided EPUB, PDF, HTML, Markdown, TXT, or academic paper files into clean local reading projects, translated manuscripts, HTML, EPUB, bilingual EPUB, digest-style reading editions, or QA-checked local outputs.
 ---
 
 # Local Book Reading Pipeline
@@ -9,9 +9,8 @@ Use this skill for books and papers already present on the user's computer.
 
 ## Hard Boundary
 
-- Do not run public-domain discovery, rights checklists, private-use declarations, `output/release/`, or `output/private_artifacts/`.
 - Do not remove DRM or bypass access controls.
-- Do not search for non-public-domain full text online.
+- Do not search for book-length source text online.
 - Do not publish or commit real source text, translations, QA, or generated EPUBs unless the user explicitly asks.
 
 ## Create Or Find The Project

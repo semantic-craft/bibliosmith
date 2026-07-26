@@ -1,6 +1,6 @@
 ---
 name: expert-translation-quality
-description: Use when translating, reviewing, revising, random-spot-checking, or responding to reader feedback for BiblioSmith book projects where the output must reach expert publication quality rather than merely pass. Triggers include polysemous or context-dependent source words, ambiguous grammar, downstream-context back-checking, expert-level prose polish, chapter post-translation controls, final release reviews, private-use artifact reviews, and any translation-quality issue that requires source-supported disambiguation.
+description: Use when translating, reviewing, revising, random-spot-checking, or responding to reader feedback for BiblioSmith book projects where the output must reach expert reading quality rather than merely pass. Triggers include polysemous or context-dependent source words, ambiguous grammar, downstream-context back-checking, expert-level prose polish, chapter post-translation controls, final reading-output reviews, and any translation-quality issue that requires source-supported disambiguation.
 ---
 
 # Expert Translation Quality / 专家级译文质量

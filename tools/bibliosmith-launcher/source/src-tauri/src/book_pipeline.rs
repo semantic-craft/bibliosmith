@@ -10434,6 +10434,20 @@ fn book_ocr_conversion_root() -> PathBuf {
 }
 
 fn local_reading_repo_root() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    {
+        let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        if let Some(repo_root) = start.ancestors().find(|path| {
+            path.join("AGENTS.md").is_file()
+                && path
+                    .join("tools")
+                    .join("create_local_book_project.py")
+                    .is_file()
+        }) {
+            return Ok(repo_root.to_path_buf());
+        }
+    }
+
     // The installed app's repo root is a runtime choice (configured repoRoot,
     // then BIBLIOSMITH_HOME), never the machine that happened to compile the
     // binary. CARGO_MANIFEST_DIR is a build-time constant baked into the
@@ -13953,9 +13967,9 @@ fn run_promote_stage(
 
 fn prepare_reading_builder(project_root: &Path) -> Result<PathBuf, String> {
     let source_dir = local_reading_repo_root()?
-        .join("template")
-        .join("epub_pipeline")
-        .join("common")
+        .join("tools")
+        .join("bibliosmith-launcher")
+        .join("source")
         .join("scripts");
     let target_dir = project_root.join("scripts");
     fs::create_dir_all(&target_dir).map_err(|err| err.to_string())?;

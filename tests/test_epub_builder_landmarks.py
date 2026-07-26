@@ -19,7 +19,13 @@ class EpubBuilderLandmarksTests(unittest.TestCase):
             final = book_root / "chapters" / "final"
             scripts.mkdir(parents=True)
             final.mkdir(parents=True)
-            source_scripts = REPO_ROOT / "template" / "epub_pipeline" / "common" / "scripts"
+            source_scripts = (
+                REPO_ROOT
+                / "tools"
+                / "bibliosmith-launcher"
+                / "source"
+                / "scripts"
+            )
             shutil.copy(source_scripts / "build_epub.js", scripts / "build_epub.js")
             shutil.copy(source_scripts / "run_python.js", scripts / "run_python.js")
             (final / "chapter_001.md").write_text(

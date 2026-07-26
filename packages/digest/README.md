@@ -107,7 +107,7 @@ python -m digest.bibliosmith_digest --book-root books/{target}/{number}_{book_id
 ```python
 from digest.bibliosmith_digest import run_digest
 
-result = run_digest("books/zh-Hans/1_example")
+result = run_digest("books/local/zh-Hans/1_example")
 ```
 
 ## Quality Expectations

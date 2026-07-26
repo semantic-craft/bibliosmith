@@ -207,25 +207,14 @@ class BiblioSmithDigestDocumentationTest(unittest.TestCase):
             self.assertTrue(path.exists(), f"Missing Digest module asset: {path}")
 
     def test_main_readmes_expose_digest_with_same_language_links(self):
-        # Local-reading fork note: the root README.md and README.zh-CN.md were
-        # intentionally rewritten into the "本地阅读翻译工作台" local-reading entry
-        # (see AGENTS.md), which does not advertise the post-EPUB Digest module on
-        # the front page. The upstream Digest marketing survives in the readme/*.md
-        # localized copies, which are the surfaces this test still guards.
         readmes = [
             {
-                "path": REPO_ROOT / "readme" / "README.zh-TW.md",
-                "link": "./digest/README.zh-TW.md",
-                "prompt": "未聲明是否啟用 BiblioSmith Digest 時，請自動判斷；長篇小說、專業書籍、哲學書在 EPUB 輸出後生成 Digest，短篇小說、自然科學類和其他類型不生成。",
-                "command": "python -m digest.bibliosmith_digest --book-root",
-                "layout": "`digest/`",
+                "path": REPO_ROOT / "README.md",
+                "link": "readme/digest/README.en.md",
             },
             {
-                "path": REPO_ROOT / "readme" / "README.ja.md",
-                "link": "./digest/README.ja.md",
-                "prompt": "BiblioSmith Digest の利用が明示されていない場合は自動判断します。長編小説、専門書、哲学書は EPUB 出力後に Digest を生成し、短編小説、自然科学系、その他の種類では生成しません。",
-                "command": "python -m digest.bibliosmith_digest --book-root",
-                "layout": "`digest/`",
+                "path": REPO_ROOT / "README.zh-CN.md",
+                "link": "readme/digest/README.zh-CN.md",
             },
         ]
 
@@ -233,19 +222,18 @@ class BiblioSmithDigestDocumentationTest(unittest.TestCase):
             text = item["path"].read_text("utf-8")
             self.assertIn("BiblioSmith Digest", text, str(item["path"]))
             self.assertIn(item["link"], text, str(item["path"]))
-            self.assertIn(item["prompt"], text, str(item["path"]))
-            self.assertIn(item["command"], text, str(item["path"]))
+            self.assertIn("python -m digest.bibliosmith_digest --book-root", text, str(item["path"]))
             self.assertIn("digest.config.json", text, str(item["path"]))
-            self.assertIn(item["layout"], text, str(item["path"]))
-            digest_index = text.index("## BiblioSmith Digest")
-            layout_index = text.index("Repository Layout") if "Repository Layout" in text else text.index("仓库结构") if "仓库结构" in text else text.index("倉庫結構") if "倉庫結構" in text else text.index("リポジトリ構成")
-            folders_index = text.index("Important Folders For Users") if "Important Folders For Users" in text else text.index("用户需要知道的重要目录") if "用户需要知道的重要目录" in text else text.index("使用者需要知道的重要目錄") if "使用者需要知道的重要目錄" in text else text.index("ユーザーが知っておくべき重要フォルダ")
-            self.assertLess(folders_index, digest_index, str(item["path"]))
-            self.assertLess(digest_index, layout_index, str(item["path"]))
+            self.assertIn("books/local/", text, str(item["path"]))
 
     def test_how_to_use_prompt_guide_mentions_digest_decision_and_command(self):
-        text = (REPO_ROOT / "doc" / "public" / "how-to-use-prompts.zh-CN.md").read_text("utf-8")
-        self.assertIn("未声明是否启用 BiblioSmith Digest 时，请自动判断", text)
+        text = (
+            REPO_ROOT
+            / "docs"
+            / "guides"
+            / "how-to-use-local-reading.zh-CN.md"
+        ).read_text("utf-8")
+        self.assertIn("明确勾选 BiblioSmith Digest", text)
         self.assertIn("python -m digest.bibliosmith_digest --book-root", text)
         self.assertIn("digest.config.json", text)
         self.assertIn("输出仍然是标准 EPUB", text)

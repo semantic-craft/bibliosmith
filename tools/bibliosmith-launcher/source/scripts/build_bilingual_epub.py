@@ -8,12 +8,8 @@ positionally from ``metadata/source_map.json`` and ``chapters/final/``, falls
 back to whole-chapter blocks when the counts differ, and writes
 ``output/book_bilingual.epub`` — the path the runner then registers.
 
-It is **not** the template bilingual builder. That one lives at
-``template/epub_pipeline/common/scripts/build_bilingual_parallel_epub.py``,
-requires ``qa/bilingual_parallel/alignment_map.json``, and writes
-``output/book_bilingual_parallel.epub``. The two are separate tools with
-separate contracts, not two versions of one script — see
-``docs/bilingual-epub-builders.md``.
+The launcher owns this builder alongside the single-language builder; see
+``docs/bilingual-epub-builder.md`` for its input and output contract.
 """
 
 from __future__ import annotations
