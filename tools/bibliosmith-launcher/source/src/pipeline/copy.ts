@@ -6,6 +6,10 @@ export function pipelineCopy(locale: PipelineLocale) {
     nav: zh ? "书架" : "Bookshelf",
     title: zh ? "Book Pipeline" : "Book Pipeline",
     provider: zh ? "模型后端" : "Model provider",
+    providerUnconfigured: zh ? "未配置" : "no key",
+    providerKeyMissing: zh
+      ? "所选模型还没有 API Key。请先在「设置 → 模型」里配置，否则这批书会先跑完 OCR，再在翻译阶段挂在鉴权错误上。"
+      : "The selected model has no API key. Configure it under Settings → Models first, or this batch runs OCR to completion and then dies on provider auth at the translate stage.",
     textCleanup: zh ? "翻译时修复段内 OCR / 排版瑕疵" : "Fix within-paragraph OCR / layout defects while translating",
     secondPass: zh ? "反思二遍（更慢，约两倍模型开销）" : "Reflection second pass (slower, roughly double the model spend)",
     continueStage: zh ? "继续下一阶段" : "Continue",

@@ -5,6 +5,7 @@ import type {
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
+  ModelSlotView,
 } from "../types";
 import "./pipeline.css";
 import type { PipelineCopy } from "./copy";
@@ -19,6 +20,7 @@ export type PipelineWorkbenchProps = {
   draft: PipelineDraft;
   preview: BookPipelineRouteItem[];
   zoteroSources: BookPipelineSource[];
+  modelSlots: ModelSlotView[];
   busy: PipelineBusy;
   onDraftChange: (patch: Partial<PipelineDraft>) => void;
   onPreview: () => void;
@@ -88,6 +90,7 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
           draft={props.draft}
           preview={props.preview}
           zoteroSources={props.zoteroSources}
+          modelSlots={props.modelSlots}
           busy={busy}
           onDraftChange={props.onDraftChange}
           onPreview={props.onPreview}

@@ -7,6 +7,7 @@ import type {
   BookPipelineSource,
   BookPipelineStage,
   BookPipelineOutputFormat,
+  ModelSlotView,
 } from "../types";
 import type { PipelineCopy } from "./copy";
 import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
@@ -133,6 +134,40 @@ export const PROVIDER_DEFAULT_CONFIG: Record<string, string> = Object.fromEntrie
 // map directly.
 export function providerDefaultConfig(profileId: string): string {
   return PROVIDER_DEFAULT_CONFIG[profileId] ?? "default";
+}
+
+// Whether the wizard's provider picker decides anything for this draft. App.tsx
+// builds the translation intent with the "expert-agent" profile for expert mode
+// and never reaches the translate stage for a conversion-only job, so in both
+// cases the picked slot is inert and an unconfigured one is not a problem.
+export function providerSelectionApplies(draft: PipelineDraft): boolean {
+  return draft.mode !== "conversion_only" && draft.translationMode === "fast";
+}
+
+// Whether the draft's provider slot has no stored key, which is what makes a job
+// run OCR for a quarter of an hour and then die on provider auth. The catalog is
+// the backend's answer (it reads the Keychain per slot); an empty one means the
+// best-effort read failed, and reporting that as "nothing is configured" would
+// hold back every job on a transient error, so unknown counts as fine.
+export function providerCredentialMissing(
+  draft: PipelineDraft,
+  slots: ModelSlotView[],
+): boolean {
+  if (!providerSelectionApplies(draft)) return false;
+  if (!slots.length) return false;
+  return !slots.some(
+    (slot) =>
+      slot.profileId === draft.providerProfileId &&
+      slot.configId === draft.providerConfigId &&
+      slot.configured,
+  );
+}
+
+// Slot keys the catalog reports a stored key for, for labelling the picker.
+export function configuredSlotKeys(slots: ModelSlotView[]): Set<string> {
+  return new Set(
+    slots.filter((slot) => slot.configured).map((slot) => `${slot.profileId}:${slot.configId}`),
+  );
 }
 
 // Typed as a total map over the contract, so adding a stage without giving it a

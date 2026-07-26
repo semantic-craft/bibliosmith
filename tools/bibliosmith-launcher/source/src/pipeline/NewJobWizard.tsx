@@ -1,15 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { FileText, FolderOpen, Library, RefreshCcw, Search } from "lucide-react";
-import type { BookPipelineRouteItem, BookPipelineSource } from "../types";
+import type { BookPipelineRouteItem, BookPipelineSource, ModelSlotView } from "../types";
 import type { PipelineCopy } from "./copy";
-import { routeKindLabel, routeTone, type PipelineBusy, type PipelineDraft, type RouteOverride } from "./model";
-import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
+import {
+  configuredSlotKeys,
+  providerCredentialMissing,
+  providerSelectionApplies,
+  routeKindLabel,
+  routeTone,
+  type PipelineBusy,
+  type PipelineDraft,
+  type RouteOverride,
+} from "./model";
+import { MODEL_BRANDS, slotDisplayName } from "../pages/settings/modelCatalog";
 
 type WizardProps = {
   copy: PipelineCopy;
   draft: PipelineDraft;
   preview: BookPipelineRouteItem[];
   zoteroSources: BookPipelineSource[];
+  // What the backend reports about each provider slot, including whether it has
+  // a stored key. Empty when the catalog could not be read.
+  modelSlots: ModelSlotView[];
   busy: PipelineBusy;
   onDraftChange: (patch: Partial<PipelineDraft>) => void;
   onPreview: () => void;
@@ -94,7 +106,11 @@ function ZoteroTitleSearch({ copy, busy, onSearch }: { copy: PipelineCopy; busy:
   );
 }
 
-function SourceStep({ copy, draft, busy, onDraftChange, onChooseFolder, onChooseMarkdown, onDiscoverZotero, onSearchZotero, zoteroSources }: WizardProps) {
+function SourceStep({ copy, draft, busy, modelSlots, onDraftChange, onChooseFolder, onChooseMarkdown, onDiscoverZotero, onSearchZotero, zoteroSources }: WizardProps) {
+  // Options stay selectable when they have no key: the slot Settings made active
+  // may itself be unconfigured, and disabling the current value would strand the
+  // picker. The label says so instead, and the confirm step holds the launch.
+  const configured = configuredSlotKeys(modelSlots);
   const cards = [
     { kind: "local_pdf_folder" as const, icon: <FolderOpen size={28} />, title: copy.srcLocalPdfTitle, desc: copy.srcLocalPdfDesc },
     { kind: "zotero_collection" as const, icon: <Library size={28} />, title: copy.srcZoteroTitle, desc: copy.srcZoteroDesc },
@@ -235,16 +251,18 @@ function SourceStep({ copy, draft, busy, onDraftChange, onChooseFolder, onChoose
               }}
             >
               {MODEL_BRANDS.flatMap((brand) =>
-                brand.slots.map((slot) => (
-                  <option
-                    key={`${slot.profileId}:${slot.configId}`}
-                    value={`${slot.profileId}:${slot.configId}`}
-                  >
-                    {brand.slots.length > 1
-                      ? `${brand.brand} · ${slot.label}`
-                      : brand.brand}
-                  </option>
-                )),
+                brand.slots.map((slot) => {
+                  const key = `${slot.profileId}:${slot.configId}`;
+                  const name = slotDisplayName(slot.profileId, slot.configId);
+                  // No catalog means the read failed, not that every slot is
+                  // unconfigured — say nothing rather than mislabel all eight.
+                  const unconfigured = modelSlots.length > 0 && !configured.has(key);
+                  return (
+                    <option key={key} value={key}>
+                      {unconfigured ? `${name} · ${copy.providerUnconfigured}` : name}
+                    </option>
+                  );
+                }),
               )}
             </select>
           </label>
@@ -406,8 +424,9 @@ function PreflightStep({ copy, draft, preview, busy, onDraftChange, routeOverrid
   );
 }
 
-function ConfirmStep({ copy, draft, preview }: WizardProps) {
+function ConfirmStep({ copy, draft, preview, modelSlots }: WizardProps) {
   const routes = executionRoutes(preview);
+  const credentialMissing = providerCredentialMissing(draft, modelSlots);
   const runnable = routes.filter((item) => item.canRun);
   const held = routes.filter((item) => !item.canRun && item.routeKind !== "already_converted");
   const skipped = routes.filter((item) => item.routeKind === "already_converted");
@@ -462,11 +481,23 @@ function ConfirmStep({ copy, draft, preview }: WizardProps) {
             <span className="pl-v">{draft.outputFormats.map((format) => format.toUpperCase()).join(" · ")}</span>
           </div>
         )}
+        {providerSelectionApplies(draft) && (
+          <div className="pl-evi-row">
+            <span className="pl-k">{copy.provider}</span>
+            <span className="pl-v">
+              {slotDisplayName(draft.providerProfileId, draft.providerConfigId)}
+              {credentialMissing ? ` · ${copy.providerUnconfigured}` : ""}
+            </span>
+          </div>
+        )}
         <div className="pl-evi-row">
           <span className="pl-k">{copy.intentTargetLang}</span>
           <span className="pl-v">zh-Hans</span>
         </div>
       </div>
+      {credentialMissing && (
+        <p className="pl-wiz-error pl-span2">{copy.providerKeyMissing}</p>
+      )}
       <div className="pl-card pl-span2">
         <h4 className="pl-card-title">{copy.confirmStructure}</h4>
         <div className="pl-evi-row">
@@ -506,6 +537,9 @@ export function NewJobWizard(props: WizardProps) {
   const missing = sourceMissing(draft);
   const nextDisabled = missing || busy === "folder" || busy === "markdown" || busy === "zotero";
   const previewBusy = busy === "preview";
+  // Holding the launch is the whole point of the ticket: without it the batch
+  // runs OCR for as long as it takes and only then fails on provider auth.
+  const credentialMissing = providerCredentialMissing(draft, props.modelSlots);
 
   const launch = async () => {
     setLaunching(true);
@@ -557,7 +591,7 @@ export function NewJobWizard(props: WizardProps) {
             <button
               className="pl-btn primary"
               type="button"
-              disabled={launching || busy === "queue" || busy === "run"}
+              disabled={launching || credentialMissing || busy === "queue" || busy === "run"}
               onClick={() => void launch()}
             >
               {copy.wizLaunch}
