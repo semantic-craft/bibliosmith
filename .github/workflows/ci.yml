@@ -104,8 +104,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # tsconfig.json includes all of src/, so this typechecks the test files
+      # too — a fixture that drifts from the backend shapes fails here.
       - name: Typecheck
         run: npx tsc --noEmit
+
+      # vitest under jsdom: the pipeline view model, the lib helpers, and the
+      # wizard/drawer interaction contracts. Separate from the startup contract
+      # below, which is a standalone node script with no runner.
+      - name: Unit tests
+        run: npm test
 
       - name: Startup contract
         run: npm run test:startup-contract
