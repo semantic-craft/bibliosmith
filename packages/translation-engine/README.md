@@ -133,6 +133,23 @@ hash, provider profile/config IDs, and translation policy version. A mismatched
 key invalidates the cache. Successful atomic output removes the checkpoint;
 source-preserving degradation remains partial and reports the unit as failed.
 
+## Unit concurrency
+
+Units translate in parallel, up to the `concurrency_limit` their provider entry
+declares; a provider that declares none runs one unit at a time. Chunks within a
+unit stay strictly serial, because each chunk's prompt carries the last 25 words
+of the previous chunk's translation. Every unit reads and writes only paths
+derived from its own unit ID, so units never contend for a checkpoint or an
+output file. The report lists units in manifest order regardless of which
+finished first.
+
+A rate limit stops dispatch rather than the whole run. When a unit exhausts the
+provider's throttle budget, units that have not started are failed retryable
+without a request — attempting them would only churn the same throttle — but
+units already in flight are left to finish and report their own outcome. One of
+them may hold a credential that is still good, and killing it would discard a
+paid call along with the checkpoint prefix it was about to write.
+
 ## Optional source-text cleanup
 
 `textCleanup` is optional and defaults to `false`. When enabled, the target

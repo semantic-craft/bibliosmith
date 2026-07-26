@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AbstractSet, Any, Callable, Mapping, Sequence
@@ -114,28 +116,32 @@ def run_manifest(
     ):
         raise EngineError("invalid_placeholder_retries")
 
-    unit_reports = []
-    for position, unit in enumerate(units):
+    # Latched once by whichever unit exhausts the provider's throttle budget, and
+    # then read by every unit that has not started yet. It stops dispatch; it
+    # never interrupts a unit already in flight. See _rate_limited_report.
+    dispatch_stopped = threading.Event()
+
+    def translate_one(unit: Any) -> dict[str, Any]:
+        if dispatch_stopped.is_set():
+            return _rate_limited_report(project_root, unit)
         try:
-            unit_reports.append(
-                _translate_unit(
-                    project_root=project_root,
-                    source_map=source_map,
-                    task_path=_project_path(
-                        project_root, _required_string(unit, "taskManifestPath")
-                    ),
-                    source_language=str(manifest.get("sourceLanguage", "auto")),
-                    target_language=target_language,
-                    provider=provider,
-                    target_profile=profile,
-                    max_tokens=max_tokens,
-                    translation_policy_version=translation_policy_version,
-                    placeholder_retries=placeholder_retries,
-                    second_pass=active_second_pass,
-                    text_cleanup=text_cleanup,
-                    custom_translation=custom_translation,
-                    custom_reflection=custom_reflection,
-                )
+            return _translate_unit(
+                project_root=project_root,
+                source_map=source_map,
+                task_path=_project_path(
+                    project_root, _required_string(unit, "taskManifestPath")
+                ),
+                source_language=str(manifest.get("sourceLanguage", "auto")),
+                target_language=target_language,
+                provider=provider,
+                target_profile=profile,
+                max_tokens=max_tokens,
+                translation_policy_version=translation_policy_version,
+                placeholder_retries=placeholder_retries,
+                second_pass=active_second_pass,
+                text_cleanup=text_cleanup,
+                custom_translation=custom_translation,
+                custom_reflection=custom_reflection,
             )
         except (
             OSError,
@@ -144,30 +150,38 @@ def run_manifest(
             ProviderError,
             ValueError,
         ) as error:
-            code = getattr(error, "code", "unit_invalid")
-            unit_reports.append(
-                {
-                    "unitId": _safe_unit_id(project_root, unit),
-                    "status": "failed",
-                    "error": {
-                        "code": code,
-                        "retryable": isinstance(error, ProviderUnavailableError),
-                    },
-                }
-            )
             if isinstance(error, RateLimitError):
-                # The provider pool is exhausted for longer than we are
-                # willing to wait; attempting further units would only churn
-                # the same throttle. Fail them retryable and stop.
-                unit_reports.extend(
-                    {
-                        "unitId": _safe_unit_id(project_root, remaining),
-                        "status": "failed",
-                        "error": {"code": RateLimitError.code, "retryable": True},
-                    }
-                    for remaining in units[position + 1 :]
-                )
-                break
+                dispatch_stopped.set()
+            return {
+                "unitId": _safe_unit_id(project_root, unit),
+                "status": "failed",
+                "error": {
+                    "code": getattr(error, "code", "unit_invalid"),
+                    "retryable": isinstance(error, ProviderUnavailableError),
+                },
+            }
+
+    # Units overlap up to the provider's declared limit. Chunks inside a unit
+    # stay strictly serial -- each chunk's prompt carries the tail of the previous
+    # chunk's translation -- and every unit writes only paths derived from its own
+    # unit id, so two units never contend for a checkpoint or an output file.
+    with ThreadPoolExecutor(
+        max_workers=_unit_concurrency(provider, len(units)),
+        thread_name_prefix="translation-unit",
+    ) as pool:
+        futures = [pool.submit(translate_one, unit) for unit in units]
+        try:
+            # Indexed by submission order, so the report follows the manifest's
+            # unit list and does not drift with whichever unit finished first.
+            unit_reports = [future.result() for future in futures]
+        except BaseException:
+            # A worker died in a way no per-unit handler covers: a kill, a signal,
+            # a bug. Drop the units that have not started rather than translating
+            # more of a run that is already over; the ones in flight cannot be
+            # interrupted and resume from their own checkpoints.
+            for future in futures:
+                future.cancel()
+            raise
 
     completed = sum(report["status"] == "completed" for report in unit_reports)
     failed = len(unit_reports) - completed
@@ -175,6 +189,35 @@ def run_manifest(
         "schema": "translation-engine-report-v1",
         "summary": {"total": len(unit_reports), "completed": completed, "failed": failed},
         "units": unit_reports,
+    }
+
+
+def _unit_concurrency(provider: LLMProvider, unit_count: int) -> int:
+    """How many units may translate at once against this provider.
+
+    The limit lives on the provider because it describes what the remote service
+    tolerates, not something a run gets to choose. A provider that declares none
+    -- the offline fake, or any client written before the limit existed -- runs one
+    unit at a time, which is what the engine did before units could overlap.
+    """
+    return max(1, min(getattr(provider, "concurrency_limit", 1), unit_count))
+
+
+def _rate_limited_report(project_root: Path, unit: Any) -> dict[str, Any]:
+    """A unit that was never attempted because the run is already throttled.
+
+    Once every credential is exhausted for longer than the provider is willing to
+    wait, starting another unit would only churn the same throttle, so units that
+    have not begun are failed retryable without a single request. Units already in
+    flight are deliberately left alone: one of them may hold a credential that is
+    still good, the throttle may lift before its next chunk, and killing it would
+    throw away a call that has already been paid for along with the checkpoint
+    prefix it was about to write. Each of those reports its own real outcome.
+    """
+    return {
+        "unitId": _safe_unit_id(project_root, unit),
+        "status": "failed",
+        "error": {"code": RateLimitError.code, "retryable": True},
     }
 
 

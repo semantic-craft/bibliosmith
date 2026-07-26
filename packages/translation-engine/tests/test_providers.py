@@ -101,7 +101,6 @@ base_url = "https://openai.example/v1"
 model = "model-a"
 timeout_seconds = 45
 concurrency_limit = 3
-max_chunk_tokens = 4096
 key_env = "TEST_OPENAI_KEYS"
 
 [[providers]]
@@ -112,7 +111,6 @@ base_url = "https://gemini.example/v1beta"
 model = "model-b"
 timeout_seconds = 60
 concurrency_limit = 2
-max_chunk_tokens = 8192
 key_env = "TEST_GEMINI_KEYS"
 """.strip()
                 + "\n",
@@ -155,7 +153,6 @@ key_env = "TEST_GEMINI_KEYS"
         self.assertEqual(openai.model, "model-a")
         self.assertEqual(openai.timeout_seconds, 45.0)
         self.assertEqual(openai.concurrency_limit, 3)
-        self.assertEqual(openai.max_chunk_tokens, 4096)
         self.assertEqual(openai.credential_pool.acquire(), "key-a")
         self.assertEqual(openai.credential_pool.acquire(), "key-b")
         self.assertEqual(gemini.credential_pool.acquire(), "process-gem-key")
@@ -178,7 +175,6 @@ base_url = "https://api.deepseek.com"
 model = "deepseek-chat"
 timeout_seconds = 120
 concurrency_limit = 4
-max_chunk_tokens = 8192
 key_env = "DEEPSEEK_TEST_KEYS"
 """.strip()
                 + "\n",
@@ -557,7 +553,6 @@ def _provider_config(
         model=model,
         timeout_seconds=30.0,
         concurrency_limit=2,
-        max_chunk_tokens=4096,
         key_env="TEST_KEYS",
     )
 
