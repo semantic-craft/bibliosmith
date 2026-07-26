@@ -1097,13 +1097,6 @@ export function runBookPipelineJob(jobId: string) {
         { kind: "translation_project", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview", sha256: null, zoteroKey: null },
         { kind: "translation_source", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview/source/source.md", sha256: markdown.sha256, zoteroKey: null },
       );
-      if (job.source.translationStrategy === "reflection") {
-        job.artifacts.push(
-          { kind: "translation_draft", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview/chapters/translated/000_reflection_draft.md", sha256: "preview-sha256", zoteroKey: null },
-          { kind: "translation_reflection", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview/qa/reflection_strategy.md", sha256: "preview-sha256", zoteroKey: null },
-          { kind: "translation_revised", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview/chapters/final/000_reflection_revised.md", sha256: "preview-sha256", zoteroKey: null },
-        );
-      }
     }
     job.updatedAt = bookPipelineNow();
     derivePreviewBookPipelineJob(job);

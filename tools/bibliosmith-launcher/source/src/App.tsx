@@ -356,7 +356,6 @@ export default function App() {
         kind: "markdown_source",
         title: pipelineDraft.markdownTitle || "Markdown source",
         path: pipelineDraft.markdownPath,
-        translationStrategy: pipelineDraft.reflectionTranslation ? "reflection" : null,
       };
     }
     if (pipelineDraft.sourceKind === "external_adapter") {

@@ -127,7 +127,6 @@ export type BookPipelineSource = {
   path?: string | null;
   selector?: string | null;
   runnerBehavior?: "succeed" | "fail_once" | "always_fail" | null;
-  translationStrategy?: "reflection" | string | null;
   adapterCommand?: string | null;
   fakeZoteroItems?: FakeZoteroItem[] | null;
 };
