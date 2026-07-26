@@ -253,7 +253,9 @@ Target-only and bilingual outputs may share the same translation-quality evidenc
 
 `npm run check:bilingual` runs `scripts/check_bilingual_parallel.py`. It is intentionally edition-driven, not copyright-mode-driven: the checker reads only `state/pipeline_state.json.edition_type`, `output_editions`, and `bilingual_parallel`. It must not decide bilingual output from `publication_mode`.
 
-`npm run build:bilingual` runs `scripts/build_bilingual_epub.py`. It is also edition-driven and is a no-op when the bilingual edition is disabled. When enabled, it builds the separate bilingual EPUB from source paragraphs, target paragraphs, and `qa/bilingual_parallel/alignment_map.json`; it must not mutate `chapters/final/`.
+`npm run build:bilingual` runs `scripts/build_bilingual_parallel_epub.py`. It is also edition-driven and is a no-op when the bilingual edition is disabled. When enabled, it builds the separate bilingual EPUB from source paragraphs, target paragraphs, and `qa/bilingual_parallel/alignment_map.json`; it must not mutate `chapters/final/`.
+
+This is the template (manual) builder, and it is not the builder the launcher runner uses. The runner has its own `build_bilingual_epub.py`, which needs no alignment map and writes `output/book_bilingual.epub`. See `docs/bilingual-epub-builders.md` for the full comparison; do not point one path at the other's script.
 
 When the bilingual edition is disabled, the gate is a no-op PASS. When enabled, it checks:
 
@@ -265,7 +267,9 @@ When the bilingual edition is disabled, the gate is a no-op PASS. When enabled, 
 
 `npm run check:bilingual` 执行 `scripts/check_bilingual_parallel.py`。它只按输出版本状态判断，不按版权模式判断：脚本只读取 `state/pipeline_state.json.edition_type`、`output_editions` 和 `bilingual_parallel`。不得从 `publication_mode` 推断是否输出双语版。
 
-`npm run build:bilingual` 执行 `scripts/build_bilingual_epub.py`。它同样只按输出版本状态判断；双语版未启用时直接 no-op。双语版启用时，它从源文段落、目标语段落和 `qa/bilingual_parallel/alignment_map.json` 生成独立双语 EPUB；不得修改 `chapters/final/`。
+`npm run build:bilingual` 执行 `scripts/build_bilingual_parallel_epub.py`。它同样只按输出版本状态判断；双语版未启用时直接 no-op。双语版启用时，它从源文段落、目标语段落和 `qa/bilingual_parallel/alignment_map.json` 生成独立双语 EPUB；不得修改 `chapters/final/`。
+
+这是模板（手工）路径的构建器，不是 launcher runner 用的那一份。runner 自带一份 `build_bilingual_epub.py`，不需要对齐映射，产物是 `output/book_bilingual.epub`。完整对照见 `docs/bilingual-epub-builders.md`；不要把任一条路径改指向另一份脚本。
 
 双语版未启用时，该门禁直接 PASS。双语版启用时，它检查：
 

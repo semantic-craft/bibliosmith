@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Build a source-then-target bilingual EPUB from a local reading project."""
+"""Build a source-then-target bilingual EPUB from a local reading project.
+
+This is the builder the launcher runner uses: ``prepare_bilingual_builder`` in
+``src-tauri/src/book_pipeline.rs`` copies this file into the project's
+``scripts/`` directory and runs it with ``--book-root``. It pairs paragraphs
+positionally from ``metadata/source_map.json`` and ``chapters/final/``, falls
+back to whole-chapter blocks when the counts differ, and writes
+``output/book_bilingual.epub`` — the path the runner then registers.
+
+It is **not** the template bilingual builder. That one lives at
+``template/epub_pipeline/common/scripts/build_bilingual_parallel_epub.py``,
+requires ``qa/bilingual_parallel/alignment_map.json``, and writes
+``output/book_bilingual_parallel.epub``. The two are separate tools with
+separate contracts, not two versions of one script — see
+``docs/bilingual-epub-builders.md``.
+"""
 
 from __future__ import annotations
 

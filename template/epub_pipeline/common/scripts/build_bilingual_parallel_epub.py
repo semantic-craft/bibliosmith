@@ -1,3 +1,18 @@
+"""Build the bilingual parallel EPUB edition of a template book project.
+
+This is the template (manual) bilingual builder. It is driven by
+``state/pipeline_state.json`` and pairs source and target paragraphs through
+``qa/bilingual_parallel/alignment_map.json``, writing
+``output/book_bilingual_parallel.epub``.
+
+It is **not** the builder the launcher runner uses. The runner copies
+``tools/bibliosmith-launcher/source/scripts/build_bilingual_epub.py`` into the
+project and expects ``output/book_bilingual.epub``; that one aligns whole
+paragraph sequences from ``metadata/source_map.json`` and needs no alignment
+map. The two are separate tools with separate contracts, not two versions of
+one script — see ``docs/bilingual-epub-builders.md``.
+"""
+
 from __future__ import annotations
 
 import argparse

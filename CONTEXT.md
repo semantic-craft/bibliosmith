@@ -27,8 +27,10 @@ desktop launcher owns orchestration, but it does not own every component's data.
 - `books/local/...` owns each private local-reading project and its manifests,
   chapters, QA records, checkpoints, and reading output.
 - `packages/zotero-cli` owns the item/chunk semantic index.
-- GitHub Issues are the tracker. Local ADRs record decisions; they do not silently
-  close or mutate tickets.
+- GitHub Issues in `semantic-craft/bibliosmith` are the tracker.
+  `semantic-craft/bibliosmith-private-archive` is archived and read-only; it is
+  history to read, never a place to file work. See `docs/agents/issue-tracker.md`.
+  Local ADRs record decisions; they do not silently close or mutate tickets.
 
 ## Decisions
 
