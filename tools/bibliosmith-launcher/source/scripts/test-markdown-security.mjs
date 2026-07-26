@@ -41,6 +41,45 @@ try {
     markdown.renderDocTable('<table><tr><td><a href="javascript:alert(1)">Bad</a></td></tr></table>'),
     '<table><tr><td><a href="#">Bad</a></td></tr></table>',
   );
+
+  const copy = { copyCode: "copy" };
+
+  // An inline link's href is escaped exactly once. Extracting it from already
+  // escaped text used to yield `&amp;amp;`, breaking every link with a query
+  // string.
+  assert.equal(
+    markdown.renderMarkdownToHtml("See [docs](https://example.com/g?a=1&b=2).", copy),
+    '<p>See <a href="https://example.com/g?a=1&amp;b=2">docs</a>.</p>',
+  );
+
+  // Two links on one line each keep their own single-escaped href.
+  assert.equal(
+    markdown.renderMarkdownToHtml("[a](https://e.com/1) and [b](https://e.com/2?x=1&y=2)", copy),
+    '<p><a href="https://e.com/1">a</a> and <a href="https://e.com/2?x=1&amp;y=2">b</a></p>',
+  );
+
+  // Reading the href before escaping must not weaken the allowlist, let a
+  // crafted href break out of the attribute, or leave a label unescaped.
+  assert.equal(
+    markdown.renderMarkdownToHtml("[x](javascript:alert)", copy),
+    '<p><a href="#">x</a></p>',
+  );
+  assert.equal(
+    markdown.renderMarkdownToHtml('[x](https://example.com/" onmouseover="alert)', copy),
+    '<p><a href="https://example.com/&quot; onmouseover=&quot;alert">x</a></p>',
+  );
+  assert.equal(
+    markdown.renderMarkdownToHtml("[<img src=x onerror=alert>](https://example.com/)", copy),
+    '<p><a href="https://example.com/">&lt;img src=x onerror=alert&gt;</a></p>',
+  );
+  assert.equal(
+    markdown.renderMarkdownToHtml("plain <b>text</b> & symbols", copy),
+    "<p>plain &lt;b&gt;text&lt;/b&gt; &amp; symbols</p>",
+  );
+  assert.equal(
+    markdown.renderMarkdownToHtml("**bold** and `code` and [l](https://e.com/)", copy),
+    '<p><strong>bold</strong> and <code>code</code> and <a href="https://e.com/">l</a></p>',
+  );
 } finally {
   rmSync(output, { recursive: true, force: true });
 }

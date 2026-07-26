@@ -216,9 +216,11 @@ class ReflectionSecondPassTests(unittest.TestCase):
             self.assertEqual(
                 draft_checkpoint["idempotencyKey"]["passId"], "translation-v1"
             )
+            # The reflection key composes the first pass's id, because the
+            # revisions it stores were computed from that pass's drafts.
             self.assertEqual(
                 reflection_checkpoint["idempotencyKey"]["passId"],
-                "reflection-v1",
+                "reflection-v1+translation-v1",
             )
             self.assertEqual(reflection_checkpoint["nextChunkIndex"], 1)
             self.assertEqual(reflection_checkpoint["translatedChunks"], ["AA\n"])
@@ -240,6 +242,57 @@ class ReflectionSecondPassTests(unittest.TestCase):
             self.assertEqual(len(resumed_provider.improve_requests), 2)
             self.assertFalse(draft_checkpoint_path.exists())
             self.assertFalse(reflection_checkpoint_path.exists())
+
+    def test_a_text_cleanup_change_does_not_resume_a_stale_reflection(self) -> None:
+        """An interrupted run whose text-cleanup setting then flips must redo the
+        reflection rather than resume revisions computed from the old drafts.
+        The reflection key used to omit text-cleanup entirely, so the first pass
+        re-translated (its own key changed) while the reflection resumed against
+        drafts that no longer existed."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            interrupted_manifest = build_run_fixture(
+                project_root,
+                source_text="aa\nbb\ncc\n",
+                max_tokens=3,
+                second_pass_enabled=True,
+                text_cleanup=False,
+            )
+            run_manifest(
+                interrupted_manifest,
+                provider_factory=lambda profile_id, *, config_id: (
+                    InterruptingReflectionProvider()
+                ),
+            )
+            reflection_checkpoint_path = (
+                project_root
+                / "chapters"
+                / "translated"
+                / ".partial"
+                / "reflection"
+                / "chapter_001.json"
+            )
+            self.assertTrue(reflection_checkpoint_path.exists())
+
+            # Same project, same source, only the text-cleanup setting flips, so
+            # rewrite the manifest rather than rebuilding the fixture.
+            cleaned_manifest = project_root / "translation-run-cleanup.json"
+            manifest = json.loads(interrupted_manifest.read_text(encoding="utf-8"))
+            manifest["textCleanup"] = True
+            cleaned_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+            resumed_provider = ReflectionFakeProvider()
+            resumed = run_manifest(
+                cleaned_manifest,
+                provider_factory=lambda profile_id, *, config_id: resumed_provider,
+            )
+
+            self.assertEqual(resumed["units"][0]["status"], "completed")
+            self.assertEqual(
+                resumed["units"][0]["metrics"]["secondPassResumedChunkCount"],
+                0,
+                "a flipped text-cleanup setting must invalidate the reflection",
+            )
+            self.assertEqual(len(resumed_provider.reflection_requests), 3)
 
 
 if __name__ == "__main__":

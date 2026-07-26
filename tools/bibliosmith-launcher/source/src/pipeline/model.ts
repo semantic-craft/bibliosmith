@@ -9,6 +9,7 @@ import type {
   BookPipelineOutputFormat,
 } from "../types";
 import type { PipelineCopy } from "./copy";
+import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
 
 export type PipelineBusy =
   | "loading"
@@ -84,11 +85,21 @@ export const defaultPipelineDraft: PipelineDraft = {
   hasMineruCredentials: true,
 };
 
-/* ---------- 12-stage contract ---------- */
+/* ---------- Stage contract ---------- */
 
+/**
+ * Every stage id the backend can persist, in its own order. Must stay in step
+ * with `ordered_stage_index` in book_pipeline.rs; `discover` is the collection
+ * parent's own single stage and has no slot in that child-order list, so it
+ * leads here. A stage missing from this list sorts to the bottom of the Stages
+ * tab and reads as the last thing that happened, which is how `index` used to
+ * render after `validate_reading`.
+ */
 export const PIPELINE_STAGE_ORDER = [
+  "discover",
   "route",
   "extract",
+  "index",
   "handoff",
   "split",
   "prepare",
@@ -99,37 +110,39 @@ export const PIPELINE_STAGE_ORDER = [
   "promote",
   "build_reading",
   "validate_reading",
+  "build_digest",
 ] as const;
+
+export type PipelineStageId = (typeof PIPELINE_STAGE_ORDER)[number];
 
 export const GATE_STAGE_IDS = new Set(["approve_translation", "approve_promotion"]);
 
-// The config_id each provider profile resolves to. Defined once so the new-job
-// wizard (App) and the per-book drawer cannot disagree about which config a
-// profile maps to; the keys must match the profiles in the engine's
-// providers.toml.
-export const PROVIDER_DEFAULT_CONFIG: Record<
-  PipelineDraft["providerProfileId"],
-  string
-> = {
-  "openai-compatible": "openai-default",
-  "gemini-native": "gemini-default",
-  deepseek: "deepseek-default",
-};
+// The config_id each provider profile resolves to, derived from the same catalog
+// Settings and the new-job wizard render. It used to be a hand-written map of
+// three brands while the catalog carried six, so the per-book drawer silently
+// offered half the providers the user could actually configure. A brand's first
+// slot is its default config (Qwen and MiMo bill two ways and list two slots).
+export const PROVIDER_DEFAULT_CONFIG: Record<string, string> = Object.fromEntries(
+  MODEL_BRANDS.flatMap((brand) =>
+    brand.slots[0] ? [[brand.profileId, brand.slots[0].configId] as const] : [],
+  ),
+);
 
 // A persisted job's translationProfileId is a loose string (it may predate a
 // profile being renamed), so resolve it through this rather than indexing the
-// typed map directly. The wizard, whose profile is the union, indexes the map
-// straight and stays exhaustively checked.
+// map directly.
 export function providerDefaultConfig(profileId: string): string {
-  return (
-    (PROVIDER_DEFAULT_CONFIG as Record<string, string>)[profileId] ?? "default"
-  );
+  return PROVIDER_DEFAULT_CONFIG[profileId] ?? "default";
 }
 
+// Typed as a total map over the contract, so adding a stage without giving it a
+// label is a compile error rather than a raw untranslated id in the timeline.
 export function stageLabel(stageId: string, copy: PipelineCopy): string {
-  const labels: Record<string, string> = {
+  const labels: Record<PipelineStageId, string> = {
+    discover: copy.stageDiscover,
     route: copy.stageRoute,
     extract: copy.stageExtract,
+    index: copy.stageIndex,
     handoff: copy.stageHandoff,
     split: copy.stageSplit,
     prepare: copy.stagePrepare,
@@ -140,10 +153,9 @@ export function stageLabel(stageId: string, copy: PipelineCopy): string {
     promote: copy.stagePromote,
     build_reading: copy.stageBuildReading,
     validate_reading: copy.stageValidateReading,
-    discover: copy.stageDiscover,
     build_digest: copy.stageBuildDigest,
   };
-  return labels[stageId] ?? stageId.replaceAll("_", " ");
+  return (labels as Record<string, string>)[stageId] ?? stageId.replaceAll("_", " ");
 }
 
 /** Canonical stage ordering: known contract stages first, extras appended in place. */
@@ -164,10 +176,21 @@ export function orderedStages(stages: BookPipelineStage[]): BookPipelineStage[] 
  */
 export const FOUR_STEPS = [
   { key: "ingest", stageIds: ["discover", "route"] },
-  { key: "tidy", stageIds: ["extract", "handoff", "split"] },
+  { key: "tidy", stageIds: ["extract", "index", "handoff", "split"] },
   { key: "translate", stageIds: ["prepare", "approve_translation", "translate", "expert_qa"] },
   { key: "produce", stageIds: ["approve_promotion", "promote", "build_reading", "validate_reading", "build_digest"] },
-] as const;
+] as const satisfies readonly { key: string; stageIds: readonly PipelineStageId[] }[];
+
+type AssertNever<T extends never> = T;
+
+/**
+ * A stage left out of all four groups contributes to no step, so its failure
+ * turns no circle red and the shelf reports a book as fine while it is stuck —
+ * exactly what `index` did. Make that omission a type error instead.
+ */
+export type FourStepsCoverEveryStage = AssertNever<
+  Exclude<PipelineStageId, (typeof FOUR_STEPS)[number]["stageIds"][number]>
+>;
 
 export type StepState = "done" | "current" | "gate" | "error" | "todo" | "none";
 

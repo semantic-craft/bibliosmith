@@ -6,10 +6,8 @@ export function pipelineCopy(locale: PipelineLocale) {
     nav: zh ? "书架" : "Bookshelf",
     title: zh ? "Book Pipeline" : "Book Pipeline",
     provider: zh ? "模型后端" : "Model provider",
-    providerOpenAiCompatible: zh ? "OpenAI 兼容" : "OpenAI compatible",
-    providerGemini: zh ? "Gemini 原生" : "Gemini native",
-    providerDeepseek: zh ? "DeepSeek" : "DeepSeek",
     textCleanup: zh ? "翻译时修复段内 OCR / 排版瑕疵" : "Fix within-paragraph OCR / layout defects while translating",
+    secondPass: zh ? "反思二遍（更慢，约两倍模型开销）" : "Reflection second pass (slower, roughly double the model spend)",
     continueStage: zh ? "继续下一阶段" : "Continue",
     recheckHandoff: zh ? "重新检查交接" : "Recheck handoff",
     runTranslation: zh ? "运行翻译（将发送正文）" : "Run translation (sends source text)",
@@ -165,9 +163,10 @@ export function pipelineCopy(locale: PipelineLocale) {
     tabApproval: zh ? "审批" : "Approval",
     tabLogs: zh ? "日志" : "Logs",
 
-    // Stage labels (12-stage contract + auxiliary stages)
+    // Stage labels — one per PIPELINE_STAGE_ORDER entry (model.ts type-checks this)
     stageRoute: zh ? "路由" : "Route",
     stageExtract: zh ? "提取" : "Extract",
+    stageIndex: zh ? "建索引" : "Index",
     stageHandoff: zh ? "交接" : "Handoff",
     stageSplit: zh ? "分章" : "Split",
     stagePrepare: zh ? "备译" : "Prepare",

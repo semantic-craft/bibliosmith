@@ -241,12 +241,15 @@ function previewBookPipelineJob(source: BookPipelineSource, mode: string, config
     const selected = routes[0];
     const skipped = selected?.routeKind === "already_converted";
     const runnable = routes.length > 0 && routes.every((item) => item.canRun);
+    // Mirrors ordered_child_stage_ids in book_pipeline.rs, including the
+    // item-scoped "index" stage the backend only runs for Zotero attachments.
+    const wantsItemIndex = isBookPipelineZoteroSource(source);
     const stageIds = shouldHandoffAfterRun(mode)
-      ? ["route", "extract", "handoff", "split", "prepare", "approve_translation", "translate", "expert_qa", "approve_promotion", "promote", "build_reading", "validate_reading", "build_digest"]
-      : ["route", "extract"];
+      ? ["route", "extract", "index", "handoff", "split", "prepare", "approve_translation", "translate", "expert_qa", "approve_promotion", "promote", "build_reading", "validate_reading", "build_digest"]
+      : ["route", "extract", "index"];
     const stages = stageIds.map((stageId) => ({
       stageId,
-      status: skipped ? "skipped" : stageId === "route" ? (runnable ? "completed" : "blocked") : stageId === "extract" ? (runnable ? "ready" : "pending") : stageId === "build_digest" ? "skipped" : "pending",
+      status: skipped ? "skipped" : stageId === "route" ? (runnable ? "completed" : "blocked") : stageId === "extract" ? (runnable ? "ready" : "pending") : stageId === "index" ? (wantsItemIndex ? "pending" : "skipped") : stageId === "build_digest" ? "skipped" : "pending",
       attempt: 0,
       error: null,
       contractVersion: BOOK_PIPELINE_JOB_SCHEMA_VERSION,

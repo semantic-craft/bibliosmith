@@ -25,6 +25,7 @@ import {
   type PipelineBusy,
   type StepState,
 } from "./model";
+import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
 import { BookCover } from "./Shelf";
 import { OverviewTab } from "./tabs/OverviewTab";
 import { StagesTab } from "./tabs/StagesTab";
@@ -268,12 +269,18 @@ function GateCard({
                     setProviderConfigId(providerDefaultConfig(profile));
                   }}
                 >
+                  {/* A job may carry a profile the catalog no longer lists
+                      (renamed, or the expert agent); keep it selectable so
+                      opening the drawer cannot silently rewrite the job's
+                      provider. */}
                   {!Object.hasOwn(PROVIDER_DEFAULT_CONFIG, providerProfileId) && (
                     <option value={providerProfileId}>{providerProfileId}</option>
                   )}
-                  <option value="openai-compatible">{copy.providerOpenAiCompatible}</option>
-                  <option value="gemini-native">{copy.providerGemini}</option>
-                  <option value="deepseek">{copy.providerDeepseek}</option>
+                  {MODEL_BRANDS.map((brand) => (
+                    <option key={brand.profileId} value={brand.profileId}>
+                      {brand.brand}
+                    </option>
+                  ))}
                 </select>
               </label>
               <label>

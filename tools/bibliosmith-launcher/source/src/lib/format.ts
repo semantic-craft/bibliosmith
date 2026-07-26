@@ -45,11 +45,18 @@ export function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+/** Shown wherever a real value is genuinely unknown. */
+export const UNKNOWN_VALUE = "—";
+
+// Both of these used to fall back to a fabricated date ("v2025.05.25" /
+// "2025-05-25 10:15"), which the Updates page then presented as the project's
+// actual version and timestamp whenever no commit was available. An unknown
+// value has to look unknown.
 export function versionFromDate(date?: string) {
-  if (!date) return "v2025.05.25";
+  if (!date) return UNKNOWN_VALUE;
   return `v${date.slice(0, 10).replaceAll("-", ".")}`;
 }
 
 export function commitDate(commit?: CommitInfo) {
-  return commit?.date?.slice(0, 16).replace("T", " ") || "2025-05-25 10:15";
+  return commit?.date?.slice(0, 16).replace("T", " ") || UNKNOWN_VALUE;
 }
