@@ -14,6 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import __version__
+from .agent_contract import AgentGroup, not_found_error, validation_error
 from .embed import make_embedder, resolve_embedder_config
 from .root_env import load_root_dotenv
 from .search import get_item_chunks, index_markdown_item, query_fulltext, sync as do_sync
@@ -41,11 +42,14 @@ def _extract_year(date: str | None) -> str:
     return m.group(0) if m else ""
 
 
-@click.group()
+@click.group(cls=AgentGroup)
 @click.version_option(__version__)
 def main() -> None:
     """Semantic search over Zotero PDF full text."""
     load_root_dotenv()
+
+
+main.agent_entry_point = "zfulltext"
 
 
 @main.command()
@@ -248,12 +252,15 @@ def context(key: str, chunk_idx: int, around: int, db_path: Path | None) -> None
     """Show a chunk with surrounding context. Usage: zfulltext context KEY CHUNK_IDX"""
     chunks = get_item_chunks(key, db_path)
     if not chunks:
-        console.print(f"[red]No fulltext found for {key}[/red]")
-        raise SystemExit(1)
+        raise not_found_error(
+            f"No fulltext found for {key}",
+            hint="Run zfulltext sync or verify that the item has a Markdown attachment.",
+        )
 
     if chunk_idx < 0 or chunk_idx >= len(chunks):
-        console.print(f"[red]Chunk {chunk_idx} out of range (0..{len(chunks)-1})[/red]")
-        raise SystemExit(1)
+        raise validation_error(
+            f"Chunk {chunk_idx} out of range (0..{len(chunks)-1})"
+        )
 
     lo = max(0, chunk_idx - around)
     hi = min(len(chunks), chunk_idx + around + 1)
@@ -276,8 +283,10 @@ def excerpt(key: str, as_json: bool, db_path: Path | None) -> None:
     """Show all fulltext chunks for an item."""
     chunks = get_item_chunks(key, db_path)
     if not chunks:
-        console.print(f"[red]No fulltext found for {key}[/red]")
-        raise SystemExit(1)
+        raise not_found_error(
+            f"No fulltext found for {key}",
+            hint="Run zfulltext sync or verify that the item has a Markdown attachment.",
+        )
 
     if as_json:
         click.echo(json.dumps(chunks, ensure_ascii=False, indent=2))
@@ -294,8 +303,11 @@ def excerpt(key: str, as_json: bool, db_path: Path | None) -> None:
 def _parse_year(spec: str | None) -> tuple[int | None, int | None] | None:
     if not spec:
         return None
-    if ".." in spec:
-        lo_s, hi_s = spec.split("..", 1)
-        return (int(lo_s) if lo_s else None, int(hi_s) if hi_s else None)
-    y = int(spec)
-    return (y, y)
+    try:
+        if ".." in spec:
+            lo_s, hi_s = spec.split("..", 1)
+            return (int(lo_s) if lo_s else None, int(hi_s) if hi_s else None)
+        y = int(spec)
+        return (y, y)
+    except ValueError:
+        raise validation_error(f"invalid year filter: {spec!r}") from None

@@ -285,6 +285,73 @@ def test_zfulltext_profile_reports_active_non_secret_identity(
     assert json.loads(result.output) == {"embeddingProfileId": "fixture-embedding:3"}
 
 
+def test_zfulltext_index_keeps_its_bare_json_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zotero_cli.zfulltext_cli as zfulltext_cli
+
+    class FakeIndexStore:
+        def __init__(self, _cfg) -> None:
+            self.cfg = SimpleNamespace(dim=3)
+
+        def __enter__(self) -> "FakeIndexStore":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    markdown = tmp_path / "artifact.md"
+    markdown.write_text("# Fixture\n", encoding="utf-8")
+    evidence = {
+        "parentItemKey": "PARENT123",
+        "sourceSha256": "a" * 64,
+        "chunkCount": 1,
+        "indexContractVersion": "zfulltext-item-index-v1",
+        "chunkContractVersion": "zfulltext-chunk-v1",
+        "embeddingProfileId": "fixture-embedding:3",
+        "completedAt": "2026-07-27T00:00:00Z",
+        "reused": False,
+    }
+    monkeypatch.setattr(zfulltext_cli, "SQLiteVecStore", FakeIndexStore)
+    monkeypatch.setattr(
+        zfulltext_cli, "make_embedder", lambda **_kwargs: FixtureEmbedder()
+    )
+    monkeypatch.setattr(
+        zfulltext_cli,
+        "index_markdown_item",
+        lambda *_args, **_kwargs: evidence,
+    )
+
+    result = CliRunner().invoke(
+        zfulltext_cli.main,
+        [
+            "index",
+            "--parent-item-key",
+            "PARENT123",
+            "--markdown",
+            str(markdown),
+            "--sha256",
+            "a" * 64,
+            "--chunk-contract-version",
+            "zfulltext-chunk-v1",
+            "--embedding-profile-id",
+            "fixture-embedding:3",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == json.dumps(
+        evidence, ensure_ascii=False, separators=(",", ":")
+    ) + "\n"
+
+
+def test_zfulltext_index_keeps_clicks_existing_usage_exit_code() -> None:
+    result = CliRunner().invoke(zfulltext, ["index"])
+
+    assert result.exit_code == 2
+    assert "Missing option '--parent-item-key'" in result.output
+
+
 def test_zfulltext_index_rejects_a_profile_that_is_not_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

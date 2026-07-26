@@ -36,7 +36,10 @@ def test_phrases_json_output(monkeypatch):
 
     result = CliRunner().invoke(cli.main, ["phrases", "测试", "--json"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == fake_hits
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["data"] == fake_hits
+    assert payload["meta"]["schema_version"] == "zotero-cli-agent-v1"
 
 
 def test_phrases_table_output(monkeypatch):
