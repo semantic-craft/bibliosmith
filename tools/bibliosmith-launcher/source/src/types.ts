@@ -293,6 +293,10 @@ export type BookPipelineStage = {
   unitSummary?: BookPipelineUnitSummary | null;
   approvalId?: string | null;
   executionOwner?: string | null;
+  maxAttempts?: number;
+  retryBackoffSeconds?: number[];
+  giveUpReason?: string | null;
+  nextRetryAt?: string | null;
 };
 
 export type BookPipelineChildJob = {
@@ -349,6 +353,9 @@ export type BookPipelineProgress = {
   percent: number;
   activeStageId: string;
   unitSummary?: BookPipelineUnitSummary | null;
+  retryAttemptsRemaining?: number;
+  nextRetryAt?: string | null;
+  giveUpReason?: string | null;
 };
 
 export type BookPipelineNotificationDelivery = {

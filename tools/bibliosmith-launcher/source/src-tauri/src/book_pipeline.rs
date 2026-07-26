@@ -281,6 +281,23 @@ pub struct BookPipelineStage {
     pub execution_owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_evidence: Option<BookPipelineIndexEvidence>,
+    /// Auto-retry budget for this stage. `0` means "use the default policy", so
+    /// state written before this field existed loads with the default rather
+    /// than with a budget of zero.
+    #[serde(default)]
+    pub max_attempts: u32,
+    /// Seconds to wait before attempt N+1. Empty means the default table.
+    #[serde(default)]
+    pub retry_backoff_seconds: Vec<u32>,
+    /// Why the automatic retries stopped. Present only on a stage the runner has
+    /// given up on, which is what distinguishes "failed, will retry itself" from
+    /// "failed, waiting for you".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub give_up_reason: Option<String>,
+    /// When the pending automatic retry becomes due. Written before the wait so
+    /// the countdown is durable state a poll can read, not a silent sleep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
@@ -424,6 +441,17 @@ pub struct BookPipelineProgress {
     pub active_stage_id: String,
     #[serde(default)]
     pub unit_summary: Option<BookPipelineUnitSummary>,
+    /// Automatic attempts still available on the active stage. The Stages tab
+    /// used to label every failure "retryable" with nothing behind it; this is
+    /// the number that claim is actually worth.
+    #[serde(default)]
+    pub retry_attempts_remaining: u32,
+    /// When the pending automatic retry is due, if one is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<String>,
+    /// Set once the runner has stopped retrying by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub give_up_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -1944,6 +1972,9 @@ fn derive_job_progress(job: &BookPipelineJob) -> BookPipelineProgress {
             .map(|stage| stage.stage_id.clone())
             .unwrap_or_else(|| job.current_stage_id.clone()),
         unit_summary: active.and_then(|stage| stage.unit_summary.clone()),
+        retry_attempts_remaining: active.map(stage_attempts_remaining).unwrap_or_default(),
+        next_retry_at: active.and_then(|stage| stage.next_retry_at.clone()),
+        give_up_reason: active.and_then(|stage| stage.give_up_reason.clone()),
     }
 }
 
@@ -5441,7 +5472,88 @@ fn start_stage(child: &mut BookPipelineChildJob, stage_id: &str, execution_owner
         stage.status = STATUS_RUNNING.into();
         stage.error = None;
         stage.execution_owner = Some(execution_owner.into());
+        // A stage that is running again is not a stage anyone has given up on:
+        // an operator-driven advance restarts the automatic budget from here.
+        stage.give_up_reason = None;
+        stage.next_retry_at = None;
     }
+}
+
+/// Stage-level auto-retry budget. The translation engine already retries
+/// individual chunks inside one run
+/// (`packages/translation-engine/src/translation_engine/pipeline.py`), so the
+/// runner deliberately counts *stages* rather than chunks — layering the two
+/// counters would charge one flaky provider call twice and multiply the real
+/// ceiling by the engine's own ladder.
+const DEFAULT_STAGE_MAX_ATTEMPTS: u32 = 3;
+const DEFAULT_STAGE_RETRY_BACKOFF_SECONDS: [u32; 2] = [2, 5];
+const GIVE_UP_RETRY_BUDGET_EXHAUSTED: &str = "retry_budget_exhausted";
+const GIVE_UP_NOT_RETRYABLE: &str = "not_retryable";
+
+fn stage_max_attempts(stage: &BookPipelineStage) -> u32 {
+    if stage.max_attempts > 0 {
+        stage.max_attempts
+    } else {
+        DEFAULT_STAGE_MAX_ATTEMPTS
+    }
+}
+
+fn stage_retry_backoff_seconds(stage: &BookPipelineStage, attempt: u32) -> u32 {
+    let table: &[u32] = if stage.retry_backoff_seconds.is_empty() {
+        &DEFAULT_STAGE_RETRY_BACKOFF_SECONDS
+    } else {
+        &stage.retry_backoff_seconds
+    };
+    // Attempt 1 waits the first entry; past the end the last entry repeats, so a
+    // short table means a flat wait rather than no wait.
+    table
+        .get(attempt.saturating_sub(1) as usize)
+        .or_else(|| table.last())
+        .copied()
+        .unwrap_or_default()
+}
+
+fn stage_attempts_remaining(stage: &BookPipelineStage) -> u32 {
+    if stage.give_up_reason.is_some() {
+        return 0;
+    }
+    stage_max_attempts(stage).saturating_sub(stage.attempt)
+}
+
+/// Decide what happens to a stage that just failed. Runs after `derive_job` has
+/// classified the failure, because `safe_error.retryable` is what it turns on:
+/// a non-retryable failure must not burn an attempt or wait a backoff.
+fn schedule_stage_retry(child: &mut BookPipelineChildJob, stage_id: &str) -> Option<u32> {
+    let stage = stage_mut(child, stage_id)?;
+    if stage.status != STATUS_FAILED {
+        stage.give_up_reason = None;
+        stage.next_retry_at = None;
+        return None;
+    }
+    // Pin the resolved budget onto the stage the first time it matters, so the
+    // policy is self-describing state rather than a default the UI has to know.
+    stage.max_attempts = stage_max_attempts(stage);
+    if stage.retry_backoff_seconds.is_empty() {
+        stage.retry_backoff_seconds = DEFAULT_STAGE_RETRY_BACKOFF_SECONDS.to_vec();
+    }
+    let retryable = stage
+        .safe_error
+        .as_ref()
+        .is_some_and(|error| error.retryable);
+    if !retryable {
+        stage.give_up_reason = Some(GIVE_UP_NOT_RETRYABLE.into());
+        stage.next_retry_at = None;
+        return None;
+    }
+    if stage.attempt >= stage_max_attempts(stage) {
+        stage.give_up_reason = Some(GIVE_UP_RETRY_BUDGET_EXHAUSTED.into());
+        stage.next_retry_at = None;
+        return None;
+    }
+    let seconds = stage_retry_backoff_seconds(stage, stage.attempt);
+    stage.give_up_reason = None;
+    stage.next_retry_at = Some(offset_label(seconds));
+    Some(seconds)
 }
 
 fn mark_route_blocked(job: &mut BookPipelineJob, error: &str) {
@@ -10018,6 +10130,12 @@ fn display_path(path: &Path) -> String {
 
 fn now_label() -> String {
     Local::now().to_rfc3339()
+}
+
+/// A timestamp `seconds` from now, in the same format as `now_label`, so the UI
+/// can render a due time with the parser it already uses.
+fn offset_label(seconds: u32) -> String {
+    (Local::now() + chrono::Duration::seconds(seconds.into())).to_rfc3339()
 }
 
 fn new_job_id() -> String {
@@ -14772,8 +14890,31 @@ fn advance_job_with_executor(
     invalidate_downstream: bool,
     executor: &dyn RunnerCommandExecutor,
 ) -> Result<BookPipelineJob, String> {
+    advance_job_stage(
+        store,
+        job_id,
+        child_id,
+        invalidate_downstream,
+        executor,
+        false,
+    )
+}
+
+/// `retrying_stage` re-enters for an automatic retry, which must re-run *only*
+/// the stage that failed. The freshness and gate phases below are the work of
+/// starting an advance, not of retrying one: Phase 0 rolls completed downstream
+/// stages back to pending, so running it again per retry would re-open the
+/// stage that had just succeeded and the retry would never converge.
+fn advance_job_stage(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    invalidate_downstream: bool,
+    executor: &dyn RunnerCommandExecutor,
+    retrying_stage: bool,
+) -> Result<BookPipelineJob, String> {
     // Phase 0: re-evaluate a completed/blocked split against the current source.
-    {
+    if !retrying_stage {
         let mut state = store.load()?;
         let job_index = find_job_index(&state, job_id)?;
         let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
@@ -14795,7 +14936,7 @@ fn advance_job_with_executor(
 
     // Phase 0.25: any translation/control hash drift after a completed QA pass
     // reopens only the affected QA units and invalidates promotion approval.
-    {
+    if !retrying_stage {
         let mut state = store.load()?;
         let job_index = find_job_index(&state, job_id)?;
         let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
@@ -14815,7 +14956,7 @@ fn advance_job_with_executor(
     // Phase 0.5: ready a prepared gate, including refreshing a stale binding
     // after a mode/profile/config change. Only the explicit fake fixture scope
     // can pre-approve the request.
-    {
+    if !retrying_stage {
         let mut state = store.load()?;
         let job_index = find_job_index(&state, job_id)?;
         let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
@@ -14858,7 +14999,7 @@ fn advance_job_with_executor(
 
     // Phase 0.75: the second human gate is readied only after exact translated
     // artifacts and PASS chapter-control hashes satisfy the selected QA policy.
-    {
+    if !retrying_stage {
         let mut state = store.load()?;
         let job_index = find_job_index(&state, job_id)?;
         let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
@@ -15058,8 +15199,46 @@ fn advance_job_with_executor(
     state.jobs[job_index].log_summary = trim_log_summary(&state.jobs[job_index].log_summary);
     state.jobs[job_index].updated_at = now_label();
     derive_job(&mut state.jobs[job_index]);
+    // `derive_job` is what classifies the failure, so the retry decision comes
+    // after it and the progress recomputed from it goes out in the same save:
+    // the countdown a poll reads is written *before* the wait, never after.
+    let retry_after_seconds =
+        schedule_stage_retry(&mut state.jobs[job_index].children[child_index], stage_id);
+    if let Some(seconds) = retry_after_seconds {
+        let attempts_remaining = stage_ref(&state.jobs[job_index].children[child_index], stage_id)
+            .map(stage_attempts_remaining)
+            .unwrap_or_default();
+        state.jobs[job_index].current_step = format!(
+            "Retrying {stage_id} stage in {seconds}s ({attempts_remaining} attempt(s) left)"
+        );
+        state.jobs[job_index].log_summary.push(format!(
+            "Automatic {stage_id} retry scheduled in {seconds}s"
+        ));
+        state.jobs[job_index].log_summary = trim_log_summary(&state.jobs[job_index].log_summary);
+    } else if let Some(reason) = stage_ref(&state.jobs[job_index].children[child_index], stage_id)
+        .and_then(|stage| stage.give_up_reason.clone())
+    {
+        state.jobs[job_index]
+            .log_summary
+            .push(format!("Stopped retrying {stage_id}: {reason}"));
+        state.jobs[job_index].log_summary = trim_log_summary(&state.jobs[job_index].log_summary);
+    }
+    state.jobs[job_index].progress = derive_job_progress(&state.jobs[job_index]);
     let job = state.jobs[job_index].clone();
     store.save(&state)?;
+    if let Some(seconds) = retry_after_seconds {
+        // The failure, the countdown and the remaining budget are all persisted
+        // above, so this wait is observable rather than a silent stall.
+        thread::sleep(Duration::from_secs(seconds.into()));
+        return advance_job_stage(
+            store,
+            job_id,
+            Some(&running_child.id),
+            invalidate_downstream,
+            executor,
+            true,
+        );
+    }
     if translation_gate_readied && should_auto_approve_translation(&job, child_index) {
         return advance_job_with_executor(store, job_id, child_id, invalidate_downstream, executor);
     }
@@ -23973,6 +24152,163 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    // The Stages tab has always labelled a failure "retryable"; until now there
+    // was no automatic retry behind that word. A stage that keeps failing must
+    // spend a bounded budget and then say why it stopped.
+    #[test]
+    fn a_retryable_stage_failure_is_retried_to_the_budget_then_gives_up() {
+        let root = temp_root("stage-retry-budget");
+        let repo = handoff_repo_fixture(&root);
+        let store = BookPipelineStore::for_test(&root);
+        let executor = ReadingPipelineFixtureExecutor::failing_epubcheck();
+        let (job_id, waiting) = fake_job_waiting_for_expert_qa(&store, &repo, &executor);
+        satisfy_qa_handoff(&waiting);
+        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+        approve_ready_promotion_for_test(&store, &job_id);
+        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+        let failed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+        let stage = |job: &BookPipelineJob| {
+            job.children[0]
+                .stages
+                .iter()
+                .find(|stage| stage.stage_id == "validate_reading")
+                .unwrap()
+                .clone()
+        };
+        let validate = stage(&failed);
+        assert_eq!(validate.status, STATUS_FAILED);
+        assert_eq!(
+            validate.attempt, DEFAULT_STAGE_MAX_ATTEMPTS,
+            "the whole budget should be spent before giving up"
+        );
+        assert_eq!(
+            validate.give_up_reason.as_deref(),
+            Some(GIVE_UP_RETRY_BUDGET_EXHAUSTED)
+        );
+        assert!(
+            validate.next_retry_at.is_none(),
+            "nothing is scheduled once the budget is gone"
+        );
+
+        // The same story has to be readable from the progress the UI polls.
+        let persisted = store
+            .load()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        assert_eq!(persisted.progress.active_stage_id, "validate_reading");
+        assert_eq!(persisted.progress.retry_attempts_remaining, 0);
+        assert_eq!(
+            persisted.progress.give_up_reason.as_deref(),
+            Some(GIVE_UP_RETRY_BUDGET_EXHAUSTED)
+        );
+
+        // A give-up written for the automatic loop must not refuse the operator:
+        // an advance still runs. It runs *once* — the budget counts the stage's
+        // whole life, so clicking Advance cannot spin up a fresh ladder each time.
+        let retried = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+        assert_eq!(stage(&retried).attempt, DEFAULT_STAGE_MAX_ATTEMPTS + 1);
+        assert_eq!(
+            stage(&retried).give_up_reason.as_deref(),
+            Some(GIVE_UP_RETRY_BUDGET_EXHAUSTED)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // Expert QA blocks on a judgement call, not on a flaky process. Retrying it
+    // automatically would burn the budget on something no retry can fix.
+    #[test]
+    fn a_non_retryable_failure_is_not_retried_automatically() {
+        let stage = |code: &str, retryable: bool| BookPipelineStage {
+            stage_id: "expert_qa".into(),
+            status: STATUS_FAILED.into(),
+            attempt: 1,
+            safe_error: Some(BookPipelineSafeError {
+                code: code.into(),
+                summary: "redacted".into(),
+                retryable,
+                attempt: 1,
+                stage_id: "expert_qa".into(),
+                ..BookPipelineSafeError::default()
+            }),
+            ..BookPipelineStage::default()
+        };
+        let mut child = BookPipelineChildJob {
+            stages: vec![stage("qa_blocked", false)],
+            ..BookPipelineChildJob::default()
+        };
+
+        assert_eq!(schedule_stage_retry(&mut child, "expert_qa"), None);
+        let blocked = stage_ref(&child, "expert_qa").unwrap();
+        assert_eq!(
+            blocked.give_up_reason.as_deref(),
+            Some(GIVE_UP_NOT_RETRYABLE)
+        );
+        assert_eq!(
+            blocked.attempt, 1,
+            "a non-retryable failure must not spend an attempt"
+        );
+        assert_eq!(stage_attempts_remaining(blocked), 0);
+
+        // The same stage classified as retryable does schedule one.
+        let mut child = BookPipelineChildJob {
+            stages: vec![stage("runner_failed", true)],
+            ..BookPipelineChildJob::default()
+        };
+        assert_eq!(
+            schedule_stage_retry(&mut child, "expert_qa"),
+            Some(DEFAULT_STAGE_RETRY_BACKOFF_SECONDS[0])
+        );
+        let scheduled = stage_ref(&child, "expert_qa").unwrap();
+        assert!(scheduled.give_up_reason.is_none());
+        assert!(scheduled.next_retry_at.is_some());
+        assert_eq!(
+            stage_attempts_remaining(scheduled),
+            DEFAULT_STAGE_MAX_ATTEMPTS - 1
+        );
+    }
+
+    // A stage that carries its own policy is honoured over the default, which is
+    // what makes the persisted table worth persisting.
+    #[test]
+    fn a_stage_policy_overrides_the_default_budget_and_backoff() {
+        let mut child = BookPipelineChildJob {
+            stages: vec![BookPipelineStage {
+                stage_id: "translate".into(),
+                status: STATUS_FAILED.into(),
+                attempt: 1,
+                max_attempts: 2,
+                retry_backoff_seconds: vec![7],
+                safe_error: Some(BookPipelineSafeError {
+                    retryable: true,
+                    ..BookPipelineSafeError::default()
+                }),
+                ..BookPipelineStage::default()
+            }],
+            ..BookPipelineChildJob::default()
+        };
+
+        assert_eq!(schedule_stage_retry(&mut child, "translate"), Some(7));
+
+        // A one-entry table repeats its last entry rather than dropping to no wait.
+        stage_mut(&mut child, "translate").unwrap().attempt = 2;
+        assert_eq!(schedule_stage_retry(&mut child, "translate"), None);
+        assert_eq!(
+            stage_ref(&child, "translate")
+                .unwrap()
+                .give_up_reason
+                .as_deref(),
+            Some(GIVE_UP_RETRY_BUDGET_EXHAUSTED),
+            "max_attempts 2 means the second failure is the last"
+        );
+    }
+
     #[test]
     fn translate_failure_retries_only_failed_units_and_recovers_stage() {
         let root = temp_root("fake-translate-retry");
@@ -23995,53 +24331,13 @@ mod tests {
         let executor = TranslationEngineFixtureExecutor::failing_once("chapter_002");
 
         advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
-        let failed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
 
-        assert_eq!(child_stage_status(&failed, "translate"), STATUS_FAILED);
-        assert_eq!(child_stage_status(&failed, "expert_qa"), STATUS_PENDING);
-        let failed_stage = failed.children[0]
-            .stages
-            .iter()
-            .find(|stage| stage.stage_id == "translate")
-            .unwrap();
-        let failed_summary = failed_stage.unit_summary.as_ref().unwrap();
-        assert_eq!(
-            (
-                failed_summary.total,
-                failed_summary.completed,
-                failed_summary.failed
-            ),
-            (2, 1, 1)
-        );
-        assert!(failed_stage
-            .input_hashes
-            .contains_key("failedUnit:chapter_002"));
-        assert!(failed_stage.error.is_some());
-        assert_eq!(
-            failed.children[0]
-                .artifacts
-                .iter()
-                .filter(|artifact| artifact.kind == "chapter_translation")
-                .count(),
-            1
-        );
-        assert_eq!(
-            failed.children[0]
-                .artifacts
-                .iter()
-                .filter(|artifact| artifact.kind == "chapter_translation_degraded")
-                .count(),
-            1
-        );
-        let persisted = store.load().unwrap();
-        let persisted_job = persisted.jobs.iter().find(|job| job.id == job_id).unwrap();
-        assert_eq!(
-            child_stage_status(persisted_job, "translate"),
-            STATUS_FAILED
-        );
-
+        // One transient unit failure is the runner's own problem now: the stage
+        // fails, schedules itself and comes back without anyone pressing retry.
         let recovered = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
 
+        // The automatic attempt inherits the existing retry-scope trimming, so
+        // the unit that already translated is not paid for twice.
         assert_eq!(
             executor.requested_units(),
             vec![
@@ -24975,6 +25271,8 @@ mod tests {
             child_stage_status(&completed, "build_digest"),
             STATUS_COMPLETED
         );
+        // Three automatic attempts exhausted the stage's budget before the
+        // operator's own retry, which is the fourth.
         assert_eq!(
             completed.children[0]
                 .stages
@@ -24982,7 +25280,7 @@ mod tests {
                 .find(|stage| stage.stage_id == "build_digest")
                 .unwrap()
                 .attempt,
-            2
+            DEFAULT_STAGE_MAX_ATTEMPTS + 1
         );
         let passed_report: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(project_root.join("output/digest_epubcheck.json")).unwrap(),
