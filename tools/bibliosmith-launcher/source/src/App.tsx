@@ -121,7 +121,6 @@ const LAUNCHER_VERSION = `v${launcherVersionManifest.version}`;
 const defaultSettings: LauncherSettings = {
   autoStart: false,
   checkLauncherOnLaunch: true,
-  checkOpenCodeOnLaunch: false,
   saveLogsToLocal: true,
 };
 
