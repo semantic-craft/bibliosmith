@@ -338,8 +338,8 @@ class GlossaryOutputCheckTests(unittest.TestCase):
             occurrence = findings[source]["occurrences"][0]
             self.assertEqual(findings[source]["translation"], expected)
             self.assertIn(source, occurrence["sourceExcerpt"])
-            # Aligned by paragraph, so this is the model's rendering of the very
-            # text the term appeared in -- not the whole chunk, not a guess.
+            # Aligned by placeholder segment, so this is the model's rendering of
+            # the very text the term appeared in -- not the chunk, not a guess.
             self.assertIn(wrote, occurrence["translatedExcerpt"])
             self.assertNotIn(expected, occurrence["translatedExcerpt"])
             self.assertNotIn("Nothing here", occurrence["translatedExcerpt"])

@@ -205,12 +205,16 @@ translation is missing is reported on the unit as `glossaryViolations`:
 }
 ```
 
-`chunkIndex` is a zero-based index into the unit's chunks. The excerpts are the
-matching paragraph on each side: a candidate is only accepted when it carries the
-chunk's protected placeholders once each and in order, and paragraph breaks are
-themselves placeholders, so the *i*-th segment of the output is the model's
-rendering of the *i*-th segment of the source. At most two paragraphs are
-reported per term and each excerpt is capped at 200 characters.
+`chunkIndex` is a zero-based index into the unit's chunks. The two excerpts are
+the same stretch of text on each side. A candidate is only accepted when it
+carries the chunk's protected placeholders once each and in order, so splitting
+source and output on those placeholders yields the same segments in the same
+order, and the *i*-th segment of the output is the model's rendering of the
+*i*-th segment of the source. A segment is bounded by whatever the protection
+pass replaced — usually a paragraph break or heading prefix, but inline atoms
+like code spans and link URLs bound one too, so an excerpt can be narrower than
+the paragraph it sits in. At most two segments are reported per term, each capped
+at 200 characters.
 
 This is evidence, never a gate. Chinese word formation can put a required form
 inside a longer compound, and a term can be legitimately absent where the source

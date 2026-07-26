@@ -573,7 +573,7 @@ def _translate_unit(
         # The count alone says a book drifted somewhere in 400 pages, which is
         # not something anyone can act on. A structured finding is: the term, the
         # translation it was supposed to get, the chunk it happened in, and the
-        # source and output text of the paragraph it happened in. Reported as
+        # source and output text of the stretch it happened in. Reported as
         # evidence and never as a gate -- see the note on find_glossary_violations
         # for why a signal with known false positives must not block a chapter.
         report["glossaryViolations"] = [
@@ -683,9 +683,9 @@ def _violation_occurrences(
     reported: set[int] = set()
     for start, end in find_variant_spans(source_chunk, entry):
         position = _segment_index(source_segments, start)
-        # One entry per paragraph, not per match: a term used three times in the
-        # same paragraph is one place to look, and repeating the excerpt would
-        # spend the occurrence budget saying the same thing.
+        # One entry per segment, not per match: a term used three times in the
+        # same stretch of text is one place to look, and repeating the excerpt
+        # would spend the occurrence budget saying the same thing.
         if position in reported:
             continue
         reported.add(position)
