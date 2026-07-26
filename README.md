@@ -189,7 +189,7 @@ cd tools/bibliosmith-launcher/source && npm ci && npx tsc --noEmit && npm test &
 ```
 
 Expected counts, measured 2026-07-26: translation engine 81, OCR 18, Zotero CLI
-62, repository suites 89, launcher backend 209, launcher frontend 121.
+62, repository suites 89, launcher backend 209, launcher frontend 122.
 
 `--package translation-engine` is not optional: it installs the workspace member
 so the CLI tests can reach its console scripts. A plain `uv sync` at the

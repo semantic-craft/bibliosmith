@@ -42,7 +42,7 @@ tag before the DMG is built.
 | OCR | `uv run --package ocr pytest packages/ocr/tests` | 18 passed, 6 subtests passed |
 | Zotero CLI | `uv run --package zotero-cli-agent --extra dev --extra mcp pytest packages/zotero-cli/tests` | 62 passed |
 | Repository suites | `uv run --package digest pytest tests tools/git tools/bibliosmith-launcher/source/scripts/tests` | 89 passed, 2 subtests passed |
-| Launcher frontend | `cd tools/bibliosmith-launcher/source && npx tsc --noEmit && npm test && npm run test:startup-contract` | no output / 121 passed / `startup contract ok` |
+| Launcher frontend | `cd tools/bibliosmith-launcher/source && npx tsc --noEmit && npm test && npm run test:startup-contract` | no output / 122 passed / `startup contract ok` |
 
 Counts measured 2026-07-26.
 

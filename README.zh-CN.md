@@ -124,7 +124,7 @@ cd tools/bibliosmith-launcher/source && npm ci && npx tsc --noEmit && npm test &
 ```
 
 2026-07-26 实测数量：翻译引擎 81、OCR 18、Zotero CLI 62、repository suites 89、
-启动器后端 209、启动器前端 121。
+启动器后端 209、启动器前端 122。
 
 Zotero CLI 那条命令里三个命名陷阱（包名与目录名不同、`--extra dev`、`--extra mcp`）
 见 `CONTRIBUTING.md`。
