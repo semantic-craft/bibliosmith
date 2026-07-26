@@ -74,6 +74,17 @@ uniformly, and ends each excerpt on a sentence boundary. It runs the normal
 placeholder validation and degradation path entirely in memory: it does not
 write checkpoints or anything under `chapters/translated/`.
 
+A book with two or fewer tasks therefore has no internal task to sample, and the
+command succeeds with an empty `samples` list without calling the provider. That
+is the defined outcome, not a failure: the excluded endpoints are where title,
+copyright, and trailing metadata live, and sampling them would preview the least
+representative pages in the book. A caller showing the report has to say so —
+an empty panel reads as a broken preview.
+
+The sample runs one translation pass. A full run with `secondPassEnabled` also
+runs the windowed reflection, so a preview is not byte-for-byte what that run
+will produce; a caller offering both has to say which it is showing.
+
 `source_map.json` and each task manifest must be outputs of the existing split
 and prepare stages. A retry supplies only failed or invalidated unit entries.
 The provider config ID must identify the non-secret settings represented by the

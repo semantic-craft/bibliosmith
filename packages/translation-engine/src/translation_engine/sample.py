@@ -76,6 +76,12 @@ def run_sample_manifest(
     # would reject it, instead of passing review and failing later.
     del custom_reflection
 
+    # Two units or fewer leaves nothing between the excluded endpoints, so the
+    # report comes back empty and the provider is never called. That is the
+    # defined outcome rather than a failure -- the endpoints are where title,
+    # copyright, and trailing metadata live, and previewing those would show the
+    # least representative pages in the book. Callers have to say so out loud;
+    # an empty panel reads as a broken preview.
     samples = []
     for unit_entry in select_internal_blocks(units, sample_count):
         task_path = _project_path(

@@ -83,6 +83,94 @@ class SampleTranslationTests(unittest.TestCase):
                 files_before,
             )
 
+    def test_the_spec_the_caller_passes_governs_both_how_many_and_how_much(
+        self,
+    ) -> None:
+        """N and the character budget are inputs, not constants in here.
+
+        The same five chapters sampled two ways: the counts, the chapters chosen,
+        and where each excerpt stops all follow the manifest.
+        """
+        source_texts = [
+            "Front matter.",
+            "Second chapter opens. It also continues past the budget.",
+            "Third chapter opens. It also continues past the budget.",
+            "Fourth chapter opens. It also continues past the budget.",
+            "Back matter.",
+        ]
+
+        def sample(*, sample_count: int, character_budget: int) -> list[dict]:
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                manifest_path = build_sample_fixture(
+                    Path(temporary_directory),
+                    source_texts=source_texts,
+                    sample_count=sample_count,
+                    character_budget=character_budget,
+                )
+                return run_sample_manifest(manifest_path)["samples"]
+
+        narrow = sample(sample_count=1, character_budget=20)
+        wide = sample(sample_count=3, character_budget=200)
+
+        self.assertEqual([entry["chunkRef"] for entry in narrow], ["chapter_003"])
+        self.assertEqual(
+            [entry["chunkRef"] for entry in wide],
+            ["chapter_002", "chapter_003", "chapter_004"],
+        )
+        self.assertEqual(narrow[0]["sourceExcerpt"], "Third chapter opens.")
+        self.assertEqual(wide[1]["sourceExcerpt"], source_texts[2])
+
+    def test_two_chapters_or_fewer_yield_an_empty_report_at_no_cost(self) -> None:
+        """Nothing sits between the excluded endpoints, so there is nothing to
+        preview. It is a defined outcome, not a failure: the command succeeds,
+        the provider is never called, and the caller has to explain the emptiness
+        rather than render a blank panel."""
+        for chapter_count in (1, 2):
+            with self.subTest(chapters=chapter_count):
+                provider = CapturingProvider()
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    project_root = Path(temporary_directory)
+                    manifest_path = build_sample_fixture(
+                        project_root,
+                        source_texts=[
+                            f"Chapter {index}." for index in range(chapter_count)
+                        ],
+                        sample_count=3,
+                        character_budget=800,
+                    )
+
+                    report = run_sample_manifest(
+                        manifest_path,
+                        provider_factory=lambda profile_id, *, config_id: provider,
+                    )
+
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "translation_engine.sample_cli",
+                            "--manifest",
+                            str(manifest_path),
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+
+                self.assertEqual(
+                    report,
+                    {
+                        "schema": "translation-engine-sample-report-v1",
+                        "samples": [],
+                    },
+                )
+                self.assertEqual(provider.instructions, [])
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(
+                    json.loads(completed.stdout).get("samples"), []
+                )
+                self.assertNotIn("error", json.loads(completed.stdout))
+
     def test_sample_cli_prints_only_the_json_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project_root = Path(temporary_directory)
