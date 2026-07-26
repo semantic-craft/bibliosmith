@@ -15,6 +15,7 @@ import { ProxySettingsPanel } from "./ProxySettingsPanel";
 import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 import { NodeModulesSettingsPanel } from "./NodeModulesSettingsPanel";
 import { DiagnosticLogPanel } from "./DiagnosticLogPanel";
+import { SourceCleanupPanel } from "./SourceCleanupPanel";
 import { ModelsSettingsPanel } from "./ModelsSettingsPanel";
 import { modelsCopy } from "./modelsCopy";
 import { EmbeddingSettingsPanel } from "./EmbeddingSettingsPanel";
@@ -172,6 +173,13 @@ export function SettingsPage({
             onStop={onNodeModulesStop}
             onCancel={onNodeModulesCancel}
           />
+        </div>
+      </div>
+
+      <div className="st-group">
+        <div className="st-group-title">{locale.startsWith("zh") ? "源文件清理" : "Source cleanup"}</div>
+        <div className="st-group-card">
+          <SourceCleanupPanel locale={locale} />
         </div>
       </div>
 

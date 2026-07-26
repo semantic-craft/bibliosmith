@@ -6099,6 +6099,7 @@ pub fn run() {
             book_pipeline::approve_book_pipeline_gate,
             book_pipeline::record_book_pipeline_reader_evidence,
             book_pipeline::set_book_pipeline_route_override,
+            book_pipeline::verify_book_pipeline_cleanup_approval,
             book_pipeline::run_book_pipeline_translation_sample,
             book_pipeline::set_book_pipeline_translation_provider,
             book_pipeline::choose_book_pipeline_pdf_folder,
