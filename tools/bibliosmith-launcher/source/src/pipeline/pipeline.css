@@ -387,6 +387,9 @@
   font: inherit;
 }
 .pl-scontrols .pl-btn { grid-column: 1 / -1; justify-self: start; }
+/* The book's own model sits under the sample picker with its adopt button, so
+   the row is a three-part flex line rather than the usual key/value pair. */
+.pl-scompare .pl-evi-row { align-items: center; margin-top: 10px; }
 .pl-sresults { display: grid; gap: 10px; margin-top: 12px; }
 .pl-sresult { overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
 .pl-sresult-meta { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--line); }

@@ -30,6 +30,7 @@ function renderDrawer(unit: BookUnit, over: Partial<BookDrawerProps> = {}) {
     onDelete: vi.fn(),
     onAdvance: vi.fn(),
     onSampleTranslation: vi.fn(),
+    onApplySampleProvider: vi.fn(),
     onSaveCustomInstructions: vi.fn(),
     onApproveGate: vi.fn(),
     onOpenOutput: vi.fn(),
@@ -63,57 +64,117 @@ function providerSelect(): HTMLSelectElement {
 const optionValues = (select: HTMLSelectElement) =>
   Array.from(select.options).map((option) => option.value);
 
+const CATALOG_SLOTS = MODEL_BRANDS.flatMap((brand) =>
+  brand.slots.map((slot) => `${slot.profileId}:${slot.configId}`),
+);
+
 describe("BookDrawer provider picker", () => {
-  // Regression: the three options were hard-coded while the catalog carried
-  // six, so the drawer silently offered half the providers a user could
-  // configure in Settings.
-  it("offers every brand in the catalog", () => {
-    renderDrawer(gateUnit({ jobOver: { translationProfileId: "deepseek" } }));
+  // Regression: the options were one per brand while the registry carries eight
+  // slots, so Qwen's and MiMo's second billing plan could not be picked here at
+  // all — and before that, three brands were hard-coded against a catalog of six.
+  it("offers every slot in the catalog, not just every brand", () => {
+    renderDrawer(gateUnit({ jobOver: { translationProfileId: "deepseek", translationConfigId: "deepseek-default" } }));
 
-    expect(MODEL_BRANDS.length).toBeGreaterThanOrEqual(6);
-    expect(optionValues(providerSelect())).toEqual(MODEL_BRANDS.map((brand) => brand.profileId));
+    expect(CATALOG_SLOTS.length).toBeGreaterThan(MODEL_BRANDS.length);
+    expect(optionValues(providerSelect())).toEqual(CATALOG_SLOTS);
+    expect(optionValues(providerSelect())).toContain("qwen:token-plan");
+    expect(optionValues(providerSelect())).toContain("mimo:token-plan");
   });
 
-  it("labels each option with its brand name", () => {
-    renderDrawer(gateUnit({ jobOver: { translationProfileId: "deepseek" } }));
+  it("labels a two-plan brand's slots apart", () => {
+    renderDrawer(gateUnit({ jobOver: { translationProfileId: "deepseek", translationConfigId: "deepseek-default" } }));
     const labels = Array.from(providerSelect().options).map((option) => option.textContent);
-    expect(labels).toEqual(MODEL_BRANDS.map((brand) => brand.brand));
+    const qwen = MODEL_BRANDS.find((brand) => brand.profileId === "qwen")!;
+    expect(labels).toContain(`${qwen.brand} · ${qwen.slots[0].label}`);
+    expect(labels).toContain(`${qwen.brand} · ${qwen.slots[1].label}`);
+    // A single-slot brand stays unqualified.
+    expect(labels).toContain("DeepSeek");
   });
 
-  it("selects the profile the job already carries", () => {
-    renderDrawer(gateUnit({ jobOver: { translationProfileId: "kimi" } }));
-    expect(providerSelect().value).toBe("kimi");
+  it("selects the slot the job already carries", () => {
+    renderDrawer(gateUnit({ jobOver: { translationProfileId: "qwen", translationConfigId: "token-plan" } }));
+    expect(providerSelect().value).toBe("qwen:token-plan");
   });
 
   // A job may predate a rename, or belong to the expert agent. Dropping such a
-  // profile from the list would make the drawer silently rewrite it on open.
-  it("keeps a profile the catalog no longer lists selectable", () => {
-    renderDrawer(gateUnit({ jobOver: { translationProfileId: "retired-profile" } }));
+  // slot from the list would strand the picker on a value it has no option for.
+  it("keeps a slot the catalog no longer lists selectable", () => {
+    renderDrawer(gateUnit({ jobOver: { translationProfileId: "retired-profile", translationConfigId: "old" } }));
     const select = providerSelect();
-    expect(select.value).toBe("retired-profile");
-    expect(optionValues(select)).toEqual([
-      "retired-profile",
-      ...MODEL_BRANDS.map((brand) => brand.profileId),
-    ]);
+    expect(select.value).toBe("retired-profile:old");
+    expect(optionValues(select)).toEqual(["retired-profile:old", ...CATALOG_SLOTS]);
   });
 
-  it("does not add a duplicate option for a profile the catalog does list", () => {
-    renderDrawer(gateUnit({ jobOver: { translationProfileId: "qwen" } }));
+  it("does not add a duplicate option for a slot the catalog does list", () => {
+    renderDrawer(gateUnit({ jobOver: { translationProfileId: "qwen", translationConfigId: "payg" } }));
     const values = optionValues(providerSelect());
-    expect(values.filter((value) => value === "qwen")).toHaveLength(1);
+    expect(values.filter((value) => value === "qwen:payg")).toHaveLength(1);
   });
 
-  it("defaults the config box to the chosen brand's first slot", () => {
+  it("falls back to the brand's first slot when the job carries no config", () => {
     renderDrawer(gateUnit({ jobOver: { translationProfileId: "kimi", translationConfigId: "" } }));
-    const config = screen.getByLabelText(copy.sampleConfig) as HTMLInputElement;
-    const kimi = MODEL_BRANDS.find((brand) => brand.profileId === "kimi");
-    expect(config.value).toBe(kimi?.slots[0].configId);
+    const kimi = MODEL_BRANDS.find((brand) => brand.profileId === "kimi")!;
+    expect(providerSelect().value).toBe(`kimi:${kimi.slots[0].configId}`);
   });
 
   it("hides the sample controls for an expert-mode job", () => {
     const { card } = renderDrawer(gateUnit({ jobOver: { translationMode: "expert" } }));
     expect(card).not.toBeNull();
     expect(screen.queryByLabelText(copy.sampleProvider)).toBeNull();
+  });
+});
+
+/**
+ * Running a sample used to adopt its provider as the job's, so trying a model
+ * out silently redirected the whole book. Sampling now leaves the job alone,
+ * which means the gap between "what I sampled" and "what the book will run on"
+ * has to be visible — the approval binding carries the job's slot while the
+ * evidence in front of the user came from the sample's.
+ */
+describe("BookDrawer sample provider decoupling", () => {
+  const onQwenPayg = { translationProfileId: "qwen", translationConfigId: "payg" };
+
+  it("names the book's own model alongside the sample picker", () => {
+    const { card } = renderDrawer(gateUnit({ jobOver: onQwenPayg }));
+    const qwen = MODEL_BRANDS.find((brand) => brand.profileId === "qwen")!;
+    // Scoped to the row: the same label is also one of the picker's options.
+    const row = within(card as HTMLElement).getByText(copy.jobProvider).closest(".pl-evi-row");
+    expect(row?.querySelector(".pl-v")?.textContent).toBe(`${qwen.brand} · ${qwen.slots[0].label}`);
+  });
+
+  it("says nothing while the picker still matches the book's model", () => {
+    const { card } = renderDrawer(gateUnit({ jobOver: onQwenPayg }));
+    expect(within(card as HTMLElement).queryByText(copy.sampleProviderDiffers)).toBeNull();
+    expect(
+      within(card as HTMLElement).queryByRole("button", { name: copy.applySampleProvider }),
+    ).toBeNull();
+  });
+
+  it("warns and offers the adopt action once the picker moves off it", async () => {
+    const user = userEvent.setup();
+    const { card } = renderDrawer(gateUnit({ jobOver: onQwenPayg }));
+
+    await user.selectOptions(providerSelect(), "kimi:kimi-default");
+
+    expect(within(card as HTMLElement).getByText(copy.sampleProviderDiffers)).toBeTruthy();
+    expect(
+      within(card as HTMLElement).getByRole("button", { name: copy.applySampleProvider }),
+    ).toBeTruthy();
+  });
+
+  it("keeps sampling and adopting as two separate calls", async () => {
+    const user = userEvent.setup();
+    const { card, props } = renderDrawer(gateUnit({ jobOver: onQwenPayg }));
+
+    await user.selectOptions(providerSelect(), "kimi:kimi-default");
+    await user.click(within(card as HTMLElement).getByRole("button", { name: copy.sampleRun }));
+    expect(props.onSampleTranslation).toHaveBeenCalledWith("job-1", "child-1", "kimi", "kimi-default");
+    expect(props.onApplySampleProvider).not.toHaveBeenCalled();
+
+    await user.click(
+      within(card as HTMLElement).getByRole("button", { name: copy.applySampleProvider }),
+    );
+    expect(props.onApplySampleProvider).toHaveBeenCalledWith("job-1", "child-1", "kimi", "kimi-default");
   });
 });
 

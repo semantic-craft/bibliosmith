@@ -33,6 +33,7 @@ export type PipelineWorkbenchProps = {
   onDelete: (jobId: string) => void;
   onAdvance: (jobId: string, childId: string) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
+  onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   onSaveCustomInstructions: (
     jobId: string,
     childId: string,
@@ -134,6 +135,7 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
               onDelete={props.onDelete}
               onAdvance={props.onAdvance}
               onSampleTranslation={props.onSampleTranslation}
+              onApplySampleProvider={props.onApplySampleProvider}
               onSaveCustomInstructions={props.onSaveCustomInstructions}
               onApproveGate={props.onApproveGate}
               onOpenOutput={props.onOpenOutput}

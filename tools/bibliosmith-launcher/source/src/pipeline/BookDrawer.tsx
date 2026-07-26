@@ -14,7 +14,6 @@ import {
   firstMarkdownArtifact,
   fourStepStates,
   pendingGates,
-  PROVIDER_DEFAULT_CONFIG,
   providerDefaultConfig,
   stepCaption,
   stepName,
@@ -25,7 +24,7 @@ import {
   type PipelineBusy,
   type StepState,
 } from "./model";
-import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
+import { MODEL_BRANDS, slotDisplayName, slotMeta } from "../pages/settings/modelCatalog";
 import { BookCover } from "./Shelf";
 import { OverviewTab } from "./tabs/OverviewTab";
 import { StagesTab } from "./tabs/StagesTab";
@@ -44,6 +43,9 @@ export type BookDrawerProps = {
   onDelete: (jobId: string) => void;
   onAdvance: (jobId: string, childId: string) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
+  // Adopting a sampled slot as the book's own. Separate from sampling, because
+  // sampling is "try one out" and this decides what the full run uses.
+  onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   onSaveCustomInstructions: (
     jobId: string,
     childId: string,
@@ -180,6 +182,7 @@ function GateCard({
   copy,
   busy,
   onSampleTranslation,
+  onApplySampleProvider,
   onApproveGate,
   onOpenOutput,
 }: {
@@ -188,6 +191,7 @@ function GateCard({
   copy: PipelineCopy;
   busy: PipelineBusy;
   onSampleTranslation: BookDrawerProps["onSampleTranslation"];
+  onApplySampleProvider: BookDrawerProps["onApplySampleProvider"];
   onApproveGate: BookDrawerProps["onApproveGate"];
   onOpenOutput: BookDrawerProps["onOpenOutput"];
 }) {
@@ -199,15 +203,18 @@ function GateCard({
   const canOpen = Boolean(unit.job.openTarget);
   const childId = unit.child?.id ?? null;
 
-  const initialProfile = unit.job.translationProfileId || "openai-compatible";
-  const initialConfig = unit.job.translationConfigId || providerDefaultConfig(initialProfile);
-  const [providerProfileId, setProviderProfileId] = useState(initialProfile);
-  const [providerConfigId, setProviderConfigId] = useState(initialConfig);
+  // What the full book will run on. The picker below starts here but is only the
+  // sample's provider from then on — running a sample no longer adopts it.
+  const jobProfile = unit.job.translationProfileId || "openai-compatible";
+  const jobConfig = unit.job.translationConfigId || providerDefaultConfig(jobProfile);
+  const [providerProfileId, setProviderProfileId] = useState(jobProfile);
+  const [providerConfigId, setProviderConfigId] = useState(jobConfig);
   useEffect(() => {
     const profile = unit.job.translationProfileId || "openai-compatible";
     setProviderProfileId(profile);
     setProviderConfigId(unit.job.translationConfigId || providerDefaultConfig(profile));
   }, [unit.key, unit.job.translationConfigId, unit.job.translationProfileId]);
+  const providerDiffers = providerProfileId !== jobProfile || providerConfigId !== jobConfig;
 
   const [sampleReport, setSampleReport] = useState<BookPipelineTranslationSampleReport | null>(null);
   const reportArtifact = canRunProviderSample ? translationSampleArtifact(unit) : null;
@@ -261,35 +268,36 @@ function GateCard({
               <label>
                 {copy.sampleProvider}
                 <select
-                  value={providerProfileId}
+                  value={`${providerProfileId}:${providerConfigId}`}
                   disabled={busy === "sample"}
                   onChange={(event) => {
-                    const profile = event.target.value;
+                    const [profile, config] = event.target.value.split(":");
                     setProviderProfileId(profile);
-                    setProviderConfigId(providerDefaultConfig(profile));
+                    setProviderConfigId(config);
                   }}
                 >
-                  {/* A job may carry a profile the catalog no longer lists
-                      (renamed, or the expert agent); keep it selectable so
-                      opening the drawer cannot silently rewrite the job's
-                      provider. */}
-                  {!Object.hasOwn(PROVIDER_DEFAULT_CONFIG, providerProfileId) && (
-                    <option value={providerProfileId}>{providerProfileId}</option>
-                  )}
-                  {MODEL_BRANDS.map((brand) => (
-                    <option key={brand.profileId} value={brand.profileId}>
-                      {brand.brand}
+                  {/* One option per slot, not per brand: Qwen and MiMo bill two
+                      ways, and a brand-only list made their second plan
+                      unreachable. A job may also carry a slot the catalog no
+                      longer lists (renamed, or the expert agent); keep it
+                      selectable so opening the drawer cannot strand the picker
+                      on a value it has no option for. */}
+                  {!slotMeta(providerProfileId, providerConfigId) && (
+                    <option value={`${providerProfileId}:${providerConfigId}`}>
+                      {slotDisplayName(providerProfileId, providerConfigId)}
                     </option>
-                  ))}
+                  )}
+                  {MODEL_BRANDS.flatMap((brand) =>
+                    brand.slots.map((slot) => (
+                      <option
+                        key={`${slot.profileId}:${slot.configId}`}
+                        value={`${slot.profileId}:${slot.configId}`}
+                      >
+                        {slotDisplayName(slot.profileId, slot.configId)}
+                      </option>
+                    )),
+                  )}
                 </select>
-              </label>
-              <label>
-                {copy.sampleConfig}
-                <input
-                  value={providerConfigId}
-                  disabled={busy === "sample"}
-                  onChange={(event) => setProviderConfigId(event.target.value)}
-                />
               </label>
               <button
                 className="pl-btn sm"
@@ -305,6 +313,29 @@ function GateCard({
                 {sampleReport ? copy.sampleRetry : copy.sampleRun}
               </button>
             </div>
+            {/* Sampling no longer adopts its provider, so the gap has to be
+                visible: the binding the user approves carries the job's slot,
+                while the evidence in front of them came from the sample's. */}
+            <div className="pl-evi-row">
+              <span className="pl-k">{copy.jobProvider}</span>
+              <span className="pl-v">{slotDisplayName(jobProfile, jobConfig)}</span>
+              {providerDiffers && (
+                <button
+                  className="pl-btn sm"
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => onApplySampleProvider(
+                    unit.job.id,
+                    childId,
+                    providerProfileId.trim(),
+                    providerConfigId.trim(),
+                  )}
+                >
+                  {copy.applySampleProvider}
+                </button>
+              )}
+            </div>
+            {providerDiffers && <p className="pl-wiz-error">{copy.sampleProviderDiffers}</p>}
             {sampleReport && (
               <div className="pl-sresults">
                 {sampleReport.samples.map((entry) => (
@@ -636,6 +667,7 @@ export function BookDrawer(props: BookDrawerProps) {
                 copy={copy}
                 busy={props.busy}
                 onSampleTranslation={props.onSampleTranslation}
+                onApplySampleProvider={props.onApplySampleProvider}
                 onApproveGate={props.onApproveGate}
                 onOpenOutput={props.onOpenOutput}
               />

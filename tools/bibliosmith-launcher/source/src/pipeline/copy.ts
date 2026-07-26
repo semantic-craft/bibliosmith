@@ -134,7 +134,12 @@ export function pipelineCopy(locale: PipelineLocale) {
       ? "用当前模型翻译几段书中正文，先比较原文与译文；满意后再批准全书翻译。"
       : "Translate a few passages with the current model, compare source and target, then approve the full book.",
     sampleProvider: zh ? "抽样模型" : "Sample provider",
-    sampleConfig: zh ? "配置" : "Configuration",
+    jobProvider: zh ? "本书正式模型" : "This book's model",
+    sampleProviderDiffers: zh
+      ? "样张用的模型和本书正式模型不是同一个。批准后全书会用正式模型翻译，不是你在样张里看到的那个。"
+      : "The sample was run with a different model than this book's. Approving sends the whole book through this book's model, not the one you sampled.",
+    applySampleProvider: zh ? "以此模型翻译本书" : "Translate this book with it",
+    appliedSampleProvider: zh ? "本书正式模型已更新" : "This book's model was updated",
     sampleRun: zh ? "生成对照样张" : "Generate comparison",
     sampleRetry: zh ? "换模型后重试" : "Retry with provider",
     sampleReady: zh ? "翻译对照样张已生成" : "Translation comparison is ready",

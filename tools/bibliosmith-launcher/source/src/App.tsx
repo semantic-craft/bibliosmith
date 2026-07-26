@@ -43,6 +43,7 @@ import {
   recordFrontendActivity,
   retryBookPipelineJob,
   runBookPipelineTranslationSample,
+  setBookPipelineTranslationProvider,
   runBookPipelineJob,
   saveBookPipelineCustomInstructions,
   setRepoFolder,
@@ -570,6 +571,29 @@ export default function App() {
       setPipelineBusy(null);
     }
   }, [addActivity, bookPipelineCopy.sampleReady, showFloatingToast]);
+
+  // The explicit half of the sample flow: adopt the slot the sample was run with
+  // as the book's own, which is what the full run uses.
+  const applyPipelineTranslationProvider = useCallback(async (
+    jobId: string,
+    childId: string,
+    providerProfileId: string,
+    providerConfigId: string,
+  ) => {
+    setPipelineBusy("sample");
+    try {
+      const job = await setBookPipelineTranslationProvider(jobId, childId, providerProfileId, providerConfigId);
+      setPipelineState((current) => upsertPipelineJob(current, job));
+      addActivity("success", `Translation provider set: ${providerProfileId} · ${providerConfigId}`);
+      showFloatingToast(bookPipelineCopy.appliedSampleProvider, "success");
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+    } finally {
+      setPipelineBusy(null);
+    }
+  }, [addActivity, bookPipelineCopy.appliedSampleProvider, showFloatingToast]);
 
   const handoffPipelineMarkdown = useCallback(async (jobId: string, artifactPath?: string | null) => {
     setPipelineBusy("handoff");
@@ -1885,6 +1909,9 @@ export default function App() {
               onAdvance={(jobId, childId) => void advancePipeline(jobId, childId)}
               onSampleTranslation={(jobId, childId, providerProfileId, providerConfigId) =>
                 void samplePipelineTranslation(jobId, childId, providerProfileId, providerConfigId)
+              }
+              onApplySampleProvider={(jobId, childId, providerProfileId, providerConfigId) =>
+                void applyPipelineTranslationProvider(jobId, childId, providerProfileId, providerConfigId)
               }
               onSaveCustomInstructions={(jobId, childId, customInstructions) =>
                 void savePipelineCustomInstructions(jobId, childId, customInstructions)

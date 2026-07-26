@@ -1270,16 +1270,37 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
   return invoke<BookPipelineJob>("approve_book_pipeline_gate", { jobId, childId, stageId, explicitApproval: true });
 }
 
+// applyToJob stays false for a plain sample: trying a model out must not decide
+// what the full book runs on. Adopting one is setBookPipelineTranslationProvider.
 export function runBookPipelineTranslationSample(
+  jobId: string,
+  childId: string,
+  providerProfileId: string,
+  providerConfigId: string,
+  applyToJob = false,
+) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("Translation samples require the desktop runtime."));
+  }
+  return invoke<BookPipelineJob>("run_book_pipeline_translation_sample", {
+    jobId,
+    childId,
+    providerProfileId,
+    providerConfigId,
+    applyToJob,
+  });
+}
+
+export function setBookPipelineTranslationProvider(
   jobId: string,
   childId: string,
   providerProfileId: string,
   providerConfigId: string,
 ) {
   if (!isTauriRuntime()) {
-    return Promise.reject(new Error("Translation samples require the desktop runtime."));
+    return Promise.reject(new Error("Changing the translation provider requires the desktop runtime."));
   }
-  return invoke<BookPipelineJob>("run_book_pipeline_translation_sample", {
+  return invoke<BookPipelineJob>("set_book_pipeline_translation_provider", {
     jobId,
     childId,
     providerProfileId,
