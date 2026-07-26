@@ -728,13 +728,14 @@ def _excerpt(text: str, start: int, end: int) -> str:
     Bounded because this report is JSON on stdout that the launcher folds into a
     job's state: a four-hundred-page book must stay something a person can read.
     """
-    text = text.strip()
     if len(text) <= VIOLATION_EXCERPT_CHARACTERS:
-        return text
+        return text.strip()
+    # Offsets are the caller's, measured against this exact string, so the window
+    # is computed before anything is trimmed and only the result is stripped.
     span = max(end - start, 0)
     margin = max((VIOLATION_EXCERPT_CHARACTERS - span) // 2, 0)
     window_start = max(min(start - margin, len(text) - VIOLATION_EXCERPT_CHARACTERS), 0)
-    window_end = min(window_start + VIOLATION_EXCERPT_CHARACTERS, len(text))
+    window_end = window_start + VIOLATION_EXCERPT_CHARACTERS
     prefix = "…" if window_start > 0 else ""
     suffix = "…" if window_end < len(text) else ""
     return f"{prefix}{text[window_start:window_end].strip()}{suffix}"
