@@ -8,6 +8,7 @@ import {
   type BookUnit,
 } from "../model";
 import type { TabProps } from "./tabProps";
+import type { BookPipelineStage as BookStage } from "../../types";
 
 function rowClass(status: string): string {
   switch (status) {
@@ -28,7 +29,18 @@ function rowClass(status: string): string {
   }
 }
 
-function stageMeta(status: string, attempt: number, copy: PipelineCopy): { text: string; color?: string } {
+// "retryable" used to be printed on every failure with nothing behind it. It is
+// now whatever the runner's own retry budget says: a pending automatic retry, a
+// remaining count, or the reason it stopped trying.
+function retryMeta(stage: BookStage, copy: PipelineCopy): string {
+  if (stage.giveUpReason) return copy.stageGaveUp(stage.giveUpReason);
+  if (stage.nextRetryAt) return copy.stageRetryScheduled(stage.nextRetryAt);
+  const remaining = Math.max(0, (stage.maxAttempts || 0) - stage.attempt);
+  return remaining > 0 ? copy.stageRetriesLeft(remaining) : copy.stageRetryable;
+}
+
+function stageMeta(stage: BookStage, copy: PipelineCopy): { text: string; color?: string } {
+  const { status, attempt } = stage;
   switch (status) {
     case "completed":
       return { text: `${copy.statusCompleted} · ${copy.attemptLabel(attempt)}` };
@@ -39,7 +51,10 @@ function stageMeta(status: string, attempt: number, copy: PipelineCopy): { text:
     case "waiting_for_approval":
       return { text: copy.stageWaitingYou, color: "var(--pl-approval)" };
     case "failed":
-      return { text: `${copy.statusFailed} · ${copy.attemptLabel(attempt)} · ${copy.stageRetryable}`, color: "var(--pl-failed)" };
+      return {
+        text: `${copy.statusFailed} · ${copy.attemptLabel(attempt)} · ${retryMeta(stage, copy)}`,
+        color: "var(--pl-failed)",
+      };
     case "blocked":
       return { text: copy.stageBlockedMeta, color: "var(--pl-blocked)" };
     case "ready":
@@ -87,7 +102,7 @@ export function StagesTab({ unit, copy }: TabProps) {
     <div className="pl-vtl">
       {stages.map((stage) => {
         const cls = rowClass(stage.status);
-        const meta = stageMeta(stage.status, stage.attempt, copy);
+        const meta = stageMeta(stage, copy);
         const isCurrent = active?.stageId === stage.stageId;
         return (
           <div

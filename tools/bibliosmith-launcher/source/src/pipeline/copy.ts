@@ -231,6 +231,16 @@ export function pipelineCopy(locale: PipelineLocale) {
     attemptLabel: (n: number) => (zh ? `尝试 ${n}` : `attempt ${n}`),
     stageWaitingYou: zh ? "等待你的决定" : "Waiting for your decision",
     stageRetryable: zh ? "可重试" : "retryable",
+    stageRetriesLeft: (n: number) => (zh ? `将自动重试 ${n} 次` : `${n} auto-retry(s) left`),
+    stageRetryScheduled: (at: string) => {
+      const due = new Date(at);
+      const label = Number.isNaN(due.getTime()) ? at : due.toLocaleTimeString();
+      return zh ? `将于 ${label} 自动重试` : `auto-retry at ${label}`;
+    },
+    stageGaveUp: (reason: string) =>
+      reason === "not_retryable"
+        ? (zh ? "不可自动重试" : "not auto-retryable")
+        : (zh ? "自动重试已用尽" : "auto-retries exhausted"),
     stageBlockedMeta: zh ? "已拦截 · 等待裁决" : "Blocked · awaiting decision",
     stageRunningMeta: zh ? "进行中" : "Running",
     stageSkippedMeta: zh ? "已跳过" : "Skipped",
