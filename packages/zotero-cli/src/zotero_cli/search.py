@@ -15,7 +15,7 @@ from .zotero_db import ZoteroItem, iter_items
 
 
 ITEM_INDEX_CONTRACT_VERSION = "zfulltext-item-index-v1"
-CHUNK_CONTRACT_VERSION = "zfulltext-chunk-v1"
+CHUNK_CONTRACT_VERSION = "zfulltext-chunk-v2"
 
 
 def _to_metadata(item: ZoteroItem, *, chunk_idx: int | None = None) -> dict:

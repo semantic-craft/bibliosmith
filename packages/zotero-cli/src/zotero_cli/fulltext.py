@@ -15,7 +15,6 @@ from .zotero_db import DEFAULT_DB_PATH
 ZOTERO_STORAGE = Path.home() / "Zotero" / "storage"
 CHUNK_SIZE = 4000  # characters per chunk (~2000 CJK chars)
 CHUNK_OVERLAP = 300
-MAX_CHUNKS_PER_ITEM = 20
 
 
 def _get_attachment_keys(parent_key: str, db_path: Path) -> list[str]:
@@ -78,13 +77,8 @@ def chunk_text(
     text: str,
     chunk_size: int = CHUNK_SIZE,
     overlap: int = CHUNK_OVERLAP,
-    max_chunks: int = MAX_CHUNKS_PER_ITEM,
 ) -> list[str]:
-    """Split text into overlapping chunks by paragraph boundaries.
-
-    If total chunks exceed max_chunks, keep front half + back half to cover
-    introduction and conclusion of a document.
-    """
+    """Split all text into overlapping chunks by paragraph boundaries."""
     paragraphs = text.split("\n\n")
     chunks: list[str] = []
     current = ""
@@ -116,10 +110,5 @@ def chunk_text(
             prev_tail = chunks[i - 1][-overlap:]
             overlapped.append(prev_tail + chunks[i])
         chunks = overlapped
-
-    # Cap: keep front + back to cover intro and conclusion
-    if len(chunks) > max_chunks:
-        half = max_chunks // 2
-        chunks = chunks[:half] + chunks[-half:]
 
     return chunks
