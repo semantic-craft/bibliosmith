@@ -2428,9 +2428,21 @@ fn runtime_resolved_executable(package: RuntimePackage) -> Option<PathBuf> {
 /// the system. Shared with the Book Pipeline runner so its EPUBCheck call
 /// resolves Java exactly the way `run_epubcheck.js` already does.
 pub(crate) fn managed_java_executable() -> Option<PathBuf> {
+    managed_runtime_executable(RuntimeKind::Java)
+}
+
+/// The Python counterpart, for the bilingual builder the runner spawns directly.
+/// `run_python.js` already honours `BIBLIOSMITH_PYTHON`; the Rust side has to
+/// agree, or "运行时准备" reports green while the stage runs a different
+/// interpreter.
+pub(crate) fn managed_python_executable() -> Option<PathBuf> {
+    managed_runtime_executable(RuntimeKind::Python)
+}
+
+fn managed_runtime_executable(kind: RuntimeKind) -> Option<PathBuf> {
     runtime_packages()
         .into_iter()
-        .find(|package| matches!(package.kind, RuntimeKind::Java))
+        .find(|package| package.kind == kind)
         .and_then(runtime_resolved_executable)
 }
 
