@@ -25,8 +25,12 @@ produced or tested.
 
 ### 1. Download
 
-Releases are published to a separate download repository:
+Releases are published here:
 
+<https://github.com/semantic-craft/bibliosmith/releases>
+
+Versions up to 1.12.0 were published to a separate download repository, back
+when this source was private, and stay there:
 <https://github.com/semantic-craft/bibliosmith-releases/releases>
 
 Take the newest `BiblioSmith.Launcher_<version>_aarch64.dmg`, open it, and drag

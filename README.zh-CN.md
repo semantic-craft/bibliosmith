@@ -14,8 +14,11 @@ Windows 版本。
 
 ### 1. 下载
 
-发行版发布在单独的下载仓：
+发行版就发布在本仓：
 
+<https://github.com/semantic-craft/bibliosmith/releases>
+
+1.12.0 及更早的版本发在单独的下载仓——那是源码还私有时的产物——继续留在原处：
 <https://github.com/semantic-craft/bibliosmith-releases/releases>
 
 取最新的 `BiblioSmith.Launcher_<版本>_aarch64.dmg`，打开后把

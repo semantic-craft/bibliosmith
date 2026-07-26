@@ -1,12 +1,20 @@
 name: Release Launcher
 
 # Builds the macOS (Apple Silicon) DMG on a GitHub-hosted macos-latest runner
-# and publishes it as a GitHub release on the public download repo
-# semantic-craft/bibliosmith-releases (manual download only — the app has
-# no self-update).
+# and publishes it as a GitHub release on this repository (manual download
+# only — the app has no self-update).
 #
-# One-time setup: repo secret RELEASE_TOKEN — a token with Contents: Read
-# and write on semantic-craft/bibliosmith-releases.
+# It used to publish to a separate public download repo,
+# semantic-craft/bibliosmith-releases, which dated from when the source was
+# private and was the only way to offer a public download. Publishing across
+# repositories needs a token with write access to the other one, and no such
+# secret was ever configured, so that last step had never once run. The source
+# is public now, so the release belongs beside it and the built-in GITHUB_TOKEN
+# is enough. Releases v1.4.0 through v1.12.0 stay where they are; recreating
+# them here would mean inventing tags for commits this history does not have.
+#
+# No secret needs configuring. The job below grants itself contents: write,
+# which is what the built-in token needs to create a release here.
 #
 # Release flow: update tools/bibliosmith-launcher/source/launcher-version.json
 # and tools/bibliosmith-launcher/source/RELEASE_NOTES.md, merge to main, then push a
@@ -33,14 +41,18 @@ permissions:
 
 jobs:
   # A tag used to go straight to build-and-release, so a red suite could still
-  # ship a DMG to the public download repo. ci.yml is reused here rather than
-  # copied so the release gate cannot drift from the pull-request gate.
+  # ship a DMG to the download page. ci.yml is reused here rather than copied
+  # so the release gate cannot drift from the pull-request gate.
   tests:
     uses: ./.github/workflows/ci.yml
 
   build-and-release:
     needs: tests
     runs-on: macos-latest
+    # Only this job, and only contents: the workflow default above stays read,
+    # so the reused test suite runs with no write access of its own.
+    permissions:
+      contents: write
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     defaults:
@@ -95,13 +107,15 @@ jobs:
       - name: Build DMG
         run: npx tauri build --bundles dmg
 
+      # --repo is github.repository rather than a literal, so a fork that pushes
+      # a tag publishes to itself instead of trying to write here.
       - name: Publish release
         working-directory: .
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$RELEASE_TAG" \
-            --repo semantic-craft/bibliosmith-releases \
+            --repo "$GITHUB_REPOSITORY" \
             --title "BiblioSmith Launcher $RELEASE_TAG" \
             --notes-file tools/bibliosmith-launcher/source/RELEASE_NOTES.md \
             "tools/bibliosmith-launcher/source/src-tauri/target/release/bundle/dmg/"*.dmg
