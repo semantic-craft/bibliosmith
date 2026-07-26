@@ -42,7 +42,7 @@ books-translation 转为私有仓库并成为单一 monorepo:物理收编 book-o
 
 - [转私有:books-translation 仓库私有化](https://github.com/semantic-craft/bibliosmith-private-archive/issues/41) — fork 无法直接转私有;以迁移达成:旧 fork 改名后删除,全新私有非-fork 宿主仓建立,67 票保号迁入。
 - [调和本地 fork 与 origin 的分叉基线](https://github.com/semantic-craft/bibliosmith-private-archive/issues/42) — 本地实现线成为 truth/trunk(origin 唯一独有内容仅 4 行 gitignore,不吸收);分叉消解,ahead/behind=0。
-- [定夺 monorepo 布局与迁移方案](https://github.com/semantic-craft/bibliosmith-private-archive/issues/43) — packages/{ocr,zotero-cli,translation-engine,digest} + tools/lifebook-launcher;Python 统一 uv workspace;zotero-cli filter-repo 保史 + ocr 快照;根单一 .env;方案文档 docs/monorepo-migration-plan.md。施工已切片:骨架+digest(#68)→ 搬包(#55/#56)→ launcher 接线(#69)/根 .env(#70)→ Legion 收口(#71)。
+- [定夺 monorepo 布局与迁移方案](https://github.com/semantic-craft/bibliosmith-private-archive/issues/43) — packages/{ocr,zotero-cli,translation-engine,digest} + tools/lifebook-launcher;Python 统一 uv workspace;zotero-cli filter-repo 保史 + ocr 快照;根单一 .env;方案文档 docs/monorepo-migration-plan.md。施工已切片:骨架+digest(#68)→ 搬包(#55/#56)→ launcher 接线(#69)/根 .env(#70)→ Windows 机收口(#71)。
 - [研读 TranslateBooksWithLLMs 源码,提炼翻译引擎机制规格](https://github.com/semantic-craft/bibliosmith-private-archive/issues/44) — 机制报告落 `research/tbl-mechanisms` 分支(含吴恩达 translation-agent 对照):TBL 结构安全靠 `[idN]` 占位符隔离 HTML + 三阶段降级(重试→比例对齐插回→保留原文),校验只查数量/索引不查位置;--refine 只看译稿、机制上不可修误译;reflection(四维批评)可修忠实度但全文上下文 O(n²),不改造不可用;词汇表有翻译遍/refine 遍/reflect 维度三个语义不同挂点。refine 与 reflection 是不同轴而非强弱版——供引擎架构与词汇表/refine 分工两票拍板。
 - [翻译引擎技术栈与总体架构](https://github.com/semantic-craft/bibliosmith-private-archive/issues/45) — Python(uv workspace 成员 packages/translation-engine);外部适配器 CLI 沿 RunnerCommandExecutor,每 translate 阶段一调(unit 清单进、逐单元状态出);核心吃占位符保护后的文本单元,Markdown 章节适配器首建、EPUB/DOCX/SRT 直译留适配器槽位;v2 作业状态唯一真相源,引擎块级断点私有旁挂(记幂等键、成功即删);契约语对通用,首期只发 zh-Hans 目标语 profile。#46/#47/#48 的缝分别留在 Provider 接口、translate 阶段调用契约、二遍 pass 插槽+目标语 profile。
 - [多 LLM 后端抽象与凭证配置](https://github.com/semantic-craft/bibliosmith-private-archive/issues/46) — Provider 集合=OpenAI 兼容+Gemini 原生(无 Anthropic 原生/无 Ollama→本地串行子项消解);key 轮换=全量多-key KeyPool+429 独立预算(填 #58 CredentialPool seam);配置=非密注册表(profile_id+config_id→provider/base_url/model/timeout/并发/chunk/key_env,闸门绑 ID,密钥运行时从根 .env 解析);并发=章内串行带尾 25 词上下文+章间并行;失败=类型化错误(RateLimitError→轮换/TransientError→有界退避/FatalError→快速失败)无熔断器;凭证=根单一 .env、单变量逗号分隔多 key、绝不进作业记录/日志/git。
@@ -76,7 +76,7 @@ books-translation 转为私有仓库并成为单一 monorepo:物理收编 book-o
 | 本仓 #30 | #46 已决的章间并行 | `concurrency_limit` 目前是死配置 |
 | 本仓 #28 | story 24 webhook 重复投递 | `updated_at` 折进 event id |
 | 本仓 #29 | story 18 后半 阅读器实测证据槽 | 可选证据当前无处可填 |
-| 本仓 #34 | story 21 Legion runbook 引导路径失修 | 改名后未再验证 |
+| 本仓 #34 | story 21 Windows 机 runbook 引导路径失修 | 改名后未再验证 |
 | 本仓 #32 | story 10 术语表输出侧校验 | 目前只有 prompt 注入 + 哈希绑定 |
 | 本仓 #35 | story 17 双语构建脚本双份分叉 | **定性已推翻**:两者是契约不同的两个工具,不是分叉;见 `docs/bilingual-epub-builders.md` |
 

@@ -37,12 +37,26 @@ tag before the DMG is built.
 
 | Suite | Command | Expected |
 |---|---|---|
-| Launcher Rust | `cd tools/bibliosmith-launcher/source/src-tauri && cargo test` | 177 passed |
-| Translation engine | `uv run --package translation-engine pytest packages/translation-engine/tests` | 64 passed, 6 subtests passed |
-| OCR | `uv run --package ocr pytest packages/ocr/tests` | 11 passed, 6 subtests passed |
+| Launcher Rust | `cd tools/bibliosmith-launcher/source/src-tauri && cargo test` | 209 passed |
+| Translation engine | `uv run --package translation-engine pytest packages/translation-engine/tests` | 81 passed, 6 subtests passed |
+| OCR | `uv run --package ocr pytest packages/ocr/tests` | 18 passed, 6 subtests passed |
 | Zotero CLI | `uv run --package zotero-cli-agent --extra dev --extra mcp pytest packages/zotero-cli/tests` | 62 passed |
-| Repository suites | `uv run --package digest pytest tests` | 68 passed, 2 subtests passed |
+| Repository suites | `uv run --package digest pytest tests tools/git tools/bibliosmith-launcher/source/scripts/tests` | 89 passed, 2 subtests passed |
 | Launcher frontend | `cd tools/bibliosmith-launcher/source && npx tsc --noEmit && npm run test:startup-contract` | no output / `startup contract ok` |
+
+Counts measured 2026-07-26.
+
+The Repository suites row covers three directories, not one. `tests/` is the
+obvious part; `tools/git` holds the commit-message validator that the
+commit-messages job depends on, and
+`tools/bibliosmith-launcher/source/scripts/tests` holds the runner's bilingual
+EPUB builder tests. Both live outside `packages/` and outside `tests/`, so a
+command naming only `tests` silently skips them — which is what this row used to
+do.
+
+Two more jobs run in CI and need nothing locally: the commit-message check (pull
+requests only, validates the whole branch against the merge base) and a gitleaks
+scan of both the published history and the tracked tree.
 
 The frontend suite needs `npm ci` first. The Rust suite does **not** need a
 frontend build — the tests never read `dist/`.
@@ -90,12 +104,14 @@ whatever ran last. If you need the console scripts rather than the tests, run
 
 ## Where the tests live
 
-Two places, and the second one is easy to miss. Most suites sit under
+Three places, and two of them are easy to miss. Most suites sit under
 `packages/<name>/tests/`, but the repository-root `tests/` directory holds
-thirteen more files covering the EPUB builder, the translation coverage gate,
-the proper-noun and note policy, the language-pair templates, and
-`packages/digest` — which has no `tests/` directory of its own. A search
-restricted to `packages/*/tests` finds none of them.
+fourteen more files covering the EPUB builders, the translation coverage gate,
+the proper-noun and note policy, the language-pair templates, the public-privacy
+guard, and `packages/digest` — which has no `tests/` directory of its own. Two
+further suites sit under `tools/`: `tools/git` and
+`tools/bibliosmith-launcher/source/scripts/tests`. A search restricted to
+`packages/*/tests` finds none of them.
 
 That tree is run with `--package digest` because `tests/digest/` shells out to
 `python -m digest.bibliosmith_digest`, which needs the member installed.
