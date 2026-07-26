@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { FileText, FolderOpen, Library, RefreshCcw, Search } from "lucide-react";
 import type { BookPipelineRouteItem, BookPipelineSource, ModelSlotView } from "../types";
 import type { PipelineCopy } from "./copy";
