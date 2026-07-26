@@ -41,6 +41,7 @@ npx tauri build --bundles dmg
 
 ```sh
 npx tsc --noEmit
+npm test
 npm run test:startup-contract
 cd src-tauri && cargo test
 ```

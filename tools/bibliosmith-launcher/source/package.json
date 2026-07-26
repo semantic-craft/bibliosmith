@@ -10,6 +10,8 @@
     "dev": "vite --host 127.0.0.1 --port 1420",
     "prebuild": "npm run version:sync",
     "build": "tsc && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:startup-contract": "node scripts/check-startup-contract.mjs && node scripts/test-markdown-security.mjs",
     "clean:cache": "node scripts/clean-build-cache.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 1420",
@@ -28,10 +30,15 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.2",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
+    "jsdom": "^29.1.1",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16"
+    "vite": "^8.0.16",
+    "vitest": "^4.1.10"
   }
 }

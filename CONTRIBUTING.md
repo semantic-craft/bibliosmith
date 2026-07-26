@@ -42,7 +42,7 @@ tag before the DMG is built.
 | OCR | `uv run --package ocr pytest packages/ocr/tests` | 18 passed, 6 subtests passed |
 | Zotero CLI | `uv run --package zotero-cli-agent --extra dev --extra mcp pytest packages/zotero-cli/tests` | 62 passed |
 | Repository suites | `uv run --package digest pytest tests tools/git tools/bibliosmith-launcher/source/scripts/tests` | 89 passed, 2 subtests passed |
-| Launcher frontend | `cd tools/bibliosmith-launcher/source && npx tsc --noEmit && npm run test:startup-contract` | no output / `startup contract ok` |
+| Launcher frontend | `cd tools/bibliosmith-launcher/source && npx tsc --noEmit && npm test && npm run test:startup-contract` | no output / 121 passed / `startup contract ok` |
 
 Counts measured 2026-07-26.
 
@@ -60,6 +60,11 @@ scan of both the published history and the tracked tree.
 
 The frontend suite needs `npm ci` first. The Rust suite does **not** need a
 frontend build — the tests never read `dist/`.
+
+`npm test` runs vitest under jsdom over `src/**/*.test.{ts,tsx}`; `npm run
+test:startup-contract` stays a pair of standalone node scripts with no runner,
+because they compile `src/lib/markdown.ts` on its own to check what ships rather
+than what a bundler resolves.
 
 Three traps in the Zotero CLI row, all verified by wiping `.venv` and re-running:
 

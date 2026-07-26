@@ -119,12 +119,12 @@ uv run --package digest pytest \
 # 启动器后端
 cd tools/bibliosmith-launcher/source/src-tauri && cargo test
 
-# 启动器前端：类型检查 + 启动契约
-cd tools/bibliosmith-launcher/source && npm ci && npx tsc --noEmit && npm run test:startup-contract
+# 启动器前端：类型检查 + 单元测试 + 启动契约
+cd tools/bibliosmith-launcher/source && npm ci && npx tsc --noEmit && npm test && npm run test:startup-contract
 ```
 
 2026-07-26 实测数量：翻译引擎 81、OCR 18、Zotero CLI 62、repository suites 89、
-启动器后端 209。
+启动器后端 209、启动器前端 121。
 
 Zotero CLI 那条命令里三个命名陷阱（包名与目录名不同、`--extra dev`、`--extra mcp`）
 见 `CONTRIBUTING.md`。
