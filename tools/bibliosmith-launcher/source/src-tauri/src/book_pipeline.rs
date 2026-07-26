@@ -3166,24 +3166,17 @@ fn is_terminal_job_status(status: &str) -> bool {
     )
 }
 
+/// ADR 0002 promises one webhook per terminal *outcome*, so the event identity is
+/// the outcome — nothing else. Folding the snapshot fields in made it one webhook
+/// per (outcome, timestamp) instead: a job that failed, was retried and failed
+/// again hashed a fresh `updated_at` and `attempts` into a new id and notified
+/// twice. Those fields stay in the payload, where the ADR does want them; they
+/// just do not decide identity. Keeping the id stable also means a redelivery
+/// after a failed attempt carries the `Idempotency-Key` the receiver already saw.
 fn terminal_event(job: &BookPipelineJob) -> BookPipelineTerminalEvent {
     let identity = format!(
-        "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-        TERMINAL_EVENT_SCHEMA_VERSION,
-        job.id,
-        job.kind,
-        job.status,
-        job.current_stage_id,
-        job.progress.stage_total,
-        job.progress.stage_completed,
-        job.progress.percent,
-        job.summary.total,
-        job.summary.blocked,
-        job.summary.failed,
-        job.summary.completed,
-        job.summary.skipped,
-        job.attempts,
-        job.updated_at,
+        "{}\0{}\0{}\0{}",
+        TERMINAL_EVENT_SCHEMA_VERSION, job.id, job.kind, job.status,
     );
     BookPipelineTerminalEvent {
         schema_version: TERMINAL_EVENT_SCHEMA_VERSION.into(),
@@ -19867,6 +19860,70 @@ mod tests {
         assert!(!payload.contains("/private/library"));
         assert!(!payload.contains("lastError"));
         assert!(!payload.contains("logSummary"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // ADR 0002 promises one webhook per terminal outcome. Folding `updated_at`
+    // and `attempts` into the event id delivered one per (outcome, timestamp),
+    // so a job that reached the same terminal status again — retried and failed
+    // again, or simply touched while terminal — notified a second time.
+    #[test]
+    fn reaching_the_same_terminal_status_again_delivers_one_webhook() {
+        let root = temp_root("terminal-webhook-restate");
+        // A memory store so the terminal status can be restated directly; the
+        // durable store re-derives it from the children on every save.
+        let store = MemoryStateStore::new(&root);
+        let job = queue_job(
+            &store,
+            fake_source(None),
+            "conversion_only".into(),
+            BookPipelinePreviewConfig::default(),
+        )
+        .unwrap();
+        run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
+        let sink = RecordingNotificationSink::default();
+
+        dispatch_terminal_notification(&store, &sink, &job.id).unwrap();
+
+        // Reaching the terminal status again moves the clock and the attempt
+        // counter; neither may mint a second event.
+        let mut state = store.load().unwrap();
+        let stored = state
+            .jobs
+            .iter_mut()
+            .find(|stored| stored.id == job.id)
+            .unwrap();
+        stored.attempts += 1;
+        stored.updated_at = "2026-07-26T09:00:00Z".into();
+        store.save(&state).unwrap();
+
+        let second = dispatch_terminal_notification(&store, &sink, &job.id).unwrap();
+
+        assert_eq!(
+            sink.events.lock().unwrap().len(),
+            1,
+            "the same terminal outcome must notify once"
+        );
+        assert_eq!(second.notification_deliveries.len(), 1);
+
+        // A different terminal outcome is still its own event.
+        let mut state = store.load().unwrap();
+        let stored = state
+            .jobs
+            .iter_mut()
+            .find(|stored| stored.id == job.id)
+            .unwrap();
+        stored.status = STATUS_FAILED.into();
+        store.save(&state).unwrap();
+
+        let failed = dispatch_terminal_notification(&store, &sink, &job.id).unwrap();
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].status, STATUS_FAILED);
+        assert_ne!(events[0].event_id, events[1].event_id);
+        assert_eq!(failed.notification_deliveries.len(), 2);
+        drop(events);
         let _ = fs::remove_dir_all(root);
     }
 
