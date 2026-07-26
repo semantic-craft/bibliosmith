@@ -2534,14 +2534,46 @@ pub(crate) fn command_output_with_timeout(
     // `wait_with_output` only captures what was piped.
     command.stderr(Stdio::piped());
     let mut child = command.spawn()?;
+    // Drained on their own threads, not after the wait loop: a pipe holds ~64 KB
+    // before `write` blocks, and a child parked in that write never exits. Read
+    // only once it has exited and the loop below waits for something that cannot
+    // happen — the child waits for us, we wait for the child, and the timeout
+    // "expires" on a command that had already finished its work. The engine
+    // prints its whole run report to stdout in one go, so this is reachable by a
+    // book with enough chapters rather than by a misbehaving child.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
     let started_at = Instant::now();
     loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output();
+        if let Some(status) = child.try_wait()? {
+            return Ok(Output {
+                status,
+                stdout: stdout_reader.join().unwrap_or_default(),
+                stderr: stderr_reader.join().unwrap_or_default(),
+            });
         }
         if started_at.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
+            // Deliberately not joined. Killing the child does not kill any
+            // grandchild it left holding the write end, so a join here could
+            // block forever — turning the bound we just enforced back into the
+            // unbounded wait it exists to prevent. The output is discarded on
+            // this path anyway.
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("command timed out after {}s", timeout.as_secs()),
