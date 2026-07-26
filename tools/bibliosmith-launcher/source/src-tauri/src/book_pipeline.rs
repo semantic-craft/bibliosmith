@@ -636,7 +636,7 @@ pub struct BookPipelineCollectionItem {
     pub attempts: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BookPipelinePreviewConfig {
     pub has_paddleocr_credentials: bool,
@@ -663,16 +663,6 @@ pub struct BookPipelineTranslationIntent {
     pub digest_mode: bool,
     #[serde(default = "default_output_formats")]
     pub output_formats: Vec<String>,
-}
-
-impl Default for BookPipelinePreviewConfig {
-    fn default() -> Self {
-        Self {
-            has_paddleocr_credentials: false,
-            has_mineru_credentials: false,
-            route_overrides: BTreeMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -969,6 +959,9 @@ impl<E> CommandPipelineRunner<E> {
         }
     }
 
+    // Production always resolves the conversion root from the pipeline config;
+    // only the tests pin it to a fixture directory.
+    #[cfg(test)]
     fn with_book_ocr_conversion_root(executor: E, root: PathBuf) -> Self {
         Self {
             executor,
@@ -1013,6 +1006,7 @@ impl BookPipelineStore {
         )
     }
 
+    #[cfg(test)]
     fn for_test(root: &Path) -> Self {
         Self::new(
             root.join("state").join("jobs.json"),
@@ -1022,6 +1016,7 @@ impl BookPipelineStore {
         .expect("test Book Pipeline store should acquire its execution lease")
     }
 
+    #[cfg(test)]
     fn for_test_with_owner(root: &Path, execution_owner: &str) -> Self {
         Self::new(
             root.join("state").join("jobs.json"),
@@ -3733,15 +3728,13 @@ fn delete_job(
 }
 
 fn job_is_actively_running(job: &BookPipelineJob) -> bool {
-    matches!(
-        job.status.as_str(),
-        STATUS_RUNNING | STATUS_HANDOFF_RUNNING
-    ) || job.children.iter().any(|child| {
-        child
-            .stages
-            .iter()
-            .any(|stage| stage.status == STATUS_RUNNING)
-    })
+    matches!(job.status.as_str(), STATUS_RUNNING | STATUS_HANDOFF_RUNNING)
+        || job.children.iter().any(|child| {
+            child
+                .stages
+                .iter()
+                .any(|stage| stage.status == STATUS_RUNNING)
+        })
 }
 
 #[tauri::command]
@@ -4965,9 +4958,7 @@ fn collection_snapshot_child(
             // only place the user's choice survives to be re-applied there.
             route_overrides: route_overrides
                 .get(attachment_key)
-                .map(|token| {
-                    BTreeMap::from([(attachment_key.to_string(), token.clone())])
-                })
+                .map(|token| BTreeMap::from([(attachment_key.to_string(), token.clone())]))
                 .unwrap_or_default(),
         },
         route: vec![route],
@@ -7474,7 +7465,8 @@ fn run_zotero_batch_job<E: RunnerCommandExecutor>(
 
         let item_output_dir = output_dir.join(clean_path_component(&route.id));
         let item_job = zotero_item_job(job, route);
-        let mut command = build_zotero_conversion_command_for_root(&item_job, &item_output_dir, root)?;
+        let mut command =
+            build_zotero_conversion_command_for_root(&item_job, &item_output_dir, root)?;
         inject_ocr_credentials(&mut command);
         fs::create_dir_all(&command.output_dir).map_err(|err| err.to_string())?;
         match executor.execute(&command) {
@@ -8948,9 +8940,7 @@ fn strip_worker_markers(value: &str) -> &str {
 }
 
 fn zotero_source_ref(key: &str, fingerprint: Option<&str>, output_path: Option<&str>) -> String {
-    let base = output_path
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| "");
+    let base = output_path.filter(|path| !path.is_empty()).unwrap_or("");
     let base = if base.is_empty() {
         format!("zotero://attachment/{key}")
     } else {
@@ -9130,7 +9120,9 @@ fn apply_route_overrides(
         item.can_run = route_kind != "already_converted";
         item.blocked_reason = None;
         item.summary = match token {
-            "keep" => "Override: keep the existing conversion result and skip re-converting.".into(),
+            "keep" => {
+                "Override: keep the existing conversion result and skip re-converting.".into()
+            }
             _ => format!("Override: forced {route_kind} instead of the automatic route."),
         };
     }
@@ -9909,7 +9901,10 @@ fn default_state_dir() -> Result<PathBuf, String> {
     let base = dirs::data_local_dir()
         .or_else(dirs::config_local_dir)
         .ok_or_else(|| "Could not locate local app data directory.".to_string())?;
-    Ok(base.join("BiblioSmith").join("launcher").join("book-pipeline"))
+    Ok(base
+        .join("BiblioSmith")
+        .join("launcher")
+        .join("book-pipeline"))
 }
 
 fn default_output_root() -> Result<PathBuf, String> {
@@ -11361,10 +11356,8 @@ fn validate_translation_engine_report(
             ));
         }
         for violation in &unit.glossary_violations {
-            glossary_violations.insert(format!(
-                "{} -> {}",
-                violation.source, violation.translation
-            ));
+            glossary_violations
+                .insert(format!("{} -> {}", violation.source, violation.translation));
         }
         match unit.status.as_str() {
             "completed" => {
@@ -11716,7 +11709,7 @@ fn run_expert_translate_stage(
         artifact_kinds: vec!["translation_handoff", "chapter_translation"],
         input_hashes,
         log_summary: vec![if blocked == 0 {
-            format!("Accepted {} expert translation unit(s)", completed)
+            format!("Accepted {completed} expert translation unit(s)")
         } else {
             format!(
                 "Expert translation handoff waiting for {blocked} of {} unit(s)",
@@ -11830,7 +11823,7 @@ fn expert_qa_units(
             )
         })?;
         if sha256_str(&source_text) != task.source_chapter_sha256 {
-            return Err(format!("Source chapter changed after prepare: {}", unit_id));
+            return Err(format!("Source chapter changed after prepare: {unit_id}"));
         }
         let translation_path = project_root
             .join("chapters")
@@ -11850,8 +11843,7 @@ fn expert_qa_units(
             artifact.kind == "chapter_translation" && artifact.path == expected_path
         }) {
             return Err(format!(
-                "Translated chapter {} is not registered as an artifact.",
-                unit_id
+                "Translated chapter {unit_id} is not registered as an artifact."
             ));
         }
         units.push(ExpertQaUnit {
@@ -21127,7 +21119,11 @@ mod tests {
 
     impl RunnerCommandExecutor for ZoteroQuerySelectorExecutor {
         fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
-            assert!(has_arg_pair(&command.args, "--query", "Geschäftsgeheimnisse"));
+            assert!(has_arg_pair(
+                &command.args,
+                "--query",
+                "Geschäftsgeheimnisse"
+            ));
             assert!(!command.args.iter().any(|arg| arg == "--parent-item-type"));
             Ok(RunnerCommandResult {
                 stdout: String::new(),

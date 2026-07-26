@@ -168,13 +168,16 @@ pub fn test_ocr_connection(
     let account = account_for(&service)?;
     let key = match api_key {
         Some(key) if !key.trim().is_empty() => key.trim().to_string(),
-        _ => keychain_read(account).ok_or_else(|| "No API key stored for this service.".to_string())?,
+        _ => keychain_read(account)
+            .ok_or_else(|| "No API key stored for this service.".to_string())?,
     };
     // Probe a nonexistent job/task id: a bad token gets 401/403 at the auth
     // layer, a good one reaches the handler and gets a not-found/bad-request
     // class answer. Neither submits real work or spends quota.
     let probe_url = match service.as_str() {
-        "paddleocr" => "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs/bibliosmith-connectivity-probe",
+        "paddleocr" => {
+            "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs/bibliosmith-connectivity-probe"
+        }
         "mineru" => "https://mineru.net/api/v4/extract/task/bibliosmith-connectivity-probe",
         _ => unreachable!("account_for validated the service"),
     };
@@ -216,7 +219,10 @@ mod tests {
     fn env_file_detection_requires_a_non_empty_value() {
         let content = "# comment\nBAIDU_PADDLEOCR_TOKEN=\nMINERU_TOKEN=abc123\n";
         assert!(!env_file_declares(content, &["BAIDU_PADDLEOCR_TOKEN"]));
-        assert!(env_file_declares(content, &["MINERU_API_TOKEN", "MINERU_TOKEN"]));
+        assert!(env_file_declares(
+            content,
+            &["MINERU_API_TOKEN", "MINERU_TOKEN"]
+        ));
         assert!(!env_file_declares("", &["BAIDU_PADDLEOCR_TOKEN"]));
     }
 

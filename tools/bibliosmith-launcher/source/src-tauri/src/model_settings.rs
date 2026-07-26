@@ -156,7 +156,7 @@ pub fn resolve_credential_env(
     config_id: &str,
 ) -> Option<(String, String)> {
     let slots = load_slots(repo_root).ok()?;
-    credential_env(&slots, profile_id, config_id, |acct| keychain_read(acct))
+    credential_env(&slots, profile_id, config_id, keychain_read)
 }
 
 // ---- Tauri commands -------------------------------------------------------
@@ -258,7 +258,7 @@ pub fn test_model_connection(
     Ok(match probe {
         Ok(()) => ModelConnectionResult {
             ok: true,
-            message: format!("{} · {} 连接正常", profile_id, model),
+            message: format!("{profile_id} · {model} 连接正常"),
         },
         Err(message) => ModelConnectionResult { ok: false, message },
     })
