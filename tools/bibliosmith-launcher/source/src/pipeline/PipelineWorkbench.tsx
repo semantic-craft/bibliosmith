@@ -5,6 +5,7 @@ import type {
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
+  BookPipelineDiagnosticProfile,
   ModelSlotView,
 } from "../types";
 import "./pipeline.css";
@@ -34,6 +35,7 @@ export type PipelineWorkbenchProps = {
   onAdvance: (jobId: string, childId: string) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
+  onExportDiagnostic: (jobId: string, profile: BookPipelineDiagnosticProfile) => void;
   onSaveCustomInstructions: (
     jobId: string,
     childId: string,
@@ -136,6 +138,7 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
               onAdvance={props.onAdvance}
               onSampleTranslation={props.onSampleTranslation}
               onApplySampleProvider={props.onApplySampleProvider}
+              onExportDiagnostic={props.onExportDiagnostic}
               onSaveCustomInstructions={props.onSaveCustomInstructions}
               onApproveGate={props.onApproveGate}
               onOpenOutput={props.onOpenOutput}

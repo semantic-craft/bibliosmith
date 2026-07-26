@@ -5,6 +5,7 @@ import { BookDrawer, type BookDrawerProps } from "./BookDrawer";
 import { pipelineCopy } from "./copy";
 import type { BookUnit } from "./model";
 import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
+import { BOOK_PIPELINE_DIAGNOSTIC_PROFILES } from "../types";
 import { approvalRef, artifact, bookUnit, stage, unitSummary } from "../test/fixtures";
 
 // The drawer reads an artifact excerpt and a sample report on mount. Both are
@@ -31,6 +32,7 @@ function renderDrawer(unit: BookUnit, over: Partial<BookDrawerProps> = {}) {
     onAdvance: vi.fn(),
     onSampleTranslation: vi.fn(),
     onApplySampleProvider: vi.fn(),
+    onExportDiagnostic: vi.fn(),
     onSaveCustomInstructions: vi.fn(),
     onApproveGate: vi.fn(),
     onOpenOutput: vi.fn(),
@@ -242,5 +244,53 @@ describe("BookDrawer gate card", () => {
       bookUnit({ status: "running", stages: [stage("translate", "running")] }),
     );
     expect(container.querySelector(".pl-gatecard")).toBeNull();
+  });
+});
+
+/**
+ * The backend has had three redaction profiles, configured and covered by a
+ * monotonic-disclosure test, since the diagnostic command landed — with no way
+ * to reach any of them from the UI, so a user reporting a problem had only
+ * screenshots.
+ */
+describe("BookDrawer diagnostic export", () => {
+  const section = () => screen.getByLabelText(copy.diagnosticTitle);
+  const profileSelect = () => screen.getByLabelText(copy.diagnosticProfile) as HTMLSelectElement;
+
+  it("offers every profile the backend accepts", () => {
+    renderDrawer(gateUnit());
+    expect(Array.from(profileSelect().options).map((option) => option.value)).toEqual([
+      ...BOOK_PIPELINE_DIAGNOSTIC_PROFILES,
+    ]);
+  });
+
+  // The default has to be the one that can be pasted anywhere without reading
+  // it first: no artifact list, no paths, no error summaries.
+  it("defaults to the public-issue profile", () => {
+    renderDrawer(gateUnit());
+    expect(profileSelect().value).toBe("public-issue");
+    expect(within(section()).getByText(copy.diagnosticPublicIssueNote)).toBeTruthy();
+  });
+
+  it("says what each profile discloses as it is chosen", async () => {
+    const user = userEvent.setup();
+    renderDrawer(gateUnit());
+
+    await user.selectOptions(profileSelect(), "redacted-support");
+    expect(within(section()).getByText(copy.diagnosticRedactedSupportNote)).toBeTruthy();
+    expect(within(section()).queryByText(copy.diagnosticPublicIssueNote)).toBeNull();
+
+    await user.selectOptions(profileSelect(), "local-full");
+    expect(within(section()).getByText(copy.diagnosticLocalFullNote)).toBeTruthy();
+  });
+
+  it("exports the chosen profile for this book", async () => {
+    const user = userEvent.setup();
+    const { props } = renderDrawer(gateUnit());
+
+    await user.selectOptions(profileSelect(), "local-full");
+    await user.click(within(section()).getByRole("button", { name: copy.diagnosticExport }));
+
+    expect(props.onExportDiagnostic).toHaveBeenCalledWith("job-1", "local-full");
   });
 });

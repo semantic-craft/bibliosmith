@@ -7,6 +7,7 @@ import {
   BookPipelineCleanupCandidate,
   BookPipelineCleanupPreview,
   BookPipelineCustomInstructions,
+  BookPipelineDiagnosticProfile,
   BookPipelineJob,
   BookPipelinePreviewConfig,
   BookPipelineRouteItem,
@@ -1289,6 +1290,13 @@ export function runBookPipelineTranslationSample(
     providerConfigId,
     applyToJob,
   });
+}
+
+export function saveBookPipelineDiagnostic(jobId: string, profile: BookPipelineDiagnosticProfile) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("Exporting a diagnostic bundle requires the desktop runtime."));
+  }
+  return invoke<BookPipelineActionResult>("save_book_pipeline_diagnostic", { jobId, profile });
 }
 
 export function setBookPipelineTranslationProvider(

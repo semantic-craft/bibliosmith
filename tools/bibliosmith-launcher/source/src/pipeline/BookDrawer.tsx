@@ -1,9 +1,10 @@
 import { useEffect, useState, type ReactElement } from "react";
-import { ChevronLeft, ChevronRight, FolderOpen, Trash2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, FolderOpen, Trash2, X } from "lucide-react";
 import { readBookPipelineArtifactExcerpt, readBookPipelineTranslationSample } from "../api";
 import type {
   BookPipelineArtifact,
   BookPipelineCustomInstructions,
+  BookPipelineDiagnosticProfile,
   BookPipelineTranslationSampleReport,
 } from "../types";
 import type { PipelineCopy } from "./copy";
@@ -46,6 +47,7 @@ export type BookDrawerProps = {
   // Adopting a sampled slot as the book's own. Separate from sampling, because
   // sampling is "try one out" and this decides what the full run uses.
   onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
+  onExportDiagnostic: (jobId: string, profile: BookPipelineDiagnosticProfile) => void;
   onSaveCustomInstructions: (
     jobId: string,
     childId: string,
@@ -544,7 +546,71 @@ function AdvancedDetails(props: BookDrawerProps) {
         {tab === "approval" && <ApprovalTab {...tabProps} />}
         {tab === "logs" && <LogsTab {...tabProps} />}
       </div>
+      <DiagnosticExport
+        copy={copy}
+        busy={props.busy}
+        jobId={unit.job.id}
+        onExportDiagnostic={props.onExportDiagnostic}
+      />
     </details>
+  );
+}
+
+/**
+ * The three redaction profiles have been configured and tested on the backend
+ * since the diagnostic command landed, with nothing in the UI to reach them —
+ * a user reporting a problem had only screenshots. Public-issue is the default
+ * because it is the one that can be pasted anywhere without reading it first.
+ */
+function DiagnosticExport({
+  copy,
+  busy,
+  jobId,
+  onExportDiagnostic,
+}: {
+  copy: PipelineCopy;
+  busy: PipelineBusy;
+  jobId: string;
+  onExportDiagnostic: BookDrawerProps["onExportDiagnostic"];
+}) {
+  const [profile, setProfile] = useState<BookPipelineDiagnosticProfile>("public-issue");
+  const profiles: [BookPipelineDiagnosticProfile, string, string][] = [
+    ["public-issue", copy.diagnosticPublicIssue, copy.diagnosticPublicIssueNote],
+    ["redacted-support", copy.diagnosticRedactedSupport, copy.diagnosticRedactedSupportNote],
+    ["local-full", copy.diagnosticLocalFull, copy.diagnosticLocalFullNote],
+  ];
+  const note = profiles.find(([key]) => key === profile)?.[2] ?? "";
+  return (
+    <section className="pl-diagnostic" aria-label={copy.diagnosticTitle}>
+      <h4>{copy.diagnosticTitle}</h4>
+      <p>{copy.diagnosticIntro}</p>
+      <div className="pl-diagnostic-controls">
+        <label>
+          {copy.diagnosticProfile}
+          <select
+            value={profile}
+            disabled={busy === "diagnostic"}
+            onChange={(event) => setProfile(event.target.value as BookPipelineDiagnosticProfile)}
+          >
+            {profiles.map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="pl-btn sm"
+          type="button"
+          disabled={busy !== null}
+          onClick={() => onExportDiagnostic(jobId, profile)}
+        >
+          <Download size={14} />
+          {copy.diagnosticExport}
+        </button>
+      </div>
+      <p className="pl-diagnostic-note">{note}</p>
+    </section>
   );
 }
 

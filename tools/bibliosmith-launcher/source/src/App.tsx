@@ -43,6 +43,7 @@ import {
   recordFrontendActivity,
   retryBookPipelineJob,
   runBookPipelineTranslationSample,
+  saveBookPipelineDiagnostic,
   setBookPipelineTranslationProvider,
   runBookPipelineJob,
   saveBookPipelineCustomInstructions,
@@ -60,6 +61,7 @@ import {
   BookPipelineCustomInstructions,
   BookPipelineJob,
   BookPipelinePreviewConfig,
+  BookPipelineDiagnosticProfile,
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
@@ -594,6 +596,26 @@ export default function App() {
       setPipelineBusy(null);
     }
   }, [addActivity, bookPipelineCopy.appliedSampleProvider, showFloatingToast]);
+
+  // The three redaction profiles were configured and tested on the backend with
+  // no way to reach them, so a user reporting a problem had only screenshots.
+  const exportPipelineDiagnostic = useCallback(async (
+    jobId: string,
+    profile: BookPipelineDiagnosticProfile,
+  ) => {
+    setPipelineBusy("diagnostic");
+    try {
+      const result = await saveBookPipelineDiagnostic(jobId, profile);
+      addActivity(result.ok ? "success" : "info", result.message);
+      showFloatingToast(result.message, result.ok ? "success" : "info");
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+    } finally {
+      setPipelineBusy(null);
+    }
+  }, [addActivity, showFloatingToast]);
 
   const handoffPipelineMarkdown = useCallback(async (jobId: string, artifactPath?: string | null) => {
     setPipelineBusy("handoff");
@@ -1913,6 +1935,7 @@ export default function App() {
               onApplySampleProvider={(jobId, childId, providerProfileId, providerConfigId) =>
                 void applyPipelineTranslationProvider(jobId, childId, providerProfileId, providerConfigId)
               }
+              onExportDiagnostic={(jobId, profile) => void exportPipelineDiagnostic(jobId, profile)}
               onSaveCustomInstructions={(jobId, childId, customInstructions) =>
                 void savePipelineCustomInstructions(jobId, childId, customInstructions)
               }

@@ -4068,6 +4068,61 @@ pub fn export_book_pipeline_diagnostic(
     build_book_pipeline_diagnostic(job, &profile)
 }
 
+/// The same three profiles, written to a folder the user picks, because a
+/// diagnostic bundle is only useful if it can be attached to a report. The
+/// command above returns the value in-process and stays as it is.
+#[tauri::command]
+pub fn save_book_pipeline_diagnostic(
+    job_id: String,
+    profile: String,
+) -> Result<BookPipelineActionResult, String> {
+    let store = BookPipelineStore::default()?;
+    let state = store.load()?;
+    let job = state
+        .jobs
+        .iter()
+        .find(|job| job.id == job_id)
+        .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
+    // Build before the dialog: an unsupported profile should fail immediately
+    // rather than after the user has picked a folder.
+    let document = build_book_pipeline_diagnostic(job, &profile)?;
+    let Some(folder) = rfd::FileDialog::new()
+        .set_title("Save Book Pipeline diagnostic bundle")
+        .pick_folder()
+    else {
+        return Ok(BookPipelineActionResult {
+            ok: false,
+            message: "Diagnostic export cancelled.".into(),
+            path: None,
+        });
+    };
+    let path = write_book_pipeline_diagnostic(&folder, &job.id, &profile, &document)?;
+    Ok(BookPipelineActionResult {
+        ok: true,
+        message: format!("Diagnostic bundle written to {}", display_path(&path)),
+        path: Some(display_path(&path)),
+    })
+}
+
+fn write_book_pipeline_diagnostic(
+    dir: &Path,
+    job_id: &str,
+    profile: &str,
+    document: &serde_json::Value,
+) -> Result<PathBuf, String> {
+    // The id is generated as "job-<nanos>", but a bundle must not be able to
+    // write outside the folder the user picked even if an imported job carries
+    // something else.
+    let safe_job_id: String = job_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let path = dir.join(format!("bibliosmith-diagnostic-{safe_job_id}-{profile}.json"));
+    let body = serde_json::to_string_pretty(document).map_err(|err| err.to_string())? + "\n";
+    fs::write(&path, body).map_err(|err| err.to_string())?;
+    Ok(path)
+}
+
 fn resolve_book_pipeline_open_target(
     job: &BookPipelineJob,
     allowed_roots: &[PathBuf],
@@ -25503,6 +25558,52 @@ mod tests {
             assert!(!export.contains("providerPayload"));
             assert!(!export.contains("prompt"));
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn diagnostic_bundle_lands_in_the_chosen_folder_under_a_contained_name() {
+        // The disclosure test above covers what goes in; this covers the part
+        // that makes it reachable at all -- the bundle has to be a file the user
+        // can attach to a report, not a value returned in-process.
+        let root = temp_root("diagnostic-write");
+        let store = BookPipelineStore::for_test(&root);
+        let job = queue_job(
+            &store,
+            fake_source(None),
+            "conversion_only".into(),
+            BookPipelinePreviewConfig::default(),
+        )
+        .unwrap();
+        let completed = run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
+        let out = root.join("export");
+        fs::create_dir_all(&out).unwrap();
+
+        let document = build_book_pipeline_diagnostic(&completed, "public-issue").unwrap();
+        let path =
+            write_book_pipeline_diagnostic(&out, &completed.id, "public-issue", &document).unwrap();
+        assert_eq!(path.parent(), Some(out.as_path()));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(format!("bibliosmith-diagnostic-{}-public-issue.json", completed.id).as_str())
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["profile"], "public-issue");
+        assert_eq!(written, document);
+
+        // A job id that is not filename-safe must not steer the write out of the
+        // folder the user picked.
+        let escaped =
+            write_book_pipeline_diagnostic(&out, "../../etc/pwned", "public-issue", &document)
+                .unwrap();
+        assert_eq!(escaped.parent(), Some(out.as_path()));
+        assert_eq!(
+            escaped.file_name().and_then(|name| name.to_str()),
+            Some("bibliosmith-diagnostic-______etc_pwned-public-issue.json")
+        );
+
+        assert!(build_book_pipeline_diagnostic(&completed, "everything").is_err());
         let _ = fs::remove_dir_all(root);
     }
 

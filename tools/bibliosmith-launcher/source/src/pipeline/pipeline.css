@@ -765,6 +765,27 @@
 .pl-confirm-grid h4 { margin: 0 0 9px; }
 .pl-wiz-error { margin-top: 12px; color: var(--pl-failed); font-size: 12.5px; }
 
+/* ---------- diagnostic bundle ---------- */
+
+.pl-diagnostic {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.pl-diagnostic h4 { margin: 0 0 4px; color: var(--ink); font-size: 13px; }
+.pl-diagnostic p { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.pl-diagnostic-controls { display: flex; align-items: end; gap: 10px; }
+.pl-diagnostic-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.pl-diagnostic-controls select {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 12px;
+}
+.pl-diagnostic-note { margin: 10px 0 0 !important; }
+
 /* ---------- empty states ---------- */
 
 .pl-empty {

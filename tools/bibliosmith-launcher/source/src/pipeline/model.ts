@@ -30,6 +30,7 @@ export type PipelineBusy =
   | "cleanup"
   | "cleanupApproval"
   | "open"
+  | "diagnostic"
   | null;
 
 /** Conversion route override a user can pick per route item in the wizard. */
