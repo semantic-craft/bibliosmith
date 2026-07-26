@@ -5319,6 +5319,27 @@ fn mark_handoff_running(job: &mut BookPipelineJob, execution_owner: &str) -> Opt
     Some(child_id)
 }
 
+/// `mark_handoff_finished` can only find a child it already started, and nothing
+/// started here. The failure belongs on the child whose extraction did complete:
+/// that is the handoff the user will retry, and pinning it there keeps the
+/// completed extraction out of the retry.
+fn mark_handoff_unavailable(job: &mut BookPipelineJob, error: &str) {
+    let digest_mode = job.digest_mode;
+    let Some(child) = job.children.iter_mut().find(|child| {
+        stage_ref(child, "extract").is_some_and(|stage| stage.status == STATUS_COMPLETED)
+            && stage_ref(child, "handoff").is_none_or(|stage| stage.status != STATUS_COMPLETED)
+    }) else {
+        // Nothing extracted successfully, so the per-child failures
+        // `apply_runner_output_to_children` just recorded are the real story.
+        derive_job(job);
+        return;
+    };
+    ensure_translation_stages(child, digest_mode);
+    set_stage_status(child, "handoff", STATUS_FAILED, Some(error.to_string()));
+    child.last_error = Some(error.to_string());
+    derive_job(job);
+}
+
 fn mark_handoff_finished(
     job: &mut BookPipelineJob,
     child_id: Option<&str>,
@@ -6630,10 +6651,28 @@ fn run_job_with_handoff_mode(
                         "Source preparation completed; translation handoff started".into()
                     });
                 let execution_owner = store.execution_owner()?;
-                let handoff_child_id =
-                    mark_handoff_running(&mut state.jobs[index], execution_owner).ok_or_else(
-                        || "No completed extraction is ready for translation handoff.".to_string(),
-                    )?;
+                // Everything the runner produced is still only in memory here.
+                // Returning through `?` would drop the whole conversion along
+                // with it — and leave the extract stage `running` on disk from
+                // the save above — so the user had to re-OCR just to retry a
+                // handoff. Persist the run, then record the handoff as failed.
+                let Some(handoff_child_id) =
+                    mark_handoff_running(&mut state.jobs[index], execution_owner)
+                else {
+                    let error = "No completed extraction is ready for translation handoff.";
+                    state.jobs[index].current_step = "Translation handoff failed".into();
+                    state.jobs[index].last_error = Some(error.into());
+                    state.jobs[index]
+                        .log_summary
+                        .push(format!("Translation handoff failed: {error}"));
+                    mark_handoff_unavailable(&mut state.jobs[index], error);
+                    state.jobs[index].log_summary =
+                        trim_log_summary(&state.jobs[index].log_summary);
+                    state.jobs[index].updated_at = now_label();
+                    let finished = state.jobs[index].clone();
+                    store.save(&state)?;
+                    return Ok(finished);
+                };
                 state.jobs[index].log_summary = trim_log_summary(&state.jobs[index].log_summary);
                 state.jobs[index].updated_at = now_label();
                 let handoff_job = state.jobs[index].clone();
@@ -19577,6 +19616,86 @@ mod tests {
 
         assert!(error.contains("incomplete prerequisite"));
         assert!(error.contains("handoff"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // The runner's output lives only in memory until the save below the handoff
+    // start. A handoff that could not start used to return through `?` and take
+    // the whole conversion with it, leaving the extract stage `running` on disk,
+    // so retrying the handoff meant re-running the OCR.
+    #[test]
+    fn a_handoff_that_cannot_start_keeps_the_extraction_it_just_produced() {
+        let root = temp_root("handoff-early-return");
+        let repo_root = root.join("repo");
+        let store = MemoryStateStore::new(&root);
+        let job = queue_job(
+            &store,
+            fake_source(None),
+            MODE_CONVERT_THEN_TRANSLATE.into(),
+            BookPipelinePreviewConfig::default(),
+        )
+        .unwrap();
+
+        // A handoff stage left running is a state `mark_handoff_running` refuses
+        // to start from, which is what puts the job on this path.
+        let mut state = store.load().unwrap();
+        let child = &mut state.jobs[0].children[0];
+        ensure_translation_stages(child, false);
+        stage_mut(child, "handoff").unwrap().status = STATUS_RUNNING.into();
+        store.save(&state).unwrap();
+
+        let finished = run_job_with_handoff(
+            &store,
+            &ArtifactFixtureRunner,
+            &FakeTranslationHandoffRunner,
+            &job.id,
+            Some(&repo_root),
+        )
+        .unwrap();
+
+        let stored = store.load().unwrap().jobs[0].clone();
+        assert!(
+            stored
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "markdown"),
+            "the conversion the runner just produced must survive: {:?}",
+            stored.artifacts
+        );
+        assert!(stored.output_dir.is_some(), "output_dir was dropped");
+        assert_eq!(stored.artifacts, finished.artifacts);
+        let child = &stored.children[0];
+        assert_eq!(
+            stage_ref(child, "extract").unwrap().status,
+            STATUS_COMPLETED,
+            "the extraction must not be left running"
+        );
+        assert_eq!(stage_ref(child, "handoff").unwrap().status, STATUS_FAILED);
+        assert_eq!(
+            stored.last_error.as_deref(),
+            Some("No completed extraction is ready for translation handoff.")
+        );
+
+        // Retrying the handoff alone has to work from here: this entry point
+        // takes no pipeline runner, so it cannot re-run the extraction.
+        let handed_off = handoff_job_markdown_with_runner(
+            &store,
+            &job.id,
+            None,
+            &repo_root,
+            &FakeTranslationHandoffRunner,
+        )
+        .unwrap();
+        let child = &handed_off.children[0];
+        assert_eq!(
+            stage_ref(child, "extract").unwrap().status,
+            STATUS_COMPLETED
+        );
+        assert_eq!(
+            stage_ref(child, "handoff").unwrap().status,
+            STATUS_COMPLETED
+        );
+
         let _ = fs::remove_dir_all(root);
     }
 
