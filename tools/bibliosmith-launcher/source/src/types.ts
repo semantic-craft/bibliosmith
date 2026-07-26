@@ -448,6 +448,16 @@ export type BookPipelineActionResult = {
   path?: string | null;
 };
 
+// Redaction profiles the backend accepts for a diagnostic bundle, in increasing
+// order of disclosure. build_book_pipeline_diagnostic rejects anything else.
+export const BOOK_PIPELINE_DIAGNOSTIC_PROFILES = [
+  "public-issue",
+  "redacted-support",
+  "local-full",
+] as const;
+
+export type BookPipelineDiagnosticProfile = (typeof BOOK_PIPELINE_DIAGNOSTIC_PROFILES)[number];
+
 export type BookPipelineCleanupEvidence = {
   kind: string;
   ok: boolean;

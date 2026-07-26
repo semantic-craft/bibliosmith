@@ -3840,12 +3840,17 @@ pub fn record_book_pipeline_reader_evidence(
     )
 }
 
+/// Sampling is a "try before you decide" action, so by default it leaves the
+/// job's own translation provider alone: the caller passes `apply_to_job` only
+/// for the explicit "translate this book with this model" action, which goes
+/// through `set_book_pipeline_translation_provider` in the normal case.
 #[tauri::command]
 pub fn run_book_pipeline_translation_sample(
     job_id: String,
     child_id: String,
     provider_profile_id: String,
     provider_config_id: String,
+    apply_to_job: bool,
 ) -> Result<BookPipelineJob, String> {
     let store = BookPipelineStore::default()?;
     run_translation_sample_with_executor(
@@ -3854,7 +3859,29 @@ pub fn run_book_pipeline_translation_sample(
         Some(&child_id),
         &provider_profile_id,
         &provider_config_id,
+        apply_to_job,
         &SystemCommandExecutor,
+    )
+}
+
+/// Adopt a provider slot as the job's own, which is what the full-book run will
+/// use. Separate from sampling so that trying a model out cannot silently
+/// redirect the book; the approval gate is rebound here exactly as it is after a
+/// sample, so an approval that predates the change does not survive it.
+#[tauri::command]
+pub fn set_book_pipeline_translation_provider(
+    job_id: String,
+    child_id: String,
+    provider_profile_id: String,
+    provider_config_id: String,
+) -> Result<BookPipelineJob, String> {
+    let store = BookPipelineStore::default()?;
+    set_translation_provider_in_store(
+        &store,
+        &job_id,
+        Some(&child_id),
+        &provider_profile_id,
+        &provider_config_id,
     )
 }
 
@@ -4039,6 +4066,61 @@ pub fn export_book_pipeline_diagnostic(
         .find(|job| job.id == job_id)
         .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
     build_book_pipeline_diagnostic(job, &profile)
+}
+
+/// The same three profiles, written to a folder the user picks, because a
+/// diagnostic bundle is only useful if it can be attached to a report. The
+/// command above returns the value in-process and stays as it is.
+#[tauri::command]
+pub fn save_book_pipeline_diagnostic(
+    job_id: String,
+    profile: String,
+) -> Result<BookPipelineActionResult, String> {
+    let store = BookPipelineStore::default()?;
+    let state = store.load()?;
+    let job = state
+        .jobs
+        .iter()
+        .find(|job| job.id == job_id)
+        .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
+    // Build before the dialog: an unsupported profile should fail immediately
+    // rather than after the user has picked a folder.
+    let document = build_book_pipeline_diagnostic(job, &profile)?;
+    let Some(folder) = rfd::FileDialog::new()
+        .set_title("Save Book Pipeline diagnostic bundle")
+        .pick_folder()
+    else {
+        return Ok(BookPipelineActionResult {
+            ok: false,
+            message: "Diagnostic export cancelled.".into(),
+            path: None,
+        });
+    };
+    let path = write_book_pipeline_diagnostic(&folder, &job.id, &profile, &document)?;
+    Ok(BookPipelineActionResult {
+        ok: true,
+        message: format!("Diagnostic bundle written to {}", display_path(&path)),
+        path: Some(display_path(&path)),
+    })
+}
+
+fn write_book_pipeline_diagnostic(
+    dir: &Path,
+    job_id: &str,
+    profile: &str,
+    document: &serde_json::Value,
+) -> Result<PathBuf, String> {
+    // The id is generated as "job-<nanos>", but a bundle must not be able to
+    // write outside the folder the user picked even if an imported job carries
+    // something else.
+    let safe_job_id: String = job_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let path = dir.join(format!("bibliosmith-diagnostic-{safe_job_id}-{profile}.json"));
+    let body = serde_json::to_string_pretty(document).map_err(|err| err.to_string())? + "\n";
+    fs::write(&path, body).map_err(|err| err.to_string())?;
+    Ok(path)
 }
 
 fn resolve_book_pipeline_open_target(
@@ -10896,6 +10978,7 @@ fn run_translation_sample_with_executor(
     child_id: Option<&str>,
     provider_profile_id: &str,
     provider_config_id: &str,
+    apply_to_job: bool,
     executor: &dyn RunnerCommandExecutor,
 ) -> Result<BookPipelineJob, String> {
     let provider_profile_id = provider_profile_id.trim();
@@ -10993,8 +11076,13 @@ fn run_translation_sample_with_executor(
         .iter()
         .find(|artifact| artifact.kind == "translation_sample_report")
         .map(|artifact| PathBuf::from(&artifact.path));
-    job.translation_profile_id = provider_profile_id.into();
-    job.translation_config_id = provider_config_id.into();
+    // Only when the caller asked. A sample run used to adopt its provider
+    // unconditionally, so trying a model out silently redirected the whole book
+    // and there was no way back to the one the job was queued with.
+    if apply_to_job {
+        job.translation_profile_id = provider_profile_id.into();
+        job.translation_config_id = provider_config_id.into();
+    }
     replace_stage_artifacts(
         &mut job.children[child_index].artifacts,
         &["translation_sample_report"],
@@ -11053,6 +11141,60 @@ fn run_translation_sample_with_executor(
     }) {
         let _ = fs::remove_file(previous_path);
     }
+    Ok(result)
+}
+
+fn set_translation_provider_in_store(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    provider_profile_id: &str,
+    provider_config_id: &str,
+) -> Result<BookPipelineJob, String> {
+    let provider_profile_id = provider_profile_id.trim();
+    let provider_config_id = provider_config_id.trim();
+    if provider_profile_id.is_empty() || provider_config_id.is_empty() {
+        return Err("Setting the translation provider requires profile and config IDs.".into());
+    }
+
+    let mut state = store.load()?;
+    let job_index = find_job_index(&state, job_id)?;
+    let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
+    let job = &mut state.jobs[job_index];
+    if job.translation_mode != TRANSLATION_MODE_FAST {
+        return Err("Only a fast-mode job runs through a provider slot.".into());
+    }
+    if job.translation_profile_id == provider_profile_id
+        && job.translation_config_id == provider_config_id
+    {
+        return Ok(job.clone());
+    }
+    // Whether an approval is currently bound decides how strict this has to be:
+    // a bound gate must be rebindable, because the provider is part of what was
+    // approved. A gate that has not been reached yet has nothing to invalidate.
+    let had_binding = job.children[child_index]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .is_some_and(|stage| stage.approval_request.is_some());
+    job.translation_profile_id = provider_profile_id.into();
+    job.translation_config_id = provider_config_id.into();
+    // The provider is inside the binding hash, so this re-readies the gate and
+    // drops the old approval. It refuses while a later stage is live — the one
+    // case where redirecting the book mid-flight would be unsafe.
+    if !ready_translation_approval_gate(job, child_index) && had_binding {
+        return Err(
+            "The translation provider cannot change while a later stage is running.".into(),
+        );
+    }
+    job.current_step =
+        format!("Translation provider set to {provider_profile_id} / {provider_config_id}");
+    job.log_summary.push(job.current_step.clone());
+    job.log_summary = trim_log_summary(&job.log_summary);
+    job.updated_at = now_label();
+    derive_job(job);
+    let result = job.clone();
+    store.save(&state)?;
     Ok(result)
 }
 
@@ -22987,6 +23129,7 @@ mod tests {
             Some(&child_id),
             "fake-provider-profile",
             "sample-config-a",
+            false,
             &executor,
         )
         .unwrap();
@@ -23008,7 +23151,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_sample_can_change_provider_and_rebind_before_translation_approval() {
+    fn preflight_sample_rebinds_the_gate_without_adopting_its_provider() {
         let root = temp_root("translation-preflight-sample");
         let repo = handoff_repo_fixture(&root);
         let source_path = root.join("source.md");
@@ -23029,6 +23172,8 @@ mod tests {
             .unwrap()
             .input_hashes["approvalBindingSha256"]
             .clone();
+        let queued_profile = prepared.translation_profile_id.clone();
+        let queued_config = prepared.translation_config_id.clone();
         let executor = TranslationSampleFixtureExecutor::default();
 
         let first = run_translation_sample_with_executor(
@@ -23037,6 +23182,7 @@ mod tests {
             Some(&child_id),
             "fake-provider-profile",
             "sample-config-a",
+            false,
             &executor,
         )
         .unwrap();
@@ -23055,7 +23201,10 @@ mod tests {
         assert_ne!(first_binding, original_binding);
         assert_eq!(first_gate.status, STATUS_READY);
         assert_eq!(child_stage_status(&first, "translate"), STATUS_PENDING);
-        assert_eq!(first.translation_config_id, "sample-config-a");
+        // Sampling is "try before you decide": it must not adopt the provider it
+        // was run with. It used to, so one sample silently redirected the book.
+        assert_eq!(first.translation_profile_id, queued_profile);
+        assert_eq!(first.translation_config_id, queued_config);
         let first_artifact = first.children[0]
             .artifacts
             .iter()
@@ -23092,6 +23241,7 @@ mod tests {
             Some(&child_id),
             "fake-provider-profile",
             "sample-config-b",
+            false,
             &executor,
         )
         .unwrap();
@@ -23142,6 +23292,106 @@ mod tests {
             STATUS_COMPLETED
         );
         assert_eq!(child_stage_status(&approved, "translate"), STATUS_READY);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn adopting_a_sampled_provider_is_a_separate_action_that_rebinds_the_gate() {
+        // The counterpart to the test above: sampling leaves the job alone, so
+        // there has to be an explicit way to say "translate the book with this
+        // one", and taking it must drop an approval granted against the old
+        // provider -- the provider is inside the binding the user approved.
+        let root = temp_root("translation-provider-adopt");
+        let repo = handoff_repo_fixture(&root);
+        let source_path = root.join("source.md");
+        let store = BookPipelineStore::for_test(&root);
+        let job_id = handoff_ready_child_job(
+            &store,
+            &repo,
+            &source_path,
+            "# One\n\nFirst.\n\n# Two\n\nSecond.\n",
+        );
+        advance_job(&store, &job_id, None, false).unwrap();
+        let prepared = advance_job(&store, &job_id, None, false).unwrap();
+        let child_id = prepared.children[0].id.clone();
+        let queued_config = prepared.translation_config_id.clone();
+        let original_binding = prepared.children[0]
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == "approve_translation")
+            .unwrap()
+            .input_hashes["approvalBindingSha256"]
+            .clone();
+
+        let adopted = set_translation_provider_in_store(
+            &store,
+            &job_id,
+            Some(&child_id),
+            "fake-provider-profile",
+            "adopted-config",
+        )
+        .unwrap();
+        assert_ne!(queued_config, "adopted-config");
+        assert_eq!(adopted.translation_profile_id, "fake-provider-profile");
+        assert_eq!(adopted.translation_config_id, "adopted-config");
+        let gate = adopted.children[0]
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == "approve_translation")
+            .unwrap();
+        assert_ne!(gate.input_hashes["approvalBindingSha256"], original_binding);
+        assert_eq!(gate.status, STATUS_READY);
+        assert_eq!(
+            gate.approval_request.as_ref().unwrap().config_id,
+            "adopted-config"
+        );
+        assert_eq!(child_stage_status(&adopted, "translate"), STATUS_PENDING);
+
+        // Setting the same slot again is a no-op rather than a spurious rebind.
+        let repeated = set_translation_provider_in_store(
+            &store,
+            &job_id,
+            Some(&child_id),
+            "fake-provider-profile",
+            "adopted-config",
+        )
+        .unwrap();
+        assert_eq!(
+            repeated.children[0]
+                .stages
+                .iter()
+                .find(|stage| stage.stage_id == "approve_translation")
+                .unwrap()
+                .input_hashes["approvalBindingSha256"],
+            gate.input_hashes["approvalBindingSha256"]
+        );
+
+        // An approval granted against one provider must not carry over to another.
+        let approved = approve_job_gate(
+            &store,
+            &job_id,
+            Some(&child_id),
+            "approve_translation",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            child_stage_status(&approved, "approve_translation"),
+            STATUS_COMPLETED
+        );
+        let switched = set_translation_provider_in_store(
+            &store,
+            &job_id,
+            Some(&child_id),
+            "fake-provider-profile",
+            "another-config",
+        )
+        .unwrap();
+        assert_eq!(
+            child_stage_status(&switched, "approve_translation"),
+            STATUS_READY
+        );
+        assert_eq!(child_stage_status(&switched, "translate"), STATUS_PENDING);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -25308,6 +25558,52 @@ mod tests {
             assert!(!export.contains("providerPayload"));
             assert!(!export.contains("prompt"));
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn diagnostic_bundle_lands_in_the_chosen_folder_under_a_contained_name() {
+        // The disclosure test above covers what goes in; this covers the part
+        // that makes it reachable at all -- the bundle has to be a file the user
+        // can attach to a report, not a value returned in-process.
+        let root = temp_root("diagnostic-write");
+        let store = BookPipelineStore::for_test(&root);
+        let job = queue_job(
+            &store,
+            fake_source(None),
+            "conversion_only".into(),
+            BookPipelinePreviewConfig::default(),
+        )
+        .unwrap();
+        let completed = run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
+        let out = root.join("export");
+        fs::create_dir_all(&out).unwrap();
+
+        let document = build_book_pipeline_diagnostic(&completed, "public-issue").unwrap();
+        let path =
+            write_book_pipeline_diagnostic(&out, &completed.id, "public-issue", &document).unwrap();
+        assert_eq!(path.parent(), Some(out.as_path()));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(format!("bibliosmith-diagnostic-{}-public-issue.json", completed.id).as_str())
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["profile"], "public-issue");
+        assert_eq!(written, document);
+
+        // A job id that is not filename-safe must not steer the write out of the
+        // folder the user picked.
+        let escaped =
+            write_book_pipeline_diagnostic(&out, "../../etc/pwned", "public-issue", &document)
+                .unwrap();
+        assert_eq!(escaped.parent(), Some(out.as_path()));
+        assert_eq!(
+            escaped.file_name().and_then(|name| name.to_str()),
+            Some("bibliosmith-diagnostic-______etc_pwned-public-issue.json")
+        );
+
+        assert!(build_book_pipeline_diagnostic(&completed, "everything").is_err());
         let _ = fs::remove_dir_all(root);
     }
 

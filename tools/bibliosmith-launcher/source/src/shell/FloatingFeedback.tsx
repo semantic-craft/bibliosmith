@@ -5,7 +5,6 @@ import type { DownloadHudState, FloatingToast } from "./types";
 
 export function FloatingFeedback({
   toast,
-  globalProgress,
   biblioSmithVisible,
   biblioSmithTitle,
   biblioSmithState,
@@ -18,7 +17,6 @@ export function FloatingFeedback({
   onCloseBiblioSmith,
 }: {
   toast: FloatingToast | null;
-  globalProgress: { percent: number; label: string } | null;
   biblioSmithVisible: boolean;
   biblioSmithTitle: string;
   biblioSmithState: DownloadHudState;
@@ -30,23 +28,12 @@ export function FloatingFeedback({
   onRetryBiblioSmith: () => void;
   onCloseBiblioSmith: () => void;
 }) {
-  if (!toast && !globalProgress && !biblioSmithVisible) return null;
+  if (!toast && !biblioSmithVisible) return null;
   const biblioSmithPercent = biblioSmithProgress?.percent ?? 0;
   const biblioSmithRunning = biblioSmithState === "downloading" || biblioSmithState === "cancelling";
   return (
     <div className="floating-feedback-layer" aria-live="polite">
       {toast && <div className={`floating-toast ${toast.tone}`}>{toast.message}</div>}
-      {globalProgress && (
-        <section className="floating-progress-card blue">
-          <div className="floating-progress-header">
-            <strong>{globalProgress.label}</strong>
-            <span>{formatPercent(globalProgress.percent)}</span>
-          </div>
-          <div className="progress-bar">
-            <span style={{ width: progressWidth(globalProgress.percent) }} />
-          </div>
-        </section>
-      )}
       {biblioSmithVisible && (
         <TaskProgressCard
           accent="blue"

@@ -117,18 +117,6 @@
 .pl-topbar h1 { margin: 0; color: var(--ink); font-size: 19px; }
 .pl-topbar .pl-crumb { color: var(--muted); font-size: 12.5px; }
 .pl-spacer { flex: 1; }
-.pl-budget-pill {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 190px;
-  padding: 6px 12px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--surface);
-}
-.pl-budget-pill .pl-bl { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
-.pl-budget-pill .pl-bl b { color: var(--ink); }
 
 /* ---------- shelf ---------- */
 
@@ -387,6 +375,9 @@
   font: inherit;
 }
 .pl-scontrols .pl-btn { grid-column: 1 / -1; justify-self: start; }
+/* The book's own model sits under the sample picker with its adopt button, so
+   the row is a three-part flex line rather than the usual key/value pair. */
+.pl-scompare .pl-evi-row { align-items: center; margin-top: 10px; }
 .pl-sresults { display: grid; gap: 10px; margin-top: 12px; }
 .pl-sresult { overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
 .pl-sresult-meta { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--line); }
@@ -761,6 +752,27 @@
 .pl-confirm-grid .pl-card { padding: 13px 16px; }
 .pl-confirm-grid h4 { margin: 0 0 9px; }
 .pl-wiz-error { margin-top: 12px; color: var(--pl-failed); font-size: 12.5px; }
+
+/* ---------- diagnostic bundle ---------- */
+
+.pl-diagnostic {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.pl-diagnostic h4 { margin: 0 0 4px; color: var(--ink); font-size: 13px; }
+.pl-diagnostic p { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.pl-diagnostic-controls { display: flex; align-items: end; gap: 10px; }
+.pl-diagnostic-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.pl-diagnostic-controls select {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 12px;
+}
+.pl-diagnostic-note { margin: 10px 0 0 !important; }
 
 /* ---------- empty states ---------- */
 

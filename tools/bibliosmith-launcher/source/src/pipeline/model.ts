@@ -30,6 +30,7 @@ export type PipelineBusy =
   | "cleanup"
   | "cleanupApproval"
   | "open"
+  | "diagnostic"
   | null;
 
 /** Conversion route override a user can pick per route item in the wizard. */
@@ -122,8 +123,9 @@ export const GATE_STAGE_IDS = new Set(["approve_translation", "approve_promotion
 // Settings and the new-job wizard render. It used to be a hand-written map of
 // three brands while the catalog carried six, so the per-book drawer silently
 // offered half the providers the user could actually configure. A brand's first
-// slot is its default config (Qwen and MiMo bill two ways and list two slots).
-export const PROVIDER_DEFAULT_CONFIG: Record<string, string> = Object.fromEntries(
+// slot is its default config (Qwen and MiMo bill two ways and list two slots),
+// which is only a fallback now that every picker offers the slots themselves.
+const PROVIDER_DEFAULT_CONFIG: Record<string, string> = Object.fromEntries(
   MODEL_BRANDS.flatMap((brand) =>
     brand.slots[0] ? [[brand.profileId, brand.slots[0].configId] as const] : [],
   ),
@@ -528,13 +530,6 @@ export function formatTime(iso?: string | null): string {
   return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-export function formatDateTime(iso?: string | null): string {
-  if (!iso) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
-
 /* ---------- Approval gate view model ---------- */
 
 export type BoundHashEntry = {
@@ -686,11 +681,6 @@ export function approvalRecords(unit: BookUnit): BookPipelineApprovalReference[]
       (ref.decision === "approved" || ref.decision === "rejected") &&
       (childId ? ref.childJobId === childId || !ref.childJobId : true),
   );
-}
-
-export function approvalBadge(unit: BookUnit, copy: PipelineCopy): { count: number; invalid: boolean } {
-  const gates = pendingGates(unit, copy);
-  return { count: gates.length, invalid: gates.some((gate) => gate.invalidated) };
 }
 
 /* ---------- Manual advance ---------- */

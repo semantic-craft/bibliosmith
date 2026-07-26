@@ -5,6 +5,7 @@ import type {
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
+  BookPipelineDiagnosticProfile,
   ModelSlotView,
 } from "../types";
 import "./pipeline.css";
@@ -33,6 +34,8 @@ export type PipelineWorkbenchProps = {
   onDelete: (jobId: string) => void;
   onAdvance: (jobId: string, childId: string) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
+  onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
+  onExportDiagnostic: (jobId: string, profile: BookPipelineDiagnosticProfile) => void;
   onSaveCustomInstructions: (
     jobId: string,
     childId: string,
@@ -70,12 +73,6 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
       <div className="pl-topbar">
         <h1>{copy.inboxTitle}</h1>
         <span className="pl-spacer" />
-        <div className="pl-budget-pill" title={copy.ocrBudget}>
-          <div className="pl-bl">
-            <span>{copy.ocrBudget}</span>
-            <b className="pl-num">—</b>
-          </div>
-        </div>
         {!wizardOpen && (
           <button className="pl-btn primary" type="button" onClick={() => setWizardOpen(true)}>
             <Plus size={15} />
@@ -134,6 +131,8 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
               onDelete={props.onDelete}
               onAdvance={props.onAdvance}
               onSampleTranslation={props.onSampleTranslation}
+              onApplySampleProvider={props.onApplySampleProvider}
+              onExportDiagnostic={props.onExportDiagnostic}
               onSaveCustomInstructions={props.onSaveCustomInstructions}
               onApproveGate={props.onApproveGate}
               onOpenOutput={props.onOpenOutput}

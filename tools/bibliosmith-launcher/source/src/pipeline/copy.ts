@@ -56,7 +56,6 @@ export function pipelineCopy(locale: PipelineLocale) {
     // Shelf frame
     inboxTitle: zh ? "书架" : "Bookshelf",
     newJob: zh ? "添加书" : "Add a book",
-    ocrBudget: zh ? "今日 OCR 预算" : "OCR budget today",
     inboxEmptyTitle: zh ? "你的书架还空着" : "Your shelf is empty",
     inboxEmptyBody: zh
       ? "放一本书上来，BiblioSmith 会整理文字、翻译成中文、做成电子书。开始翻译前、成书前会各问你一次，其余都自动。"
@@ -134,7 +133,31 @@ export function pipelineCopy(locale: PipelineLocale) {
       ? "用当前模型翻译几段书中正文，先比较原文与译文；满意后再批准全书翻译。"
       : "Translate a few passages with the current model, compare source and target, then approve the full book.",
     sampleProvider: zh ? "抽样模型" : "Sample provider",
-    sampleConfig: zh ? "配置" : "Configuration",
+    // Diagnostic bundle export
+    diagnosticTitle: zh ? "导出诊断包" : "Export diagnostic bundle",
+    diagnosticIntro: zh
+      ? "把这本书的阶段、状态与错误代码写成一个 JSON 文件，报障时附上。三档披露范围递增，任何一档都不含凭证、正文、stdout/stderr 与提供方响应。"
+      : "Writes this book's stages, statuses, and error codes to a JSON file to attach to a report. The three profiles disclose progressively more; none of them includes credentials, body text, stdout/stderr, or provider payloads.",
+    diagnosticProfile: zh ? "披露档位" : "Disclosure profile",
+    diagnosticPublicIssue: zh ? "公开 issue（默认）" : "Public issue (default)",
+    diagnosticRedactedSupport: zh ? "支持渠道 · 已脱敏" : "Support · redacted",
+    diagnosticLocalFull: zh ? "本机自查 · 完整" : "Local · full",
+    diagnosticPublicIssueNote: zh
+      ? "阶段、状态、错误代码。不含错误摘要，不含工件清单，不含任何路径。可直接贴进公开 issue。"
+      : "Stages, statuses, and error codes. No error summaries, no artifact list, no paths at all. Safe to paste into a public issue.",
+    diagnosticRedactedSupportNote: zh
+      ? "加上错误摘要，以及工件清单（类型、sha256、大小、校验结果）；路径替换为 <JOB_ROOT> / <PROJECT_ROOT> 占位。适合发给支持渠道。"
+      : "Adds error summaries and an artifact list (kind, sha256, size, validation); paths are replaced with <JOB_ROOT> / <PROJECT_ROOT> placeholders. For a support channel.",
+    diagnosticLocalFullNote: zh
+      ? "加上工件的真实绝对路径与全部字段。会暴露本机目录结构，建议只留在本机自查。"
+      : "Adds each artifact's real absolute path and every field. This reveals your local directory layout, so keep it on this machine.",
+    diagnosticExport: zh ? "选择文件夹并导出" : "Choose a folder and export",
+    jobProvider: zh ? "本书正式模型" : "This book's model",
+    sampleProviderDiffers: zh
+      ? "样张用的模型和本书正式模型不是同一个。批准后全书会用正式模型翻译，不是你在样张里看到的那个。"
+      : "The sample was run with a different model than this book's. Approving sends the whole book through this book's model, not the one you sampled.",
+    applySampleProvider: zh ? "以此模型翻译本书" : "Translate this book with it",
+    appliedSampleProvider: zh ? "本书正式模型已更新" : "This book's model was updated",
     sampleRun: zh ? "生成对照样张" : "Generate comparison",
     sampleRetry: zh ? "换模型后重试" : "Retry with provider",
     sampleReady: zh ? "翻译对照样张已生成" : "Translation comparison is ready",
@@ -247,13 +270,11 @@ export function pipelineCopy(locale: PipelineLocale) {
     thSha: zh ? "SHA-256" : "SHA-256",
     thValidation: zh ? "校验" : "Validation",
     thProducer: zh ? "产自" : "Produced by",
-    thOpen: zh ? "打开" : "Open",
     formatBilingualShort: zh ? "双语EPUB" : "Bilingual EPUB",
     artifactsEmpty: zh ? "尚无注册工件。工件在各阶段完成时登记：路径、SHA-256、产出阶段与校验状态。" : "No registered artifacts yet. Artifacts are registered as stages complete: path, SHA-256, producer stage, and validation state.",
     validationOk: zh ? "✓" : "✓",
     validationFailed: zh ? "✗" : "✗",
     validationUnknown: zh ? "—" : "—",
-    openDisabledNote: zh ? "逐工件打开等待 runner 导航命令；请用任务级打开。" : "Per-artifact open waits on a runner navigation command; use the job-level open.",
 
     // Approval tab
     gateTranslation: zh ? "译前披露审批" : "Translation disclosure",

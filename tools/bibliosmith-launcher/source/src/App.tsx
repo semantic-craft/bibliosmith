@@ -43,6 +43,8 @@ import {
   recordFrontendActivity,
   retryBookPipelineJob,
   runBookPipelineTranslationSample,
+  saveBookPipelineDiagnostic,
+  setBookPipelineTranslationProvider,
   runBookPipelineJob,
   saveBookPipelineCustomInstructions,
   setRepoFolder,
@@ -59,6 +61,7 @@ import {
   BookPipelineCustomInstructions,
   BookPipelineJob,
   BookPipelinePreviewConfig,
+  BookPipelineDiagnosticProfile,
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
@@ -570,6 +573,49 @@ export default function App() {
       setPipelineBusy(null);
     }
   }, [addActivity, bookPipelineCopy.sampleReady, showFloatingToast]);
+
+  // The explicit half of the sample flow: adopt the slot the sample was run with
+  // as the book's own, which is what the full run uses.
+  const applyPipelineTranslationProvider = useCallback(async (
+    jobId: string,
+    childId: string,
+    providerProfileId: string,
+    providerConfigId: string,
+  ) => {
+    setPipelineBusy("sample");
+    try {
+      const job = await setBookPipelineTranslationProvider(jobId, childId, providerProfileId, providerConfigId);
+      setPipelineState((current) => upsertPipelineJob(current, job));
+      addActivity("success", `Translation provider set: ${providerProfileId} · ${providerConfigId}`);
+      showFloatingToast(bookPipelineCopy.appliedSampleProvider, "success");
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+    } finally {
+      setPipelineBusy(null);
+    }
+  }, [addActivity, bookPipelineCopy.appliedSampleProvider, showFloatingToast]);
+
+  // The three redaction profiles were configured and tested on the backend with
+  // no way to reach them, so a user reporting a problem had only screenshots.
+  const exportPipelineDiagnostic = useCallback(async (
+    jobId: string,
+    profile: BookPipelineDiagnosticProfile,
+  ) => {
+    setPipelineBusy("diagnostic");
+    try {
+      const result = await saveBookPipelineDiagnostic(jobId, profile);
+      addActivity(result.ok ? "success" : "info", result.message);
+      showFloatingToast(result.message, result.ok ? "success" : "info");
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+    } finally {
+      setPipelineBusy(null);
+    }
+  }, [addActivity, showFloatingToast]);
 
   const handoffPipelineMarkdown = useCallback(async (jobId: string, artifactPath?: string | null) => {
     setPipelineBusy("handoff");
@@ -1705,7 +1751,6 @@ export default function App() {
   const showingBiblioSmithDownloadHud = biblioSmithDownloadState !== "idle" && !biblioSmithDownloadDismissed;
   const biblioSmithProgressLabel = formatDownloadProgress(copy, biblioSmithProgress);
   const biblioSmithHudMessage = biblioSmithDownloadMessage || biblioSmithProgressLabel || copy.biblioSmithProgressDefault;
-  const activeGlobalProgress = null;
   const nodeModulesProgressLabel = formatDownloadProgress(copy, nodeModulesProgress);
   const nodeModulesHudMessage = nodeModulesDownloadMessage || nodeModulesProgressLabel || copy.nodeModulesInstalling;
   const runtimeProgressLabel = formatDownloadProgress(copy, runtimeProgress);
@@ -1793,7 +1838,6 @@ export default function App() {
         <section className="workspace">
           <FloatingFeedback
             toast={floatingToast}
-            globalProgress={activeTab === "overview" || activeTab === "updates" ? activeGlobalProgress : null}
             biblioSmithVisible={showingBiblioSmithDownloadHud}
             biblioSmithTitle={copy.biblioSmithProgressTitle}
             biblioSmithState={biblioSmithDownloadState}
@@ -1886,6 +1930,10 @@ export default function App() {
               onSampleTranslation={(jobId, childId, providerProfileId, providerConfigId) =>
                 void samplePipelineTranslation(jobId, childId, providerProfileId, providerConfigId)
               }
+              onApplySampleProvider={(jobId, childId, providerProfileId, providerConfigId) =>
+                void applyPipelineTranslationProvider(jobId, childId, providerProfileId, providerConfigId)
+              }
+              onExportDiagnostic={(jobId, profile) => void exportPipelineDiagnostic(jobId, profile)}
               onSaveCustomInstructions={(jobId, childId, customInstructions) =>
                 void savePipelineCustomInstructions(jobId, childId, customInstructions)
               }

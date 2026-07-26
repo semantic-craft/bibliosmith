@@ -7,6 +7,7 @@ import {
   BookPipelineCleanupCandidate,
   BookPipelineCleanupPreview,
   BookPipelineCustomInstructions,
+  BookPipelineDiagnosticProfile,
   BookPipelineJob,
   BookPipelinePreviewConfig,
   BookPipelineRouteItem,
@@ -1270,16 +1271,44 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
   return invoke<BookPipelineJob>("approve_book_pipeline_gate", { jobId, childId, stageId, explicitApproval: true });
 }
 
+// applyToJob stays false for a plain sample: trying a model out must not decide
+// what the full book runs on. Adopting one is setBookPipelineTranslationProvider.
 export function runBookPipelineTranslationSample(
+  jobId: string,
+  childId: string,
+  providerProfileId: string,
+  providerConfigId: string,
+  applyToJob = false,
+) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("Translation samples require the desktop runtime."));
+  }
+  return invoke<BookPipelineJob>("run_book_pipeline_translation_sample", {
+    jobId,
+    childId,
+    providerProfileId,
+    providerConfigId,
+    applyToJob,
+  });
+}
+
+export function saveBookPipelineDiagnostic(jobId: string, profile: BookPipelineDiagnosticProfile) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("Exporting a diagnostic bundle requires the desktop runtime."));
+  }
+  return invoke<BookPipelineActionResult>("save_book_pipeline_diagnostic", { jobId, profile });
+}
+
+export function setBookPipelineTranslationProvider(
   jobId: string,
   childId: string,
   providerProfileId: string,
   providerConfigId: string,
 ) {
   if (!isTauriRuntime()) {
-    return Promise.reject(new Error("Translation samples require the desktop runtime."));
+    return Promise.reject(new Error("Changing the translation provider requires the desktop runtime."));
   }
-  return invoke<BookPipelineJob>("run_book_pipeline_translation_sample", {
+  return invoke<BookPipelineJob>("set_book_pipeline_translation_provider", {
     jobId,
     childId,
     providerProfileId,
@@ -1408,18 +1437,6 @@ export function readBookPipelineTranslationSample(jobId: string, childId: string
   return invoke<BookPipelineTranslationSampleReport>("read_book_pipeline_translation_sample", { jobId, childId });
 }
 
-export function exportBookPipelineDiagnostic(jobId: string, profile: "local-full" | "redacted-support" | "public-issue") {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<Record<string, unknown>>({
-      schemaVersion: BOOK_PIPELINE_JOB_SCHEMA_VERSION,
-      profile,
-      status: "completed",
-      currentStageId: "validate_reading",
-      stages: [],
-    });
-  }
-  return invoke<Record<string, unknown>>("export_book_pipeline_diagnostic", { jobId, profile });
-}
 
 export function listenOpenCodeDownloadProgress(
   callback: (payload: DownloadProgress) => void,

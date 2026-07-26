@@ -6060,6 +6060,7 @@ pub fn run() {
             book_pipeline::approve_book_pipeline_gate,
             book_pipeline::record_book_pipeline_reader_evidence,
             book_pipeline::run_book_pipeline_translation_sample,
+            book_pipeline::set_book_pipeline_translation_provider,
             book_pipeline::choose_book_pipeline_pdf_folder,
             book_pipeline::choose_book_pipeline_markdown_source,
             book_pipeline::discover_book_pipeline_zotero_sources,
@@ -6067,6 +6068,7 @@ pub fn run() {
             book_pipeline::preview_book_pipeline_cleanup,
             book_pipeline::approve_book_pipeline_cleanup,
             book_pipeline::export_book_pipeline_diagnostic,
+            book_pipeline::save_book_pipeline_diagnostic,
             book_pipeline::open_book_pipeline_output,
             book_pipeline::read_book_pipeline_artifact_excerpt,
             book_pipeline::read_book_pipeline_translation_sample
