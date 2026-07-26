@@ -4108,9 +4108,17 @@ fn write_book_pipeline_diagnostic(
     // something else.
     let safe_job_id: String = job_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let path = dir.join(format!("bibliosmith-diagnostic-{safe_job_id}-{profile}.json"));
+    let path = dir.join(format!(
+        "bibliosmith-diagnostic-{safe_job_id}-{profile}.json"
+    ));
     let body = serde_json::to_string_pretty(document).map_err(|err| err.to_string())? + "\n";
     fs::write(&path, body).map_err(|err| err.to_string())?;
     Ok(path)
