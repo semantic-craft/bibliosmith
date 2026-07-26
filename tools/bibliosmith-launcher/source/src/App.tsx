@@ -15,6 +15,7 @@ import {
   chooseBookPipelineMarkdownSource,
   chooseBookPipelinePdfFolder,
   advanceBookPipelineJob,
+  setBookPipelineRouteOverride,
   approveBookPipelineGate,
   deleteBookPipelineJob,
   discoverBookPipelineZoteroSources,
@@ -533,6 +534,33 @@ export default function App() {
       setPipelineBusy(null);
     }
   }, [addActivity, bookPipelineCopy.customInstructionsSaved, showFloatingToast]);
+
+  // Re-route a held book in place. The credentials the backend needs to decide
+  // whether a forced provider is usable are the same ones the wizard sends.
+  const overridePipelineRoute = useCallback(async (
+    jobId: string,
+    childId: string,
+    routeItemId: string,
+    routeOverride: string,
+  ) => {
+    setPipelineBusy("routeOverride");
+    try {
+      const job = await setBookPipelineRouteOverride(jobId, childId, routeItemId, routeOverride, {
+        hasPaddleocrCredentials: pipelineDraft.hasPaddleocrCredentials,
+        hasMineruCredentials: pipelineDraft.hasMineruCredentials,
+        routeOverrides: {},
+      });
+      setPipelineState((current) => upsertPipelineJob(current, job));
+      addActivity("info", `Book Pipeline route override: ${routeOverride}`);
+      showFloatingToast(job.currentStep, "success");
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+    } finally {
+      setPipelineBusy(null);
+    }
+  }, [addActivity, pipelineDraft.hasMineruCredentials, pipelineDraft.hasPaddleocrCredentials, showFloatingToast]);
 
   const approvePipelineGate = useCallback(async (
     jobId: string,
@@ -1939,6 +1967,9 @@ export default function App() {
                 void savePipelineCustomInstructions(jobId, childId, customInstructions)
               }
               onApproveGate={(jobId, childId, stageId) => void approvePipelineGate(jobId, childId, stageId)}
+              onRouteOverride={(jobId, childId, routeItemId, routeOverride) =>
+                void overridePipelineRoute(jobId, childId, routeItemId, routeOverride)
+              }
               onOpenOutput={(jobId) => void openPipelineOutput(jobId)}
               routeOverrides={pipelineRouteOverrides}
               onRouteOverrideChange={changePipelineRouteOverride}

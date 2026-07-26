@@ -42,6 +42,7 @@ export type PipelineWorkbenchProps = {
     customInstructions: BookPipelineCustomInstructions,
   ) => void;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
+  onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
   onOpenOutput: (jobId: string) => void;
   routeOverrides: Record<string, RouteOverride>;
   onRouteOverrideChange: (routeItemId: string, override: RouteOverride) => void;
@@ -135,6 +136,7 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
               onExportDiagnostic={props.onExportDiagnostic}
               onSaveCustomInstructions={props.onSaveCustomInstructions}
               onApproveGate={props.onApproveGate}
+              onRouteOverride={props.onRouteOverride}
               onOpenOutput={props.onOpenOutput}
               onHandoff={props.onHandoff}
             />

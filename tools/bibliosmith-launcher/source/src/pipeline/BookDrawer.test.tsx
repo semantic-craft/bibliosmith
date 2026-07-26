@@ -35,6 +35,7 @@ function renderDrawer(unit: BookUnit, over: Partial<BookDrawerProps> = {}) {
     onExportDiagnostic: vi.fn(),
     onSaveCustomInstructions: vi.fn(),
     onApproveGate: vi.fn(),
+    onRouteOverride: vi.fn(),
     onOpenOutput: vi.fn(),
     onHandoff: vi.fn(),
     ...over,
@@ -230,6 +231,42 @@ describe("BookDrawer gate card", () => {
     const { card } = renderDrawer(unit);
     expect(within(card as HTMLElement).queryByRole("button", { name: copy.gate1Ok })).toBeNull();
     expect(within(card as HTMLElement).getByText(copy.gateInvalidatedNote)).toBeTruthy();
+  });
+
+  // These three buttons shipped permanently disabled, titled "waits on a runner
+  // command". The only way past a held book was to delete and re-queue it, which
+  // for a collection took the whole batch.
+  it("re-routes a held book in place instead of only offering disabled buttons", async () => {
+    const user = userEvent.setup();
+    const held = bookUnit({
+      status: "blocked",
+      stages: [stage("route", "blocked")],
+      childOver: {
+        route: [
+          {
+            id: "DIRTY",
+            title: "A Book",
+            sourceKind: "zotero_attachment",
+            sourceRef: "zotero://DIRTY",
+            routeKind: "blocked_dirty_text_layer",
+            canRun: false,
+            blockedReason: "Dirty text layer needs a decision.",
+            summary: "Held for review",
+          },
+        ],
+      },
+      jobOver: { status: "blocked" },
+    });
+    const { props } = renderDrawer(held);
+
+    const forcePaddle = screen.getByRole("button", { name: copy.blockedForcePaddle });
+    expect(forcePaddle.hasAttribute("disabled")).toBe(false);
+    await user.click(forcePaddle);
+
+    expect(props.onRouteOverride).toHaveBeenCalledWith("job-1", "child-1", "DIRTY", "paddle");
+
+    await user.click(screen.getByRole("button", { name: copy.blockedKeepMineru }));
+    expect(props.onRouteOverride).toHaveBeenCalledWith("job-1", "child-1", "DIRTY", "mineru");
   });
 
   it("reports the gate's approval to the caller with the focused child", async () => {

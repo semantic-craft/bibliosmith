@@ -23,6 +23,7 @@ export type PipelineBusy =
   | "sample"
   | "gateApproval"
   | "customInstructions"
+  | "routeOverride"
   | "folder"
   | "markdown"
   | "zotero"

@@ -1271,6 +1271,23 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
   return invoke<BookPipelineJob>("approve_book_pipeline_gate", { jobId, childId, stageId, explicitApproval: true });
 }
 
+/** Re-route a book the pipeline held back, without deleting and re-queueing it. */
+export async function setBookPipelineRouteOverride(
+  jobId: string,
+  childId: string,
+  routeItemId: string,
+  routeOverride: string,
+  config?: BookPipelinePreviewConfig,
+): Promise<BookPipelineJob> {
+  return invoke<BookPipelineJob>("set_book_pipeline_route_override", {
+    jobId,
+    childId,
+    routeItemId,
+    routeOverride,
+    config,
+  });
+}
+
 // applyToJob stays false for a plain sample: trying a model out must not decide
 // what the full book runs on. Adopting one is setBookPipelineTranslationProvider.
 export function runBookPipelineTranslationSample(
