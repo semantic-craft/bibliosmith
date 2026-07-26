@@ -241,6 +241,16 @@ export function pipelineCopy(locale: PipelineLocale) {
     deleteBookConfirmHint: zh
       ? "从书架移除这本书？磁盘上的已转换文件与 Zotero 附件都会保留，之后重新添加可复用。"
       : "Remove this book from the shelf? Converted files on disk and Zotero attachments are kept and can be reused if you re-add it.",
+    // A collection queued many books under one job, and the shelf shows one row
+    // per book — but delete removes the whole job. Until the state model allows
+    // dropping a single book (its collection membership is frozen on purpose),
+    // the confirmation has to say how many books actually go.
+    deleteBookBatchConfirmHint: (n: number) =>
+      zh
+        ? `这本书属于一个 ${n} 本的批次。删除会把这 ${n} 本一起从书架移除 —— 磁盘上已转换的文件与 Zotero 附件保留，重新发车可复用。`
+        : `This book belongs to a batch of ${n}. Deleting removes all ${n} from the shelf — converted files on disk and Zotero attachments are kept and can be reused if you re-add them.`,
+    deleteBookBatchConfirm: (n: number) =>
+      zh ? `确认删除这 ${n} 本` : `Delete all ${n}`,
     deleteBookConfirm: zh ? "确认删除" : "Confirm delete",
     deleteBookCancel: zh ? "取消" : "Cancel",
     deleteBookDone: zh ? "已从书架删除" : "Removed from the shelf",
