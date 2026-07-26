@@ -56,7 +56,7 @@ function StageRail({ unit, copy }: { unit: BookUnit; copy: PipelineCopy }) {
   );
 }
 
-function ActionCard({ unit, copy, busy, onRetry, onAdvance, onHandoff, onGoApproval }: TabProps) {
+function ActionCard({ unit, copy, busy, onRetry, onAdvance, onHandoff, onGoApproval, onRouteOverride }: TabProps) {
   const stage = currentStage(unit);
   const errorText =
     stage?.safeError?.summary || stage?.error || unit.child?.lastError || unit.job.lastError || "";
@@ -87,6 +87,10 @@ function ActionCard({ unit, copy, busy, onRetry, onAdvance, onHandoff, onGoAppro
   }
 
   if (unit.status === "blocked") {
+    // The three choices the wizard's preflight step already offers, now usable
+    // after the fact instead of only before queueing.
+    const route = unitRoute(unit);
+    const childId = advance?.childId ?? unit.child?.id ?? "";
     return (
       <div className="pl-hintcard blockc">
         <span>◈ {errorText || unitRoute(unit)?.blockedReason || unitRoute(unit)?.summary || copy.statusBlocked}</span>
@@ -101,15 +105,34 @@ function ActionCard({ unit, copy, busy, onRetry, onAdvance, onHandoff, onGoAppro
             {copy.recheckHandoff}
           </button>
         )}
-        <button className="pl-btn sm" type="button" disabled title={copy.runnerPendingNote}>
-          {copy.blockedKeepMineru}
-        </button>
-        <button className="pl-btn sm" type="button" disabled title={copy.runnerPendingNote}>
-          {copy.blockedForcePaddle}
-        </button>
-        <button className="pl-btn sm quiet" type="button" disabled title={copy.runnerPendingNote}>
-          {copy.blockedDefer}
-        </button>
+        {route && (
+          <>
+            <button
+              className="pl-btn sm"
+              type="button"
+              disabled={busy === "routeOverride"}
+              onClick={() => onRouteOverride(unit.job.id, childId, route.id, "mineru")}
+            >
+              {copy.blockedKeepMineru}
+            </button>
+            <button
+              className="pl-btn sm"
+              type="button"
+              disabled={busy === "routeOverride"}
+              onClick={() => onRouteOverride(unit.job.id, childId, route.id, "paddle")}
+            >
+              {copy.blockedForcePaddle}
+            </button>
+            <button
+              className="pl-btn sm quiet"
+              type="button"
+              disabled={busy === "routeOverride"}
+              onClick={() => onRouteOverride(unit.job.id, childId, route.id, "auto")}
+            >
+              {copy.blockedDefer}
+            </button>
+          </>
+        )}
       </div>
     );
   }

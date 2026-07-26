@@ -10,5 +10,6 @@ export type TabProps = {
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onOpenOutput: (jobId: string) => void;
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
+  onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
   onGoApproval: () => void;
 };

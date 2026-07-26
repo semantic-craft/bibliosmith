@@ -3841,6 +3841,115 @@ pub fn approve_book_pipeline_gate(
     )
 }
 
+/// Re-route a book the pipeline held back, in place. Before this the Overview
+/// tab offered the same three choices as the wizard's preflight step but with
+/// every button disabled, so a held book could only be dealt with by deleting it
+/// and queueing it again — which for a collection took the whole batch with it.
+#[tauri::command]
+pub fn set_book_pipeline_route_override(
+    job_id: String,
+    child_id: Option<String>,
+    route_item_id: String,
+    route_override: String,
+    config: Option<BookPipelinePreviewConfig>,
+) -> Result<BookPipelineJob, String> {
+    let store = BookPipelineStore::default()?;
+    set_route_override(
+        &store,
+        &job_id,
+        child_id.as_deref(),
+        &route_item_id,
+        &route_override,
+        &config.unwrap_or_default(),
+    )
+}
+
+fn set_route_override(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    route_item_id: &str,
+    route_override: &str,
+    config: &BookPipelinePreviewConfig,
+) -> Result<BookPipelineJob, String> {
+    if !ROUTE_OVERRIDE_TOKENS.contains(&route_override) {
+        return Err(format!(
+            "Route override must be one of {}.",
+            ROUTE_OVERRIDE_TOKENS.join(", ")
+        ));
+    }
+    let mut state = store.load()?;
+    let job_index = find_job_index(&state, job_id)?;
+    let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
+    let child = &mut state.jobs[job_index].children[child_index];
+    if !child.route.iter().any(|item| item.id == route_item_id) {
+        return Err(format!(
+            "This book has no route item {route_item_id} to override."
+        ));
+    }
+    if stage_ref(child, "extract").is_some_and(|stage| stage.status == STATUS_RUNNING) {
+        return Err("Cannot re-route a book while its extraction is running.".into());
+    }
+
+    if route_override == "auto" {
+        child.source.route_overrides.remove(route_item_id);
+    } else {
+        child
+            .source
+            .route_overrides
+            .insert(route_item_id.to_string(), route_override.to_string());
+    }
+    // The same routing the wizard's preflight step uses, so a decision made after
+    // the book was held lands on exactly the contract a decision made before it
+    // would have. Credentials are re-read here, not remembered from queue time.
+    let overrides = child.source.route_overrides.clone();
+    apply_route_overrides(&mut child.route, &overrides, Some(config));
+    // `apply_route_overrides` only ever forces a route, so dropping one cannot be
+    // undone in place — the automatic decision has to be recomputed from live
+    // worker evidence. Readying `route` is what schedules that, and it may well
+    // hold the book again, which is the point of asking for `auto`.
+    let runnable = route_override == "auto"
+        || child
+            .route
+            .iter()
+            .any(|item| item.id == route_item_id && item.can_run);
+    // A re-route that is still not runnable — forcing a provider whose
+    // credentials are missing — must leave the book held rather than readying a
+    // stage that would fail on the next spawn.
+    if runnable {
+        // Ready, not completed: routing re-runs against live worker evidence and
+        // re-applies the override that now lives on the source, so the decision
+        // goes through the same path a queue-time choice does. (`blocked ->
+        // completed` is not a legal stage transition either.)
+        set_stage_status(child, "route", STATUS_READY, None);
+        // Extraction stays pending behind it: `extract` may not be ready before
+        // `route` has completed, and routing is exactly what has to run again.
+        set_stage_status(child, "extract", STATUS_PENDING, None);
+        child.last_error = None;
+    } else {
+        let held = child
+            .route
+            .iter()
+            .find(|item| item.id == route_item_id)
+            .and_then(|item| item.blocked_reason.clone())
+            .unwrap_or_else(|| "The requested route is not runnable.".into());
+        set_stage_status(child, "route", STATUS_BLOCKED, Some(held.clone()));
+        set_stage_status(child, "extract", STATUS_PENDING, None);
+        child.last_error = Some(held);
+    }
+
+    state.jobs[job_index].current_step = format!("Route override: {route_override}");
+    state.jobs[job_index].log_summary.push(format!(
+        "Route {route_item_id} overridden to {route_override}"
+    ));
+    state.jobs[job_index].log_summary = trim_log_summary(&state.jobs[job_index].log_summary);
+    state.jobs[job_index].updated_at = now_label();
+    derive_job(&mut state.jobs[job_index]);
+    let job = state.jobs[job_index].clone();
+    store.save(&state)?;
+    Ok(job)
+}
+
 /// Record that a person opened the built book in a real reader. Optional by
 /// design: never calling this leaves promotion exactly as it was.
 #[tauri::command]
@@ -9173,6 +9282,10 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 /// Route kinds that represent a conversion decision the user is allowed to
 /// override. Anything else (an unsupported source, a missing file, the synthetic
 /// translation handoff row) is structural and must stay as routed.
+/// The tokens the wizard's preflight dropdown already offers. The in-place
+/// re-route accepts exactly the same set, plus `auto` to drop an override.
+const ROUTE_OVERRIDE_TOKENS: [&str; 5] = ["auto", "direct", "paddle", "mineru", "keep"];
+
 const OVERRIDABLE_ROUTE_KINDS: [&str; 6] = [
     "direct_text",
     "remote_paddleocr",
@@ -22598,6 +22711,182 @@ mod tests {
             .log_summary
             .iter()
             .any(|line| line.contains("Cleanup approval recorded")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn queued_collection_with_a_held_book(
+        store: &BookPipelineStore,
+    ) -> (BookPipelineJob, String, String) {
+        let job = queue_job(
+            store,
+            fake_collection_source(),
+            "conversion_only".into(),
+            BookPipelinePreviewConfig {
+                has_paddleocr_credentials: true,
+                has_mineru_credentials: true,
+                route_overrides: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let child = job
+            .children
+            .iter()
+            .find(|child| {
+                child
+                    .route
+                    .iter()
+                    .any(|item| item.route_kind == "blocked_dirty_text_layer")
+            })
+            .expect("the fixture collection holds one dirty-text-layer book");
+        let route_item_id = child
+            .route
+            .iter()
+            .find(|item| item.route_kind == "blocked_dirty_text_layer")
+            .unwrap()
+            .id
+            .clone();
+        (job.clone(), child.id.clone(), route_item_id)
+    }
+
+    fn credentialed_config() -> BookPipelinePreviewConfig {
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            has_mineru_credentials: true,
+            route_overrides: BTreeMap::new(),
+        }
+    }
+
+    // The Overview tab offered the wizard's three choices with every button
+    // disabled, so a held book could only be dealt with by deleting it — which
+    // for a collection took the whole batch.
+    #[test]
+    fn a_held_book_can_be_rerouted_in_place() {
+        let root = temp_root("route-override-in-place");
+        let store = BookPipelineStore::for_test(&root);
+        let (job, child_id, route_item_id) = queued_collection_with_a_held_book(&store);
+
+        let rerouted = set_route_override(
+            &store,
+            &job.id,
+            Some(&child_id),
+            &route_item_id,
+            "paddle",
+            &credentialed_config(),
+        )
+        .unwrap();
+
+        let child = rerouted
+            .children
+            .iter()
+            .find(|child| child.id == child_id)
+            .unwrap();
+        let item = child
+            .route
+            .iter()
+            .find(|item| item.id == route_item_id)
+            .unwrap();
+        assert_eq!(item.route_kind, "remote_paddleocr");
+        assert!(item.can_run);
+        assert_eq!(item.route_override.as_deref(), Some("paddle"));
+        assert_eq!(stage_ref(child, "route").unwrap().status, STATUS_READY);
+        assert_eq!(stage_ref(child, "extract").unwrap().status, STATUS_PENDING);
+        assert!(child.last_error.is_none());
+
+        // The decision has to survive a restart, so it lives on the source the
+        // runner re-routes from, not only on the route it just recomputed.
+        let reloaded = store
+            .load()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|stored| stored.id == job.id)
+            .unwrap();
+        let child = reloaded
+            .children
+            .iter()
+            .find(|child| child.id == child_id)
+            .unwrap();
+        assert_eq!(
+            child.source.route_overrides.get(&route_item_id),
+            Some(&"paddle".to_string())
+        );
+        assert_eq!(stage_ref(child, "route").unwrap().status, STATUS_READY);
+
+        // `auto` drops the override and schedules a fresh automatic routing pass,
+        // which is the only thing that can undo a forced route.
+        let cleared = set_route_override(
+            &store,
+            &job.id,
+            Some(&child_id),
+            &route_item_id,
+            "auto",
+            &credentialed_config(),
+        )
+        .unwrap();
+        let child = cleared
+            .children
+            .iter()
+            .find(|child| child.id == child_id)
+            .unwrap();
+        assert!(child.source.route_overrides.is_empty());
+        assert_eq!(stage_ref(child, "route").unwrap().status, STATUS_READY);
+        assert_eq!(stage_ref(child, "extract").unwrap().status, STATUS_PENDING);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // Forcing a provider whose credentials are missing must leave the book held,
+    // not ready a stage that would only fail at the next spawn.
+    #[test]
+    fn a_reroute_without_credentials_keeps_the_book_held() {
+        let root = temp_root("route-override-no-credentials");
+        let store = BookPipelineStore::for_test(&root);
+        let (job, child_id, route_item_id) = queued_collection_with_a_held_book(&store);
+
+        let held = set_route_override(
+            &store,
+            &job.id,
+            Some(&child_id),
+            &route_item_id,
+            "paddle",
+            &BookPipelinePreviewConfig::default(),
+        )
+        .unwrap();
+
+        let child = held
+            .children
+            .iter()
+            .find(|child| child.id == child_id)
+            .unwrap();
+        let item = child
+            .route
+            .iter()
+            .find(|item| item.id == route_item_id)
+            .unwrap();
+        assert_eq!(item.route_kind, "missing_credentials");
+        assert!(!item.can_run);
+        assert_eq!(stage_ref(child, "route").unwrap().status, STATUS_BLOCKED);
+        assert_eq!(stage_ref(child, "extract").unwrap().status, STATUS_PENDING);
+        assert!(child.last_error.is_some());
+
+        for (item_id, token) in [
+            (route_item_id.as_str(), "definitely-not-a-token"),
+            ("no-such-route-item", "paddle"),
+        ] {
+            assert!(
+                set_route_override(
+                    &store,
+                    &job.id,
+                    Some(&child_id),
+                    item_id,
+                    token,
+                    &credentialed_config(),
+                )
+                .is_err(),
+                "{item_id}/{token} should be rejected"
+            );
+        }
+
         let _ = fs::remove_dir_all(root);
     }
 
