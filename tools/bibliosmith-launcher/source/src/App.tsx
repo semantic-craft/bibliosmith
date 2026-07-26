@@ -68,6 +68,7 @@ import {
   LauncherState,
   LauncherUpdateInfo,
   BiblioSmithUpdateInfo,
+  ModelSlotView,
   NetworkProxySettings,
   NodeModulesStatus,
   DownloadProgress,
@@ -238,11 +239,16 @@ export default function App() {
     jobs: [],
   });
   const [pipelineDraft, setPipelineDraft] = useState<PipelineDraft>(defaultPipelineDraft);
+  // Slots keep their `configured` flag so the wizard can say which providers have
+  // a key. Stays empty when the catalog cannot be read, which the wizard reads as
+  // "unknown" rather than "none configured".
+  const [modelSlots, setModelSlots] = useState<ModelSlotView[]>([]);
   // Default a new job's provider to whatever the user chose in Settings → Models,
   // so the wizard reflects that choice instead of the OpenAI fallback.
   useEffect(() => {
     void getModelCatalog()
       .then((catalog) => {
+        setModelSlots(catalog.slots);
         if (!catalog.active) return;
         setPipelineDraft((draft) => ({
           ...draft,
@@ -1862,6 +1868,7 @@ export default function App() {
               draft={pipelineDraft}
               preview={pipelinePreview}
               zoteroSources={pipelineZoteroSources}
+              modelSlots={modelSlots}
               busy={pipelineBusy}
               onDraftChange={(patch) => {
                 setPipelineDraft((draft) => ({ ...draft, ...patch }));

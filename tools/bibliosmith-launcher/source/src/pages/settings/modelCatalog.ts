@@ -138,3 +138,16 @@ export function slotMeta(
 export function slotKey(profileId: string, configId: string): string {
   return `${profileId}:${configId}`;
 }
+
+// The picker label for a slot: the brand alone when it bills one way, brand plus
+// plan when it bills two. Shared by every picker so they cannot drift. A slot the
+// catalog does not list still gets a readable name rather than an empty option.
+export function slotDisplayName(profileId: string, configId: string): string {
+  for (const brand of MODEL_BRANDS) {
+    const hit = brand.slots.find(
+      (slot) => slot.profileId === profileId && slot.configId === configId,
+    );
+    if (hit) return brand.slots.length > 1 ? `${brand.brand} · ${hit.label}` : brand.brand;
+  }
+  return `${profileId} · ${configId}`;
+}
