@@ -308,6 +308,7 @@ export function routeKindLabel(routeKind: string, copy: PipelineCopy): string {
     remote_paddleocr: copy.routeRemotePaddle,
     mineru: copy.routeMineru,
     blocked_dirty_text_layer: copy.routeDirty,
+    blocked_no_attachment: copy.routeNoAttachment,
     already_converted: copy.routeAlreadyConverted,
     missing_credentials: copy.routeMissingCredentials,
     translation_handoff: copy.routeTranslationHandoff,

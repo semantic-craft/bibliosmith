@@ -170,7 +170,7 @@ function previewBookPipelineRoutes(source: BookPipelineSource, mode: string, con
       title: source.title || source.selector || "Zotero source",
       sourceKind: source.kind,
       sourceRef: source.selector || "",
-      routeKind: "blocked",
+      routeKind: "blocked_no_attachment",
       canRun: false,
       blockedReason: "No matching Zotero attachment was discovered for this source.",
       summary: "Adjust the search or filter, or select a specific attachment from bibliographic discovery.",

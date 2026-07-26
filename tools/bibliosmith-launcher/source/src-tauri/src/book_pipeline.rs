@@ -9037,7 +9037,11 @@ fn zotero_undiscovered_route_item(source: &BookPipelineSource) -> BookPipelineRo
         title: source_title(source),
         source_kind: source.kind.clone(),
         source_ref: source.selector.clone().unwrap_or_default(),
-        route_kind: "blocked".into(),
+        // Not the bare "blocked" kind: the frontend labels route kinds by exact
+        // match and only falls back to the raw wire string, so an empty
+        // discovery would show untranslated English. routeTone still tints it
+        // as a block because it matches on the "blocked" prefix.
+        route_kind: "blocked_no_attachment".into(),
         can_run: false,
         blocked_reason: Some("No matching Zotero attachment was discovered for this source.".into()),
         summary: "Adjust the search or filter, or select a specific attachment from bibliographic discovery.".into(),
@@ -20605,7 +20609,7 @@ mod tests {
 
         assert_eq!(job.status, STATUS_BLOCKED);
         assert_eq!(job.route.len(), 1);
-        assert_eq!(job.route[0].route_kind, "blocked");
+        assert_eq!(job.route[0].route_kind, "blocked_no_attachment");
         assert!(!job.route[0].can_run);
         assert!(job.route[0]
             .blocked_reason
