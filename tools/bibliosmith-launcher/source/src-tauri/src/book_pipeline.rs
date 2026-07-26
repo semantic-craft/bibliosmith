@@ -348,6 +348,31 @@ pub struct BookPipelineChildJob {
     pub source_identity: Option<BookPipelineAttachmentIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_instructions: Option<BookPipelineCustomInstructions>,
+    #[serde(default)]
+    pub reader_evidence: Vec<BookPipelineReaderEvidence>,
+}
+
+/// The half of "validated in EPUBCheck **and a real reader**" that a machine
+/// cannot run. It is evidence, not a gate: nothing here blocks promotion, and a
+/// job with none is exactly as promotable as before.
+///
+/// The record names the artifact by kind and digest rather than by path, so it
+/// carries nothing about the user's disk, and `conclusion` is a closed set
+/// rather than free text so no private note can be typed into a durable,
+/// exportable record. `stale` is derived, never stored by the caller: rebuild
+/// the EPUB and the digest stops matching, so one reading session cannot vouch
+/// for every later version of the book.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BookPipelineReaderEvidence {
+    pub reader: String,
+    pub reader_version: String,
+    pub artifact_kind: String,
+    pub artifact_sha256: String,
+    pub conclusion: String,
+    pub recorded_at: String,
+    #[serde(default)]
+    pub stale: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
@@ -1533,6 +1558,7 @@ fn collection_child_from_route(
         local_project_root: None,
         source_identity: None,
         custom_instructions: None,
+        reader_evidence: Vec::new(),
     };
     if let Some(stage) = child
         .stages
@@ -1748,6 +1774,7 @@ fn legacy_child_from_job(job: &BookPipelineJob, legacy_status: &str) -> BookPipe
         local_project_root: None,
         source_identity: None,
         custom_instructions: None,
+        reader_evidence: Vec::new(),
     }
 }
 
@@ -1755,6 +1782,110 @@ fn derive_state(state: &mut BookPipelineState) {
     for job in &mut state.jobs {
         derive_job(job);
     }
+}
+
+/// Reader evidence is kept, never dropped — a re-run of `validate_reading` must
+/// not quietly erase what someone sat down and checked. What changes is whether
+/// it still applies: it does only while the digest it was taken against is still
+/// the artifact's digest.
+fn refresh_reader_evidence(child: &mut BookPipelineChildJob) {
+    if child.reader_evidence.is_empty() {
+        return;
+    }
+    let current = child
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.producer_stage.as_deref() == Some("build_reading"))
+        .filter_map(|artifact| {
+            artifact
+                .sha256
+                .as_deref()
+                .map(|sha256| (artifact.kind.clone(), sha256.to_string()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for evidence in &mut child.reader_evidence {
+        evidence.stale = current
+            .get(&evidence.artifact_kind)
+            .is_none_or(|sha256| *sha256 != evidence.artifact_sha256);
+    }
+}
+
+/// The reader artifacts a person can actually open. Markdown and HTML are not
+/// offered: "read it in Apple Books" is a claim about an EPUB.
+const READER_EVIDENCE_ARTIFACT_KINDS: [&str; 2] = ["reading_epub", "reading_bilingual_epub"];
+const READER_EVIDENCE_CONCLUSIONS: [&str; 2] = ["passed", "failed"];
+
+fn record_reader_evidence(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    artifact_kind: &str,
+    reader: &str,
+    reader_version: &str,
+    conclusion: &str,
+) -> Result<BookPipelineJob, String> {
+    let reader = reader.trim();
+    let reader_version = reader_version.trim();
+    if reader.is_empty() || reader_version.is_empty() {
+        return Err("Reader evidence needs both a reader name and a reader version.".into());
+    }
+    if !READER_EVIDENCE_ARTIFACT_KINDS.contains(&artifact_kind) {
+        return Err(format!(
+            "Reader evidence can only be recorded against {}.",
+            READER_EVIDENCE_ARTIFACT_KINDS.join(" or ")
+        ));
+    }
+    if !READER_EVIDENCE_CONCLUSIONS.contains(&conclusion) {
+        return Err(format!(
+            "Reader evidence conclusion must be {}.",
+            READER_EVIDENCE_CONCLUSIONS.join(" or ")
+        ));
+    }
+
+    let mut state = store.load()?;
+    let job_index = find_job_index(&state, job_id)?;
+    let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
+    let child = &mut state.jobs[job_index].children[child_index];
+    // Read the digest here rather than taking it from the caller: evidence that
+    // names a hash nobody verified would bind to nothing.
+    let artifact_sha256 = child
+        .artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.kind == artifact_kind
+                && artifact.producer_stage.as_deref() == Some("build_reading")
+        })
+        .and_then(|artifact| artifact.sha256.clone())
+        .ok_or_else(|| format!("This job has no built {artifact_kind} to record evidence for."))?;
+    let evidence = BookPipelineReaderEvidence {
+        reader: reader.to_string(),
+        reader_version: reader_version.to_string(),
+        artifact_kind: artifact_kind.to_string(),
+        artifact_sha256,
+        conclusion: conclusion.to_string(),
+        recorded_at: now_label(),
+        stale: false,
+    };
+    // One standing result per reader per artifact: re-reading the same book in
+    // the same app supersedes rather than piles up.
+    if let Some(existing) = child.reader_evidence.iter_mut().find(|candidate| {
+        candidate.reader == evidence.reader && candidate.artifact_kind == evidence.artifact_kind
+    }) {
+        *existing = evidence;
+    } else {
+        child.reader_evidence.push(evidence);
+    }
+
+    state.jobs[job_index].current_step = format!("Recorded {reader} reader evidence");
+    state.jobs[job_index].log_summary.push(format!(
+        "Reader evidence recorded: {reader} {reader_version} — {conclusion}"
+    ));
+    state.jobs[job_index].log_summary = trim_log_summary(&state.jobs[job_index].log_summary);
+    state.jobs[job_index].updated_at = now_label();
+    derive_job(&mut state.jobs[job_index]);
+    let job = state.jobs[job_index].clone();
+    store.save(&state)?;
+    Ok(job)
 }
 
 fn derive_job(job: &mut BookPipelineJob) {
@@ -1822,6 +1953,7 @@ fn derive_job_progress(job: &BookPipelineJob) -> BookPipelineProgress {
 }
 
 fn derive_child(child: &mut BookPipelineChildJob) {
+    refresh_reader_evidence(child);
     if let Some(stage) = child
         .stages
         .iter()
@@ -3685,6 +3817,29 @@ pub fn approve_book_pipeline_gate(
     )
 }
 
+/// Record that a person opened the built book in a real reader. Optional by
+/// design: never calling this leaves promotion exactly as it was.
+#[tauri::command]
+pub fn record_book_pipeline_reader_evidence(
+    job_id: String,
+    child_id: Option<String>,
+    artifact_kind: String,
+    reader: String,
+    reader_version: String,
+    conclusion: String,
+) -> Result<BookPipelineJob, String> {
+    let store = BookPipelineStore::default()?;
+    record_reader_evidence(
+        &store,
+        &job_id,
+        child_id.as_deref(),
+        &artifact_kind,
+        &reader,
+        &reader_version,
+        &conclusion,
+    )
+}
+
 #[tauri::command]
 pub fn run_book_pipeline_translation_sample(
     job_id: String,
@@ -4758,6 +4913,7 @@ fn collection_snapshot_child(
             reason: member.reason.clone(),
         }),
         custom_instructions: None,
+        reader_evidence: Vec::new(),
     };
     derive_child(&mut child);
     Some(child)
@@ -13697,10 +13853,39 @@ fn validated_reading_artifacts(
     Ok(artifacts)
 }
 
+/// One line per recorded reader, inside the generated section so the report tells
+/// the same story the job state does. A stale record is shown as stale rather
+/// than hidden: knowing someone checked an older build is worth more than a
+/// silent gap, which is what hand-writing these lines used to leave behind.
+fn reading_validation_reader_lines(evidence: &[BookPipelineReaderEvidence]) -> Vec<String> {
+    if evidence.is_empty() {
+        return vec!["- reader verification: not recorded".into()];
+    }
+    evidence
+        .iter()
+        .map(|record| {
+            let staleness = if record.stale {
+                " (stale: the artifact changed since)"
+            } else {
+                ""
+            };
+            format!(
+                "- reader verification: {} {} on {} — {} [sha256 {}]{staleness}",
+                record.reader,
+                record.reader_version,
+                record.artifact_kind,
+                record.conclusion,
+                record.artifact_sha256,
+            )
+        })
+        .collect()
+}
+
 fn write_reading_validation_status(
     project_root: &Path,
     summary: &EpubCheckSummary,
     passed: bool,
+    reader_evidence: &[BookPipelineReaderEvidence],
 ) -> Result<PathBuf, String> {
     let path = project_root.join("qa").join("status.md");
     let existing = fs::read_to_string(&path).unwrap_or_else(|_| "# QA Status\n".into());
@@ -13749,6 +13934,9 @@ fn write_reading_validation_status(
             "- EPUBCheck: fatal={}, error={}, warning={}",
             summary.n_fatal, summary.n_error, summary.n_warning
         ),
+    ]);
+    lines.extend(reading_validation_reader_lines(reader_evidence));
+    lines.extend([
         format!("- accepted residual risks: {residual_risk}"),
         READING_VALIDATION_STATUS_END.into(),
     ]);
@@ -13831,7 +14019,8 @@ fn run_validate_reading_stage(
             .push("No EPUB format selected; Markdown/HTML artifact validation passed".into());
     }
     let passed = aggregate.n_fatal == 0 && aggregate.n_error == 0;
-    let status_path = write_reading_validation_status(&project_root, &aggregate, passed)?;
+    let status_path =
+        write_reading_validation_status(&project_root, &aggregate, passed, &child.reader_evidence)?;
     let status_artifact = required_stage_artifact("qa_status", &status_path, "validate_reading")?;
     artifacts.push(status_artifact);
     let error = (!passed).then(|| {
@@ -23876,6 +24065,234 @@ mod tests {
             .unwrap()
             .approval_id
             .is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Drive the fake pipeline to a completed reading build so there is a real
+    /// EPUB artifact, with a real digest, to record evidence against.
+    fn completed_reading_job(
+        store: &BookPipelineStore,
+        repo: &Path,
+        executor: &ReadingPipelineFixtureExecutor,
+    ) -> (String, BookPipelineJob) {
+        let (job_id, waiting) = fake_job_waiting_for_expert_qa(store, repo, executor);
+        satisfy_qa_handoff(&waiting);
+        advance_job_with_executor(store, &job_id, None, false, executor).unwrap();
+        let ready = store
+            .load()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        approve_job_gate(
+            store,
+            &job_id,
+            Some(&ready.children[0].id),
+            "approve_promotion",
+            true,
+        )
+        .unwrap();
+        // promote, build_reading, validate_reading
+        for _ in 0..3 {
+            advance_job_with_executor(store, &job_id, None, false, executor).unwrap();
+        }
+        let completed = store
+            .load()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        (job_id, completed)
+    }
+
+    // Story 18's second half — "and a real reader" — had nowhere to land, so the
+    // only place to note it was qa/status.md, which validate_reading rewrites.
+    #[test]
+    fn reader_evidence_survives_revalidation_and_reaches_qa_status() {
+        let root = temp_root("reader-evidence-persists");
+        let repo = handoff_repo_fixture(&root);
+        let store = BookPipelineStore::for_test(&root);
+        let executor = ReadingPipelineFixtureExecutor::passing();
+        let (job_id, completed) = completed_reading_job(&store, &repo, &executor);
+        assert_eq!(
+            child_stage_status(&completed, "validate_reading"),
+            STATUS_COMPLETED
+        );
+        let project_root = child_project_root(&completed);
+        assert!(fs::read_to_string(project_root.join("qa/status.md"))
+            .unwrap()
+            .contains("- reader verification: not recorded"));
+
+        let recorded = record_reader_evidence(
+            &store,
+            &job_id,
+            Some(&completed.children[0].id),
+            "reading_epub",
+            "Apple Books",
+            "7.2",
+            "passed",
+        )
+        .unwrap();
+
+        let evidence = &recorded.children[0].reader_evidence;
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].reader, "Apple Books");
+        assert_eq!(evidence[0].conclusion, "passed");
+        assert!(!evidence[0].stale);
+        let epub_sha256 = recorded.children[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "reading_epub")
+            .and_then(|artifact| artifact.sha256.clone())
+            .unwrap();
+        assert_eq!(evidence[0].artifact_sha256, epub_sha256);
+
+        // The record carries the artifact's identity, never its location.
+        let payload = serde_json::to_string(&evidence[0]).unwrap();
+        assert!(!payload.contains(&display_path(&project_root)), "{payload}");
+        assert!(!payload.contains('/'), "{payload}");
+
+        // Re-running validate_reading must not quietly erase it, and the report
+        // it regenerates now says the same thing the job state does.
+        run_validate_reading_stage(&recorded, &recorded.children[0], &executor).unwrap();
+        let revalidated = store
+            .load()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+
+        assert_eq!(revalidated.children[0].reader_evidence, *evidence);
+        let qa_status = fs::read_to_string(project_root.join("qa/status.md")).unwrap();
+        assert!(
+            qa_status.contains("- reader verification: Apple Books 7.2 on reading_epub — passed"),
+            "{qa_status}"
+        );
+        assert!(qa_status.contains(&epub_sha256), "{qa_status}");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // One reading session must not vouch for every later build of the book.
+    #[test]
+    fn rebuilding_the_epub_makes_reader_evidence_stale() {
+        let root = temp_root("reader-evidence-stale");
+        let repo = handoff_repo_fixture(&root);
+        let store = BookPipelineStore::for_test(&root);
+        let executor = ReadingPipelineFixtureExecutor::passing();
+        let (job_id, completed) = completed_reading_job(&store, &repo, &executor);
+        let child_id = completed.children[0].id.clone();
+        let recorded = record_reader_evidence(
+            &store,
+            &job_id,
+            Some(&child_id),
+            "reading_epub",
+            "Calibre",
+            "8.4",
+            "passed",
+        )
+        .unwrap();
+        assert!(!recorded.children[0].reader_evidence[0].stale);
+
+        // Rebuild the EPUB: same artifact, different bytes. The evidence still
+        // describes what someone read, but no longer describes what is built.
+        let mut state = store.load().unwrap();
+        let job_index = find_job_index(&state, &job_id).unwrap();
+        let artifact = state.jobs[job_index].children[0]
+            .artifacts
+            .iter_mut()
+            .find(|artifact| artifact.kind == "reading_epub")
+            .unwrap();
+        let epub_path = PathBuf::from(&artifact.path);
+        fs::write(&epub_path, "rebuilt epub bytes").unwrap();
+        let rebuilt_sha256 = sha256_file(&epub_path).unwrap();
+        artifact.artifact_id = format!(
+            "artifact-{}",
+            sha256_str(&format!(
+                "{}\0{}\0{}",
+                artifact.kind, artifact.path, rebuilt_sha256
+            ))
+        );
+        artifact.sha256 = Some(rebuilt_sha256);
+        artifact.size_bytes = Some(fs::metadata(&epub_path).unwrap().len());
+        derive_job(&mut state.jobs[job_index]);
+        let rebuilt = state.jobs[job_index].clone();
+        store.save(&state).unwrap();
+
+        assert_eq!(rebuilt.children[0].reader_evidence.len(), 1);
+        assert!(
+            rebuilt.children[0].reader_evidence[0].stale,
+            "evidence must not survive the artifact it was taken against"
+        );
+        assert_eq!(rebuilt.children[0].reader_evidence[0].reader, "Calibre");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reader_evidence_is_optional_and_validated() {
+        let root = temp_root("reader-evidence-optional");
+        let repo = handoff_repo_fixture(&root);
+        let store = BookPipelineStore::for_test(&root);
+        let executor = ReadingPipelineFixtureExecutor::passing();
+        let (job_id, completed) = completed_reading_job(&store, &repo, &executor);
+        let child_id = completed.children[0].id.clone();
+
+        // Promotion already happened, and validation already completed, with no
+        // reader evidence anywhere: recording it is not a precondition of either.
+        assert_eq!(completed.status, STATUS_COMPLETED);
+        assert!(completed.children[0].reader_evidence.is_empty());
+        assert_eq!(
+            child_stage_status(&completed, "approve_promotion"),
+            STATUS_COMPLETED
+        );
+
+        for (kind, reader, version, conclusion) in [
+            ("reading_markdown", "Apple Books", "7.2", "passed"),
+            ("reading_epub", "", "7.2", "passed"),
+            ("reading_epub", "Apple Books", "7.2", "looked fine to me"),
+        ] {
+            assert!(
+                record_reader_evidence(
+                    &store,
+                    &job_id,
+                    Some(&child_id),
+                    kind,
+                    reader,
+                    version,
+                    conclusion,
+                )
+                .is_err(),
+                "{kind}/{reader}/{conclusion} should be rejected"
+            );
+        }
+
+        // Re-reading the same book in the same app supersedes rather than piles up.
+        for conclusion in ["passed", "failed"] {
+            record_reader_evidence(
+                &store,
+                &job_id,
+                Some(&child_id),
+                "reading_epub",
+                "Thorium",
+                "3.1",
+                conclusion,
+            )
+            .unwrap();
+        }
+        let stored = store
+            .load()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        assert_eq!(stored.children[0].reader_evidence.len(), 1);
+        assert_eq!(stored.children[0].reader_evidence[0].conclusion, "failed");
+
         let _ = fs::remove_dir_all(root);
     }
 

@@ -6058,6 +6058,7 @@ pub fn run() {
             book_pipeline::delete_book_pipeline_job,
             book_pipeline::advance_book_pipeline_job,
             book_pipeline::approve_book_pipeline_gate,
+            book_pipeline::record_book_pipeline_reader_evidence,
             book_pipeline::run_book_pipeline_translation_sample,
             book_pipeline::choose_book_pipeline_pdf_folder,
             book_pipeline::choose_book_pipeline_markdown_source,
