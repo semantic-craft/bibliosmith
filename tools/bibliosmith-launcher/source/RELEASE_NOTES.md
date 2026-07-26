@@ -11,6 +11,7 @@
 - **门禁样本对照两处改进。** 模型下拉按槽位列全 8 项（Qwen 与 MiMo 各有两种计费方式，第二个槽此前根本选不到，只能靠旁边的自由文本框硬敲），旁边那个文本框随之删除；跑一次样本不再无条件把整本书的正式模型改写成样本用的那个——「试一下再决定」不该替你做决定，采纳改由明确的「以此模型翻译本书」按钮完成。样张模型与全书正式模型不一致时卡片里会红字标出。
 - **诊断包可以从应用里导出了。** 书籍抽屉的「高级详情」新增导出一节，三档脱敏可选，写盘后回报路径。默认档 public-issue 只含阶段、状态与错误代码，没有错误摘要、没有工件清单、没有任何路径，可以直接贴进公开 issue。
 - **阅读器实测证据可以留底了。** 子作业新增记录：阅读器名称、版本、结论，以及被检产物的类型与 SHA-256。此前这类记录只能手写进 qa/status.md，而校验阶段每次重跑都会重写生成区并把它静默抹掉。
+- **阶段失败后会按上限自动重试。** 此前编排层压根没有自动重试，而阶段列表却对每一次失败都无条件标着「可重试」，等于承诺了一个不存在的能力。现在可重试的失败会显示剩余次数与下次重试的倒计时，只重跑失败的那一个阶段；预算耗尽或本就不可重试时给出明确的放弃原因并停住。手动点推进仍然只得一次尝试，不会额外触发自动阶梯。
 
 ### 修复
 
@@ -45,6 +46,7 @@ The last public release was 1.12.0 (2026-07-20). This is the first release cut a
 - **Two improvements to the gate sample.** The model dropdown now lists all eight slots (Qwen and MiMo each have two billing arrangements, and the second slot could not be picked at all — it had to be typed into a free-text box beside it, which is now gone). And running a sample no longer rewrites the book's real provider to whatever the sample used: "try it before deciding" should not decide for you, so adopting is now an explicit "translate this book with this model" button. When the sample's model differs from the book's real one, the card says so in red.
 - **The diagnostic bundle has a way out of the app.** The book drawer's advanced details gain an export section with three redaction profiles, reporting the path it wrote. The default public-issue profile carries only stages, statuses and error codes — no error summaries, no artifact listings, no paths — so it can be pasted into a public issue as-is.
 - **Reader-device evidence can be recorded against a built book**: reader name, version, verdict, and the checked artifact's kind and SHA-256. Until now such a record could only be hand-written into qa/status.md, where the validation stage silently overwrote it on every re-run.
+- **A failed stage is retried automatically, up to a budget.** The orchestrator had no automatic retry at all, while the stage list labelled every failure "retryable" regardless — promising a capability that did not exist. A retryable failure now shows the attempts left and a countdown to the next one, and re-runs only the stage that failed; when the budget is spent, or the failure was never retryable, it stops with an explicit reason for giving up. Advancing by hand still buys exactly one attempt and cannot start an automatic ladder.
 
 ### Fixed
 
@@ -79,6 +81,7 @@ The last public release was 1.12.0 (2026-07-20). This is the first release cut a
 - **ゲート用サンプルの 2 点を改善しました。** モデルの選択欄が 8 スロットすべてを列挙します（Qwen と MiMo は課金方式が 2 つあり、2 つ目のスロットはこれまで選択できず、隣の自由入力欄に手で書くしかありませんでした。その入力欄は削除しました）。またサンプルの実行が、その書籍の正式なプロバイダーをサンプル用のものへ無条件に書き換えることはなくなりました。「試してから決める」操作が代わりに決めてしまうべきではないためで、採用は「このモデルで本書を翻訳する」ボタンによる明示的な操作になりました。サンプルのモデルが本書の正式なモデルと異なる場合は、カード上に赤字で示されます。
 - **診断バンドルをアプリから書き出せるようになりました。** 書籍ドロワーの詳細情報に書き出しの節を追加し、3 段階の秘匿レベルを選べます。書き出し後はパスを表示します。既定の public-issue は、ステージ・状態・エラーコードのみを含み、エラーの要約も成果物の一覧もパスも持たないため、そのまま公開 issue に貼れます。
 - **リーダー実機での確認結果を記録できるようになりました。** リーダー名、バージョン、判定に加え、検査した成果物の種別と SHA-256 を残します。これまでは qa/status.md に手書きするしかなく、検証ステージの再実行のたびに生成領域が書き直されて静かに消えていました。
+- **失敗したステージを上限付きで自動再試行するようになりました。** これまでオーケストレーション側に自動再試行は一切なく、それでいてステージ一覧はすべての失敗に「再試行可能」と表示しており、存在しない機能を約束していました。再試行可能な失敗では残り回数と次回までのカウントダウンを表示し、失敗したステージだけを再実行します。予算を使い切った場合や、そもそも再試行できない failure の場合は、断念の理由を明示して停止します。手動での前進は従来どおり 1 回の試行のみで、自動的な再試行の連鎖は始まりません。
 
 ### 修正
 
