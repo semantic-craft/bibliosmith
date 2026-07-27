@@ -237,12 +237,12 @@ export default function App() {
   const [biblioSmithRetryMode, setBiblioSmithRetryMode] = useState<"prepare" | "sync">("sync");
   const [showAllCommitsState, setShowAllCommits] = useState(true);
   const repoRoot = state?.repoRoot ?? "";
-  const projectReady = Boolean(state?.repoReady);
-  const biblioSmithUpdate = projectReady ? biblioSmithUpdateState : null;
+  const repoReady = Boolean(state?.repoReady);
+  const biblioSmithUpdate = repoReady ? biblioSmithUpdateState : null;
   const tutorialDoc =
-    projectReady && tutorialDocState?.repoRoot === repoRoot ? tutorialDocState.document : null;
-  const tutorialLoading = projectReady && tutorialLoadingState;
-  const showAllCommits = projectReady ? showAllCommitsState : true;
+    repoReady && tutorialDocState?.repoRoot === repoRoot ? tutorialDocState.document : null;
+  const tutorialLoading = repoReady && tutorialLoadingState;
+  const showAllCommits = repoReady ? showAllCommitsState : true;
   const setTutorialDoc = useCallback(
     (document: ProjectDocument | null) => {
       setTutorialDocState(document ? { repoRoot, document } : null);
@@ -1715,7 +1715,7 @@ export default function App() {
   // loader's state updates out of this render, and the ref stops a second read
   // from starting while the first is still in flight.
   useEffect(() => {
-    if (!projectReady || activeTab !== "tutorial" || tutorialDoc || tutorialAutoLoadRef.current) {
+    if (!repoReady || activeTab !== "tutorial" || tutorialDoc || tutorialAutoLoadRef.current) {
       return;
     }
     tutorialAutoLoadRef.current = true;
@@ -1724,7 +1724,7 @@ export default function App() {
       .finally(() => {
         tutorialAutoLoadRef.current = false;
       });
-  }, [activeTab, loadTutorial, projectReady, tutorialDoc, tutorialKind]);
+  }, [activeTab, loadTutorial, repoReady, tutorialDoc, tutorialKind]);
 
   useEffect(() => {
     return () => {
@@ -1737,7 +1737,6 @@ export default function App() {
   const commits = biblioSmithUpdate?.commits ?? [];
   const displayedCommits = showAllCommits ? commits : commits.slice(0, 1);
   const firstCommit = commits[0];
-  const repoReady = Boolean(state?.repoReady);
   const repoStatus = state?.repoStatus ?? "missing";
   // Only empty when the launcher state could not be read at all, so there is no
   // path to name. It used to fall back to a Windows path, which Settings and the
