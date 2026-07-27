@@ -4110,6 +4110,14 @@ pub async fn set_book_pipeline_translation_provider(
     .await
 }
 
+/// Synchronous by convention, not by necessity. rfd's blocking pickers wrap
+/// their whole body in `run_on_main`, which dispatches to the main thread when
+/// they are called from anywhere else, so calling one from a worker is
+/// supported — see `save_book_pipeline_diagnostic`, which does exactly that.
+/// What is left here is a trade rather than a rule: these two commands are a
+/// dialog plus a few lines of struct building, so taking them off the main
+/// thread would buy nothing worth the divergence. Anything with real work
+/// around the dialog should go async instead.
 #[tauri::command]
 pub fn choose_book_pipeline_pdf_folder() -> Result<Option<BookPipelineSource>, String> {
     let Some(folder) = rfd::FileDialog::new()
@@ -4309,6 +4317,13 @@ pub async fn export_book_pipeline_diagnostic(
 /// The same three profiles, written to a folder the user picks, because a
 /// diagnostic bundle is only useful if it can be attached to a report. The
 /// command above returns the value in-process and stays as it is.
+///
+/// Deliberately async, dialog included: rfd's blocking `pick_folder` runs its
+/// body inside `run_on_main`, so calling it from this worker dispatches the
+/// panel to the main thread and hands the result back. Only the panel itself
+/// needs that thread — loading the store, building the document and writing the
+/// bundle all stay off it. Do not "fix" this back to a synchronous `fn`; that
+/// would put the file work back on the main thread to no end.
 #[tauri::command]
 pub async fn save_book_pipeline_diagnostic(
     job_id: String,
