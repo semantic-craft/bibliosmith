@@ -269,7 +269,24 @@ export type BookPipelineChildJob = {
   lastError?: string | null;
   localProjectRoot?: string | null;
   customInstructions?: BookPipelineCustomInstructions | null;
+  readerEvidence?: BookPipelineReaderEvidence[];
 };
+
+/// A person opened the built book in a real reader and said what happened. The
+/// backend fills `stale` by comparing the digest against the artifact as built,
+/// so evidence taken against an older build is shown, not silently trusted.
+export type BookPipelineReaderEvidence = {
+  reader: string;
+  readerVersion: string;
+  artifactKind: string;
+  artifactSha256: string;
+  conclusion: string;
+  recordedAt: string;
+  stale?: boolean;
+};
+
+export const READER_EVIDENCE_ARTIFACT_KINDS = ["reading_epub", "reading_bilingual_epub"] as const;
+export const READER_EVIDENCE_CONCLUSIONS = ["passed", "failed"] as const;
 
 export type BookPipelineNavigationTarget = {
   targetId: string;

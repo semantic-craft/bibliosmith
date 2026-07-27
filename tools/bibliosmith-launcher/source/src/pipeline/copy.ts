@@ -285,6 +285,24 @@ export function pipelineCopy(locale: PipelineLocale) {
     stageFinishedLabel: zh ? "完成于" : "Finished",
 
     // Artifacts tab
+    // Story 18's other half: EPUBCheck says the file is well-formed, a person
+    // says it actually reads. Only the second half needs a human to record it.
+    readerEvidenceTitle: zh ? "阅读器实测" : "Reader verification",
+    readerEvidenceHint: zh
+      ? "在真实阅读器里打开成品 EPUB 后，把结论记在这里。可选 —— 不记不影响晋升。记录会绑定当时的产物摘要，重新构建后自动标记为失效。"
+      : "After opening the built EPUB in a real reader, record what happened. Optional — leaving it blank blocks nothing. The record binds the artifact digest it was taken against and is marked stale once the book is rebuilt.",
+    readerEvidenceEmpty: zh ? "尚未记录任何阅读器实测。" : "No reader verification recorded yet.",
+    readerEvidenceName: zh ? "阅读器" : "Reader",
+    readerEvidenceVersion: zh ? "版本" : "Version",
+    readerEvidenceArtifact: zh ? "被检产物" : "Artifact",
+    readerEvidenceConclusion: zh ? "结论" : "Conclusion",
+    readerEvidenceRecord: zh ? "记录" : "Record",
+    readerEvidencePassed: zh ? "通过" : "passed",
+    readerEvidenceFailed: zh ? "未通过" : "failed",
+    readerEvidenceStale: zh ? "已失效（产物已变更）" : "stale (the artifact changed)",
+    readerEvidenceNeedsBuild: zh
+      ? "需要先构建出成品 EPUB 才能记录实测。"
+      : "A built EPUB is needed before reader verification can be recorded.",
     thArtifact: zh ? "工件" : "Artifact",
     thPath: zh ? "路径 / 位置" : "Path / location",
     thSha: zh ? "SHA-256" : "SHA-256",

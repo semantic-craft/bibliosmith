@@ -787,3 +787,21 @@
 }
 .pl-empty h3 { margin: 0; color: var(--ink); font-size: 15px; }
 .pl-empty p { margin: 0; max-width: 420px; font-size: 12.5px; }
+
+/* Reader verification: a short record list plus the form that adds to it. The
+   rows reuse .pl-evi-row, but the value may wrap here — a stale note makes the
+   line longer than the single-line ellipsis elsewhere assumes. */
+.pl-reader-evi { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.pl-reader-evi .pl-evi-row .pl-v { overflow: visible; text-overflow: clip; white-space: normal; }
+.pl-evi-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 8px; }
+.pl-evi-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.pl-evi-form input,
+.pl-evi-form select {
+  min-width: 120px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 12px;
+}

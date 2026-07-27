@@ -1185,6 +1185,25 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
   return invoke<BookPipelineJob>("approve_book_pipeline_gate", { jobId, childId, stageId, explicitApproval: true });
 }
 
+/** Record that a person opened the built book in a real reader. */
+export async function recordBookPipelineReaderEvidence(
+  jobId: string,
+  childId: string,
+  artifactKind: string,
+  reader: string,
+  readerVersion: string,
+  conclusion: string,
+): Promise<BookPipelineJob> {
+  return invoke<BookPipelineJob>("record_book_pipeline_reader_evidence", {
+    jobId,
+    childId,
+    artifactKind,
+    reader,
+    readerVersion,
+    conclusion,
+  });
+}
+
 /** Re-route a book the pipeline held back, without deleting and re-queueing it. */
 export async function setBookPipelineRouteOverride(
   jobId: string,

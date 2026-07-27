@@ -24,6 +24,7 @@ export type PipelineBusy =
   | "gateApproval"
   | "customInstructions"
   | "routeOverride"
+  | "readerEvidence"
   | "folder"
   | "markdown"
   | "zotero"
