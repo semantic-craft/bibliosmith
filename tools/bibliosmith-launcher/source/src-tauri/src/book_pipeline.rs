@@ -19,72 +19,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const STATUS_ROUTED: &str = "routed";
-const STATUS_PENDING: &str = "pending";
-const STATUS_READY: &str = "ready";
-const STATUS_RUNNING: &str = "running";
-const STATUS_WAITING_FOR_APPROVAL: &str = "waiting_for_approval";
-const STATUS_COMPLETED: &str = "completed";
-const STATUS_FAILED: &str = "failed";
-const STATUS_BLOCKED: &str = "blocked";
-const STATUS_PARTIAL: &str = "partial";
-const STATUS_SKIPPED: &str = "skipped";
-const STATUS_HANDOFF_RUNNING: &str = "handoff_running";
-const STATUS_TRANSLATION_READY: &str = "translation_ready";
-const MODE_CONVERT_THEN_TRANSLATE: &str = "convert_then_translate";
-const MODE_TRANSLATE_ONLY: &str = "translate_only";
-const TRANSLATION_MODE_FAST: &str = "fast";
-const TRANSLATION_MODE_EXPERT: &str = "expert";
-const STATE_SCHEMA_VERSION: &str = "book-pipeline-state-v5";
-const JOB_SCHEMA_VERSION: &str = "book-pipeline-job-v5";
-const TERMINAL_EVENT_SCHEMA_VERSION: &str = "book-pipeline-terminal-event-v1";
-const ITEM_INDEX_CONTRACT_VERSION: &str = "zfulltext-item-index-v1";
-const CHUNK_CONTRACT_VERSION: &str = "zfulltext-chunk-v1";
-const ITEM_INDEX_COMMAND_LABEL: &str = "Zotero item-scoped full-text index";
-const ITEM_INDEX_PROFILE_COMMAND_LABEL: &str = "Zotero item index profile";
-const ZOTERO_COLLECTION_SNAPSHOT_COMMAND_LABEL: &str = "Zotero collection snapshot";
-const ZOTERO_COLLECTION_SNAPSHOT_SCHEMA: &str = "zotero-collection-snapshot-v1";
-const ZOTERO_CONVERSION_COMMAND_LABEL: &str = "Zotero conversion worker";
-const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_SCHEMA: &str = "zotero-worker-attachment-evidence-v1";
-const ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION: &str = "zotero-worker-extraction-v1";
-const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_MARKER: &str = "BOOK_PIPELINE_ATTACHMENT_EVIDENCE ";
-const MIGRATED_INTERRUPTED_OWNER: &str = "migrated-interrupted";
-const SPLIT_POLICY_VERSION: &str = "split-policy-v1";
-const TASK_POLICY_VERSION: &str = "task-policy-v1";
-const SOURCE_MAP_SCHEMA: &str = "local-reading-source-map-v1";
-const CHAPTER_CONTROL_SCHEMA: &str = "local-reading-chapter-control-v1";
-const TRANSLATION_TASK_SCHEMA: &str = "local-reading-translation-task-v1";
-const TRANSLATION_ENGINE_RUN_SCHEMA: &str = "translation-engine-run-v1";
-const TRANSLATION_ENGINE_REPORT_SCHEMA: &str = "translation-engine-report-v1";
-const TRANSLATION_ENGINE_COMMAND_LABEL: &str = "translation engine";
-const TRANSLATION_ENGINE_SAMPLE_SCHEMA: &str = "translation-engine-sample-v1";
-const TRANSLATION_ENGINE_SAMPLE_REPORT_SCHEMA: &str = "translation-engine-sample-report-v1";
-const TRANSLATION_ENGINE_SAMPLE_COMMAND_LABEL: &str = "translation engine sample";
-const TRANSLATION_SAMPLE_COUNT: usize = 3;
-const TRANSLATION_SAMPLE_CHARACTER_BUDGET: usize = 800;
-const TRANSLATION_POLICY_VERSION: &str = "translation-policy-v6";
-const TRANSLATION_ENGINE_MAX_TOKENS: u32 = 2_048;
-const TRANSLATION_ENGINE_PLACEHOLDER_RETRIES: u32 = 1;
-const TRANSLATION_HANDOFF_SCHEMA: &str = "local-reading-translation-handoff-v1";
-const EXPERT_QA_HANDOFF_SCHEMA: &str = "local-reading-expert-qa-handoff-v1";
-const EXPERT_QA_POLICY_VERSION: &str = "expert-qa-policy-v1";
-const EXPERT_QA_FAST_RANDOM_SAMPLE_SIZE: usize = 1;
-const EXPERT_QA_AGENT_PROFILE_ID: &str = "external-expert-qa";
-const EXPERT_QA_SKILL_ID: &str = "expert-translation-quality";
-const PROMOTION_MANIFEST_SCHEMA: &str = "local-reading-promotion-manifest-v1";
-const READING_BUILD_COMMAND_LABEL: &str = "reading output builder";
-const BILINGUAL_BUILD_COMMAND_LABEL: &str = "bilingual reading output builder";
-const EPUBCHECK_COMMAND_LABEL: &str = "EPUBCheck";
-const DIGEST_BUILD_COMMAND_LABEL: &str = "BiblioSmith Digest";
-const OUTPUT_FORMAT_MD: &str = "md";
-const OUTPUT_FORMAT_HTML: &str = "html";
-const OUTPUT_FORMAT_EPUB: &str = "epub";
-const OUTPUT_FORMAT_BILINGUAL: &str = "bilingual";
-const READING_VALIDATION_STATUS_START: &str = "<!-- book-pipeline:reading-validation:start -->";
-const READING_VALIDATION_STATUS_END: &str = "<!-- book-pipeline:reading-validation:end -->";
-const AGENT_EXECUTION_OWNER_PREFIX: &str = "agent:";
-const SPLIT_BLOCKED_ERROR: &str = "source_changed_downstream_exists";
-const MAX_CUSTOM_INSTRUCTION_CHARACTERS: usize = 2000;
+mod contract;
+
+pub(crate) use contract::*;
 
 fn default_output_formats() -> Vec<String> {
     [OUTPUT_FORMAT_MD, OUTPUT_FORMAT_HTML, OUTPUT_FORMAT_EPUB]
