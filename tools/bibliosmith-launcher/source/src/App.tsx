@@ -121,6 +121,9 @@ const defaultSettings: LauncherSettings = {
   saveLogsToLocal: true,
 };
 
+// A guide document is only valid for the project root it was read from.
+type TutorialDocState = { repoRoot: string; document: ProjectDocument };
+
 function upsertPipelineJob(state: BookPipelineState, job: BookPipelineJob): BookPipelineState {
   const existing = state.jobs.filter((item) => item.id !== job.id);
   return { ...state, revision: state.revision + 1, jobs: [job, ...existing] };
@@ -192,11 +195,17 @@ export default function App() {
   const bookPipelineCopy = useMemo(() => pipelineCopy(locale), [locale]);
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [state, setState] = useState<LauncherState | null>(null);
-  const [biblioSmithUpdate, setBiblioSmithUpdate] = useState<BiblioSmithUpdateInfo | null>(null);
+  // Everything below that only makes sense for a ready project is filtered
+  // during render rather than nulled out by an effect. The effects that used to
+  // do it ran a render late, so one frame still showed the previous project's
+  // guide document and commit list.
+  const [biblioSmithUpdateState, setBiblioSmithUpdate] = useState<BiblioSmithUpdateInfo | null>(null);
   const [tutorialKind, setTutorialKind] = useState<TutorialKind>("howto");
-  const [tutorialDoc, setTutorialDoc] = useState<ProjectDocument | null>(null);
+  // The cached guide document is tagged with the project root it was read from,
+  // so switching projects invalidates it without a reset effect.
+  const [tutorialDocState, setTutorialDocState] = useState<TutorialDocState | null>(null);
   const [tutorialHistory, setTutorialHistory] = useState<TutorialHistoryEntry[]>([]);
-  const [tutorialLoading, setTutorialLoading] = useState(false);
+  const [tutorialLoadingState, setTutorialLoading] = useState(false);
   const [settings, setSettings] = useState<LauncherSettings>(loadSettings);
   const [diagnosticLogSettings, setDiagnosticLogSettings] = useState<DiagnosticLogSettings | null>(null);
   const [proxySettings, setProxySettings] = useState<NetworkProxySettings>({
@@ -226,7 +235,20 @@ export default function App() {
   const [biblioSmithDownloadMessage, setBiblioSmithDownloadMessage] = useState<string | null>(null);
   const [biblioSmithDownloadDismissed, setBiblioSmithDownloadDismissed] = useState(false);
   const [biblioSmithRetryMode, setBiblioSmithRetryMode] = useState<"prepare" | "sync">("sync");
-  const [showAllCommits, setShowAllCommits] = useState(true);
+  const [showAllCommitsState, setShowAllCommits] = useState(true);
+  const repoRoot = state?.repoRoot ?? "";
+  const projectReady = Boolean(state?.repoReady);
+  const biblioSmithUpdate = projectReady ? biblioSmithUpdateState : null;
+  const tutorialDoc =
+    projectReady && tutorialDocState?.repoRoot === repoRoot ? tutorialDocState.document : null;
+  const tutorialLoading = projectReady && tutorialLoadingState;
+  const showAllCommits = projectReady ? showAllCommitsState : true;
+  const setTutorialDoc = useCallback(
+    (document: ProjectDocument | null) => {
+      setTutorialDocState(document ? { repoRoot, document } : null);
+    },
+    [repoRoot],
+  );
   const [quickActionsOpen, setQuickActionsOpen] = useState(false);
   const [floatingToast, setFloatingToast] = useState<FloatingToast | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
@@ -272,7 +294,7 @@ export default function App() {
   const [pipelinePreview, setPipelinePreview] = useState<BookPipelineRouteItem[]>([]);
   const [pipelineRouteOverrides, setPipelineRouteOverrides] = useState<Record<string, RouteOverride>>({});
   const [pipelineZoteroSources, setPipelineZoteroSources] = useState<BookPipelineSource[]>([]);
-  const [pipelineBusy, setPipelineBusy] = useState<PipelineBusy>(null);
+  const [pipelineBusy, setPipelineBusy] = useState<PipelineBusy>("loading");
   const [activities, setActivities] = useState<ActivityItem[]>([
     { id: "welcome", time: nowLabel(), level: "info", message: copy.welcome },
   ]);
@@ -284,6 +306,7 @@ export default function App() {
   const biblioSmithDownloadDismissedRef = useRef(false);
   const nodeModulesAutoStartRef = useRef(false);
   const startupInitializedRef = useRef(false);
+  const tutorialAutoLoadRef = useRef(false);
   const floatingToastTimer = useRef<number | null>(null);
 
   const addActivity = useCallback((level: ActivityItem["level"], message: string) => {
@@ -375,21 +398,12 @@ export default function App() {
     };
   }, [pipelineDraft, pipelineZoteroSources]);
 
-  const refreshBookPipelineState = useCallback(async () => {
-    setPipelineBusy((current) => current ?? "loading");
-    try {
-      setPipelineState(await getBookPipelineState());
-    } catch (error) {
-      addActivity("warning", String(error));
-    } finally {
-      setPipelineBusy((current) => (current === "loading" ? null : current));
-    }
-  }, [addActivity]);
-
-  const previewPipeline = useCallback(async () => {
+  // `configOverride` lets the override click preview the map it is about to
+  // commit; without it the preview would run against the pre-click config.
+  const previewPipeline = useCallback(async (configOverride?: BookPipelinePreviewConfig) => {
     setPipelineBusy("preview");
     try {
-      const route = await previewBookPipelineRoute(buildPipelineSource(), pipelineDraft.mode, pipelineConfig);
+      const route = await previewBookPipelineRoute(buildPipelineSource(), pipelineDraft.mode, configOverride ?? pipelineConfig);
       setPipelinePreview(route);
       addActivity("info", `Book Pipeline route preview: ${route.length} item(s)`);
       showFloatingToast(`Book Pipeline route preview: ${route.length} item(s)`, "success");
@@ -402,23 +416,19 @@ export default function App() {
     }
   }, [addActivity, buildPipelineSource, pipelineConfig, pipelineDraft.mode, showFloatingToast]);
 
+  // Re-previewing belongs to the click, not to an effect watching the override
+  // map: the route chips and the launch counts must show the backend's
+  // decision rather than a client-side guess, and the click already knows the
+  // map it is about to commit.
   const changePipelineRouteOverride = useCallback((routeItemId: string, override: RouteOverride) => {
-    setPipelineRouteOverrides((current) => {
-      const next = { ...current };
-      if (override === "auto") delete next[routeItemId];
-      else next[routeItemId] = override;
-      return next;
-    });
-  }, []);
-
-  // Re-preview whenever an override changes so the route chips and the launch
-  // counts reflect the backend's decision rather than a client-side guess.
-  const routeOverrideSignature = JSON.stringify(pipelineRouteOverrides);
-  useEffect(() => {
-    if (pipelinePreview.length === 0) return;
-    void previewPipeline();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeOverrideSignature]);
+    const next = { ...pipelineRouteOverrides };
+    if (override === "auto") delete next[routeItemId];
+    else next[routeItemId] = override;
+    setPipelineRouteOverrides(next);
+    if (pipelinePreview.length > 0) {
+      void previewPipeline({ ...pipelineConfig, routeOverrides: next });
+    }
+  }, [pipelineConfig, pipelinePreview.length, pipelineRouteOverrides, previewPipeline]);
 
   const queueAndRunPipeline = useCallback(async (): Promise<boolean> => {
     setPipelineBusy("queue");
@@ -1085,7 +1095,7 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }, [addActivity, askConfirm, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, showFloatingToast, startBiblioSmithProgress]);
+  }, [addActivity, askConfirm, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, setTutorialDoc, showFloatingToast, startBiblioSmithProgress]);
 
   const doOpenRepoFolder = useCallback(async () => {
     try {
@@ -1269,7 +1279,7 @@ export default function App() {
     } finally {
       setTutorialLoading(false);
     }
-  }, [addActivity, copy, locale, showFloatingToast, state?.repoReady]);
+  }, [addActivity, copy, locale, setTutorialDoc, showFloatingToast, state?.repoReady]);
 
   const openTutorialLink = useCallback(async (href: string) => {
     if (!state?.repoReady) {
@@ -1291,17 +1301,17 @@ export default function App() {
     } finally {
       setTutorialLoading(false);
     }
-  }, [addActivity, copy, locale, showFloatingToast, state?.repoReady, tutorialDoc, tutorialKind]);
+  }, [addActivity, copy, locale, setTutorialDoc, showFloatingToast, state?.repoReady, tutorialDoc, tutorialKind]);
 
+  // The other two updates used to run inside the history updater, which React
+  // may call more than once; they belong outside it.
   const goBackTutorial = useCallback(() => {
-    setTutorialHistory((items) => {
-      const previous = items[items.length - 1];
-      if (!previous) return items;
-      setTutorialKind(previous.kind);
-      setTutorialDoc(previous.document);
-      return items.slice(0, -1);
-    });
-  }, []);
+    const previous = tutorialHistory[tutorialHistory.length - 1];
+    if (!previous) return;
+    setTutorialHistory((items) => items.slice(0, -1));
+    setTutorialKind(previous.kind);
+    setTutorialDoc(previous.document);
+  }, [setTutorialDoc, tutorialHistory]);
 
   const refreshAllStatus = useCallback(async () => {
     setActiveTab("updates");
@@ -1610,13 +1620,45 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [nodeModulesDownloadState, refreshNodeModulesStatus]);
 
+  // Both mount loads read their state in the promise continuation instead of
+  // calling the shared refreshers, whose first statement flips a busy flag
+  // synchronously. `pipelineBusy` starts at "loading" for the same reason.
   useEffect(() => {
-    void refreshDiagnosticLogSettings();
-  }, [refreshDiagnosticLogSettings]);
+    let cancelled = false;
+    void getDiagnosticLogSettings()
+      .then((info) => {
+        if (cancelled) return;
+        setDiagnosticLogSettings(info);
+        setSettings((current) => {
+          const next = { ...current, saveLogsToLocal: info.saveLogs };
+          saveSettings(next);
+          return next;
+        });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) addActivity("warning", copy.logSettingsLoadFailed(String(error)));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [addActivity, copy]);
 
   useEffect(() => {
-    void refreshBookPipelineState();
-  }, [refreshBookPipelineState]);
+    let cancelled = false;
+    void getBookPipelineState()
+      .then((next) => {
+        if (!cancelled) setPipelineState(next);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) addActivity("warning", String(error));
+      })
+      .finally(() => {
+        if (!cancelled) setPipelineBusy((current) => (current === "loading" ? null : current));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [addActivity]);
 
   useEffect(() => {
     if (pipelineBusy !== "run" && pipelineBusy !== "retry" && pipelineBusy !== "advance") return undefined;
@@ -1667,24 +1709,22 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The guide document is read from the project on disk, so the auto-load stays
+  // in an effect — it also has to fire when a project finishes preparing while
+  // the guide tab is already open. Dispatching through a microtask keeps the
+  // loader's state updates out of this render, and the ref stops a second read
+  // from starting while the first is still in flight.
   useEffect(() => {
-    if (activeTab === "tutorial" && state?.repoReady && !tutorialDoc && !tutorialLoading) {
-      void loadTutorial(tutorialKind);
+    if (!projectReady || activeTab !== "tutorial" || tutorialDoc || tutorialAutoLoadRef.current) {
+      return;
     }
-  }, [activeTab, loadTutorial, state?.repoReady, tutorialDoc, tutorialKind, tutorialLoading]);
-
-  useEffect(() => {
-    setTutorialDoc(null);
-  }, [state?.repoRoot]);
-
-  useEffect(() => {
-    if (!state?.repoReady) {
-      setTutorialDoc(null);
-      setTutorialLoading(false);
-      setBiblioSmithUpdate(null);
-      setShowAllCommits(true);
-    }
-  }, [state?.repoReady, state?.repoRoot, state?.repoStatus]);
+    tutorialAutoLoadRef.current = true;
+    void Promise.resolve()
+      .then(() => loadTutorial(tutorialKind))
+      .finally(() => {
+        tutorialAutoLoadRef.current = false;
+      });
+  }, [activeTab, loadTutorial, projectReady, tutorialDoc, tutorialKind]);
 
   useEffect(() => {
     return () => {

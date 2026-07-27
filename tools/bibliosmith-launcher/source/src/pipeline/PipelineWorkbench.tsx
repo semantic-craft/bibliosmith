@@ -122,6 +122,9 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
           />
           {selected && (
             <BookDrawer
+              // Remount per book: the drawer's local state (delete
+              // confirmation, provider picker, drafts) belongs to one book.
+              key={selected.key}
               copy={copy}
               units={units}
               unit={selected}

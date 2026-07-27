@@ -33,6 +33,19 @@ import { ArtifactsTab } from "./tabs/ArtifactsTab";
 import { ApprovalTab } from "./tabs/ApprovalTab";
 import { LogsTab } from "./tabs/LogsTab";
 
+// Identity tags. Each pairs a piece of local state with the thing it describes,
+// so a render can tell a stale value from a current one without an effect.
+type ProviderChoice = { basis: string; profileId: string; configId: string };
+type SampleReportState = { version: string; report: BookPipelineTranslationSampleReport };
+type SampleState = { id: string; text: string; truncated: boolean };
+
+// A saved instruction pair identifies one editor instance; NUL cannot appear in
+// either field, so it separates them unambiguously.
+function customInstructionsKey(unit: BookUnit) {
+  const saved = unit.child?.customInstructions;
+  return `${saved?.translation ?? ""}\u0000${saved?.reflection ?? ""}`;
+}
+
 export type BookDrawerProps = {
   copy: PipelineCopy;
   units: BookUnit[];
@@ -59,16 +72,14 @@ export type BookDrawerProps = {
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
 };
 
+// The draft starts from what is saved and diverges as the user types, so a new
+// saved value means a new editor: the caller keys this component on the saved
+// pair instead of an effect copying it back into local state.
 function CustomInstructionsEditor({ unit, copy, busy, onSaveCustomInstructions }: BookDrawerProps) {
   const savedTranslation = unit.child?.customInstructions?.translation ?? "";
   const savedReflection = unit.child?.customInstructions?.reflection ?? "";
   const [translation, setTranslation] = useState(savedTranslation);
   const [reflection, setReflection] = useState(savedReflection);
-
-  useEffect(() => {
-    setTranslation(savedTranslation);
-    setReflection(savedReflection);
-  }, [unit.key, savedTranslation, savedReflection]);
 
   const translationLength = Array.from(translation).length;
   const reflectionLength = Array.from(reflection).length;
@@ -210,25 +221,27 @@ function GateCard({
   // sample's provider from then on — running a sample no longer adopts it.
   const jobProfile = unit.job.translationProfileId || "openai-compatible";
   const jobConfig = unit.job.translationConfigId || providerDefaultConfig(jobProfile);
-  const [providerProfileId, setProviderProfileId] = useState(jobProfile);
-  const [providerConfigId, setProviderConfigId] = useState(jobConfig);
-  useEffect(() => {
-    const profile = unit.job.translationProfileId || "openai-compatible";
-    setProviderProfileId(profile);
-    setProviderConfigId(unit.job.translationConfigId || providerDefaultConfig(profile));
-  }, [unit.key, unit.job.translationConfigId, unit.job.translationProfileId]);
+  // The three pieces of state below each belong to one identity — the job's
+  // provider, one sample report, one excerpt — so each carries that identity
+  // and is filtered during render. They used to be reset by an effect, which
+  // left one frame showing the previous book's values.
+  const providerBasis = `${jobProfile}:${jobConfig}`;
+  const [providerChoice, setProviderChoice] = useState<ProviderChoice | null>(null);
+  const providerPicked = providerChoice?.basis === providerBasis ? providerChoice : null;
+  const providerProfileId = providerPicked?.profileId ?? jobProfile;
+  const providerConfigId = providerPicked?.configId ?? jobConfig;
   const providerDiffers = providerProfileId !== jobProfile || providerConfigId !== jobConfig;
 
-  const [sampleReport, setSampleReport] = useState<BookPipelineTranslationSampleReport | null>(null);
   const reportArtifact = canRunProviderSample ? translationSampleArtifact(unit) : null;
   const reportVersion = reportArtifact?.sha256 ?? reportArtifact?.artifactId ?? null;
+  const [sampleReportState, setSampleReport] = useState<SampleReportState | null>(null);
+  const sampleReport = sampleReportState?.version === reportVersion ? sampleReportState.report : null;
   useEffect(() => {
-    setSampleReport(null);
     if (!canRunProviderSample || !childId || !reportVersion) return undefined;
     let cancelled = false;
     readBookPipelineTranslationSample(unit.job.id, childId)
       .then((report) => {
-        if (!cancelled) setSampleReport(report);
+        if (!cancelled) setSampleReport({ version: reportVersion, report });
       })
       .catch(() => undefined);
     return () => {
@@ -238,16 +251,16 @@ function GateCard({
 
   // Best-effort sample of the content being confirmed; the card is fully
   // functional without one (preview mode, unreadable artifact, older jobs).
-  const [sample, setSample] = useState<{ text: string; truncated: boolean } | null>(null);
   const sampleId = sampleArtifact(unit, gate.stageId)?.artifactId ?? null;
+  const [sampleState, setSample] = useState<SampleState | null>(null);
+  const sample = sampleState?.id === sampleId ? sampleState : null;
   useEffect(() => {
-    setSample(null);
     if (!sampleId) return undefined;
     let cancelled = false;
     readBookPipelineArtifactExcerpt(unit.job.id, sampleId)
       .then((result) => {
         if (!cancelled && result.excerpt.trim()) {
-          setSample({ text: result.excerpt, truncated: result.truncated });
+          setSample({ id: sampleId, text: result.excerpt, truncated: result.truncated });
         }
       })
       .catch(() => undefined);
@@ -275,8 +288,7 @@ function GateCard({
                   disabled={busy === "sample"}
                   onChange={(event) => {
                     const [profile, config] = event.target.value.split(":");
-                    setProviderProfileId(profile);
-                    setProviderConfigId(config);
+                    setProviderChoice({ basis: providerBasis, profileId: profile, configId: config });
                   }}
                 >
                   {/* One option per slot, not per brand: Qwen and MiMo bill two
@@ -669,8 +681,9 @@ export function BookDrawer(props: BookDrawerProps) {
     const next = units[(index + offset + units.length) % units.length];
     onSelect(next.key);
   };
+  // `confirmingDelete` resets with the drawer: PipelineWorkbench keys this
+  // component on the selected book, so switching books remounts it.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  useEffect(() => setConfirmingDelete(false), [unit.key]);
   const gates = pendingGates(unit, copy);
   const bar = actionBar(props);
   return (
@@ -726,7 +739,7 @@ export function BookDrawer(props: BookDrawerProps) {
           </div>
           <FourStepStrip unit={unit} copy={copy} />
           {unit.job.mode !== "conversion_only" && unit.job.translationMode === "fast" && (
-            <CustomInstructionsEditor {...props} />
+            <CustomInstructionsEditor key={customInstructionsKey(unit)} {...props} />
           )}
           {gates.length > 0 ? (
             gates.map((gate) => (
