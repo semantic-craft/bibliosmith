@@ -487,10 +487,10 @@ export default function App() {
     }
   }, [addActivity, showFloatingToast]);
 
-  const deletePipeline = useCallback(async (jobId: string) => {
+  const deletePipeline = useCallback(async (jobId: string, childId?: string | null) => {
     setPipelineBusy("delete");
     try {
-      const state = await deleteBookPipelineJob(jobId);
+      const state = await deleteBookPipelineJob(jobId, childId);
       setPipelineState(state);
       addActivity("success", `Book Pipeline job deleted: ${jobId}`);
       showFloatingToast(bookPipelineCopy.deleteBookDone, "success");
@@ -1991,7 +1991,7 @@ export default function App() {
               onDiscoverZotero={() => void discoverPipelineZoteroSources()}
               onSearchZotero={(query) => void discoverZoteroByQuery(query)}
               onRetry={(jobId) => void retryPipeline(jobId)}
-              onDelete={(jobId) => void deletePipeline(jobId)}
+              onDelete={(jobId, childId) => void deletePipeline(jobId, childId)}
               onAdvance={(jobId, childId) => void advancePipeline(jobId, childId)}
               onSampleTranslation={(jobId, childId, providerProfileId, providerConfigId) =>
                 void samplePipelineTranslation(jobId, childId, providerProfileId, providerConfigId)

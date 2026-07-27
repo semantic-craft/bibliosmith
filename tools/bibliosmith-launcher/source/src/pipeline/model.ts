@@ -389,8 +389,11 @@ function sourceTitle(source: BookPipelineSource | undefined, fallback: string): 
 export function flattenBookUnits(jobs: BookPipelineJob[]): BookUnit[] {
   const units: BookUnit[] = [];
   for (const job of jobs) {
-    if (job.children.length > 1) {
-      for (const child of job.children) {
+    // A book dropped from a batch stays in the job — its collection membership
+    // is frozen and cannot shrink — so the shelf is where it stops existing.
+    const live = job.children.filter((child) => !child.removedAt);
+    if (live.length > 1) {
+      for (const child of live) {
         units.push({
           key: `${job.id}/${child.id}`,
           job,
@@ -401,7 +404,7 @@ export function flattenBookUnits(jobs: BookPipelineJob[]): BookUnit[] {
       }
       continue;
     }
-    const child = job.children[0] ?? null;
+    const child = live[0] ?? null;
     units.push({
       key: job.id,
       job,

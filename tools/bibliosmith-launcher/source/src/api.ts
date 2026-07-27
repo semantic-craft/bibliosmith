@@ -1118,7 +1118,7 @@ export function retryBookPipelineJob(jobId: string) {
   return invoke<BookPipelineJob>("retry_book_pipeline_job", { jobId });
 }
 
-export function deleteBookPipelineJob(jobId: string) {
+export function deleteBookPipelineJob(jobId: string, childId?: string | null) {
   if (!isTauriRuntime()) {
     previewBookPipelineJobs = previewBookPipelineJobs.filter((job) => job.id !== jobId);
     previewBookPipelineRevision += 1;
@@ -1130,6 +1130,7 @@ export function deleteBookPipelineJob(jobId: string) {
   }
   return invoke<BookPipelineState>("delete_book_pipeline_job", {
     jobId,
+    childId: childId ?? null,
     explicitApproval: true,
   });
 }

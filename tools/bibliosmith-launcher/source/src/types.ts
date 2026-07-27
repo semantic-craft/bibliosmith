@@ -270,6 +270,7 @@ export type BookPipelineChildJob = {
   localProjectRoot?: string | null;
   customInstructions?: BookPipelineCustomInstructions | null;
   readerEvidence?: BookPipelineReaderEvidence[];
+  removedAt?: string | null;
 };
 
 /// A person opened the built book in a real reader and said what happened. The
