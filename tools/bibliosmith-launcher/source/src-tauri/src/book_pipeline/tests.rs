@@ -22,7 +22,8 @@ fn stderr_tail_is_empty_for_empty_stderr() {
 
 #[test]
 fn stderr_tail_redacts_an_auth_header_but_not_a_missing_key_message() {
-    let stderr = "connecting...\nAuthorization: Bearer sk-abc123\nRuntimeError: GEMINI_API_KEY not set.\n";
+    let stderr =
+        "connecting...\nAuthorization: Bearer sk-abc123\nRuntimeError: GEMINI_API_KEY not set.\n";
     let tail = stderr_tail(stderr);
     assert!(!tail.contains("sk-abc123"), "leaked a secret: {tail}");
     assert!(
@@ -960,9 +961,7 @@ impl TranslationEngineFixtureExecutor {
         Self {
             glossary_violations: violations
                 .iter()
-                .map(|(source, translation)| {
-                    ((*source).to_string(), (*translation).to_string())
-                })
+                .map(|(source, translation)| ((*source).to_string(), (*translation).to_string()))
                 .collect(),
             ..Self::succeeding()
         }
@@ -1053,8 +1052,7 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
             };
             let path = command.output_dir.join(&relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let source =
-                fs::read_to_string(command.output_dir.join(source_chapter_path)).unwrap();
+            let source = fs::read_to_string(command.output_dir.join(source_chapter_path)).unwrap();
             let mut translation = fixture_translation(&source, &unit_id);
             if self.merge_translation_paragraphs {
                 translation = translation.replace("\n\n", "\n");
@@ -1319,9 +1317,7 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                 let mut final_paths = fs::read_dir(&final_dir)
                     .unwrap()
                     .map(|entry| entry.unwrap().path())
-                    .filter(|path| {
-                        path.extension().and_then(|value| value.to_str()) == Some("md")
-                    })
+                    .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("md"))
                     .collect::<Vec<_>>();
                 final_paths.sort();
                 assert!(!final_paths.is_empty());
@@ -2895,26 +2891,24 @@ fn queued_translation_modes_and_binding_identity_survive_persistence() {
 fn queued_digest_mode_is_book_level_and_survives_persistence() {
     let root = temp_root("digest-mode-persistence");
     let store = BookPipelineStore::for_test(&root);
-    let fast_intent: BookPipelineTranslationIntent =
-        serde_json::from_value(serde_json::json!({
-            "translationMode": TRANSLATION_MODE_FAST,
-            "profileId": "fake-provider-profile",
-            "configId": "fake-provider-config",
-            "skillIds": [],
-            "secondPassEnabled": false,
-            "digestMode": true,
-        }))
-        .unwrap();
-    let expert_intent: BookPipelineTranslationIntent =
-        serde_json::from_value(serde_json::json!({
-            "translationMode": TRANSLATION_MODE_EXPERT,
-            "profileId": "fake-agent-profile",
-            "configId": "fake-agent-config",
-            "skillIds": ["expert-translation-quality"],
-            "secondPassEnabled": false,
-            "digestMode": true,
-        }))
-        .unwrap();
+    let fast_intent: BookPipelineTranslationIntent = serde_json::from_value(serde_json::json!({
+        "translationMode": TRANSLATION_MODE_FAST,
+        "profileId": "fake-provider-profile",
+        "configId": "fake-provider-config",
+        "skillIds": [],
+        "secondPassEnabled": false,
+        "digestMode": true,
+    }))
+    .unwrap();
+    let expert_intent: BookPipelineTranslationIntent = serde_json::from_value(serde_json::json!({
+        "translationMode": TRANSLATION_MODE_EXPERT,
+        "profileId": "fake-agent-profile",
+        "configId": "fake-agent-config",
+        "skillIds": ["expert-translation-quality"],
+        "secondPassEnabled": false,
+        "digestMode": true,
+    }))
+    .unwrap();
     let fast = queue_job_with_translation_intent(
         &store,
         fake_source(None),
@@ -5599,8 +5593,7 @@ fn local_pdf_runner_command_uses_existing_wrapper_contract() {
     )
     .unwrap();
 
-    let command =
-        build_local_pdf_folder_command_for_root(&job, &output, &wrapper_root).unwrap();
+    let command = build_local_pdf_folder_command_for_root(&job, &output, &wrapper_root).unwrap();
 
     assert_eq!(command.kind, RunnerCommandKind::Process);
     assert_eq!(command.label, "local PDF conversion wrapper");
@@ -5824,10 +5817,7 @@ fn mineru_runner_command_records_artifacts() {
 
     let completed = run_job(
         &store,
-        &CommandPipelineRunner::with_book_ocr_conversion_root(
-            MineruFixtureExecutor,
-            worker_root,
-        ),
+        &CommandPipelineRunner::with_book_ocr_conversion_root(MineruFixtureExecutor, worker_root),
         &job.id,
     )
     .unwrap();
@@ -6067,9 +6057,10 @@ fn zotero_collection_retry_targets_failed_items_only() {
     .unwrap();
 
     assert_eq!(completed.status, STATUS_COMPLETED);
-    assert!(completed.collection_items.iter().any(|item| {
-        item.id == "OK" && item.status == STATUS_COMPLETED && item.attempts == 1
-    }));
+    assert!(completed
+        .collection_items
+        .iter()
+        .any(|item| { item.id == "OK" && item.status == STATUS_COMPLETED && item.attempts == 1 }));
     assert!(completed.collection_items.iter().any(|item| {
         item.id == "FAIL" && item.status == STATUS_COMPLETED && item.attempts == 2
     }));
@@ -8152,13 +8143,10 @@ fn automated_qa_covers_placeholders_structure_glossary_and_completeness() {
     let terms = vec![("Foo".to_string(), "术语".to_string())];
 
     assert!(automated_qa_checks(&unit("# 标题\n\n使用 {name} 术语。\n"), &terms).passed());
-    assert!(
-        !automated_qa_checks(&unit("# 标题\n\n使用术语。\n"), &terms).placeholder_integrity
-    );
+    assert!(!automated_qa_checks(&unit("# 标题\n\n使用术语。\n"), &terms).placeholder_integrity);
     assert!(!automated_qa_checks(&unit("## 标题\n\n使用 {name} 术语。\n"), &terms).structure);
     assert!(
-        !automated_qa_checks(&unit("# 标题\n\n使用 {name}。\n"), &terms)
-            .terminology_consistency
+        !automated_qa_checks(&unit("# 标题\n\n使用 {name}。\n"), &terms).terminology_consistency
     );
     assert!(!automated_qa_checks(&unit("# 标题\n"), &terms).completeness);
 }
@@ -8972,8 +8960,7 @@ fn book_custom_instructions_persist_bind_approval_and_flow_to_run_manifest() {
     };
 
     let saved =
-        save_book_custom_instructions(&store, &job_id, None, custom_instructions.clone())
-            .unwrap();
+        save_book_custom_instructions(&store, &job_id, None, custom_instructions.clone()).unwrap();
 
     assert_eq!(
         saved.children[0].custom_instructions.as_ref(),
@@ -9188,8 +9175,7 @@ fn fake_fast_book_runs_layered_qa_and_readies_promotion_gate() {
     let executor = TranslationEngineFixtureExecutor::succeeding();
 
     advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
-    let translated =
-        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let translated = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     let waiting = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
 
     assert_eq!(
@@ -9280,14 +9266,12 @@ fn fake_expert_book_waits_for_both_agent_handoffs_then_readies_promotion_gate() 
         .any(|artifact| artifact.kind == "translation_handoff"));
     satisfy_translation_handoff(&translation_waiting);
 
-    let translated =
-        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let translated = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     assert_eq!(
         child_stage_status(&translated, "translate"),
         STATUS_COMPLETED
     );
-    let qa_waiting =
-        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let qa_waiting = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     assert_eq!(child_stage_status(&qa_waiting, "expert_qa"), STATUS_BLOCKED);
     satisfy_qa_handoff(&qa_waiting);
 
@@ -9573,8 +9557,7 @@ fn expert_qa_retries_only_failed_unit_and_separates_fix_from_pass_attempt() {
     let executor = TranslationEngineFixtureExecutor::succeeding();
 
     advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
-    let translated =
-        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let translated = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     let chapter_two = child_project_root(&translated)
         .join("chapters")
         .join("translated")
@@ -10306,10 +10289,9 @@ fn fake_pipeline_builds_digest_when_book_intent_is_enabled() {
     .unwrap();
     assert_eq!(epubcheck_report["checker"]["nFatal"], 0);
     assert_eq!(epubcheck_report["checker"]["nError"], 0);
-    let config: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(project_root.join("digest.config.json")).unwrap(),
-    )
-    .unwrap();
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(project_root.join("digest.config.json")).unwrap())
+            .unwrap();
     assert_eq!(config["max_section_chars"], 2400);
     assert_eq!(
         executor.command_labels(),
@@ -10352,8 +10334,7 @@ fn fake_expert_pipeline_builds_digest_when_book_intent_is_enabled() {
         advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     satisfy_translation_handoff(&translation_waiting);
     advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
-    let qa_waiting =
-        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let qa_waiting = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     satisfy_qa_handoff(&qa_waiting);
     advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     approve_ready_promotion_for_test(&store, &job_id);
@@ -10487,8 +10468,7 @@ fn epubcheck_failure_stops_at_validation_failed() {
         .artifacts
         .iter()
         .any(|artifact| artifact.kind == "epubcheck_report"));
-    let qa_status =
-        fs::read_to_string(child_project_root(&failed).join("qa/status.md")).unwrap();
+    let qa_status = fs::read_to_string(child_project_root(&failed).join("qa/status.md")).unwrap();
     assert!(qa_status.contains("- reading output: failed"));
     assert!(qa_status.contains("fatal=0, error=1, warning=0"));
     let _ = fs::remove_dir_all(root);
@@ -10528,8 +10508,7 @@ fn real_markdown_job_stops_at_promotion_gate() {
     assert_eq!(child_stage_status(&stopped, "promote"), STATUS_PENDING);
     assert_eq!(stopped.current_stage_id, "approve_promotion");
     assert!(!stopped.approval_references.iter().any(|approval| {
-        approval.child_job_id == stopped.children[0].id
-            && approval.stage_id == "approve_promotion"
+        approval.child_job_id == stopped.children[0].id && approval.stage_id == "approve_promotion"
     }));
     assert!(
         fs::read_dir(child_project_root(&stopped).join("chapters/final"))
@@ -10609,8 +10588,7 @@ fn source_change_before_prepare_reruns_split_without_blocking() {
     let repo = handoff_repo_fixture(&root);
     let source_path = root.join("source.md");
     let store = BookPipelineStore::for_test(&root);
-    let job_id =
-        handoff_ready_child_job(&store, &repo, &source_path, "# Only\n\nOriginal body.\n");
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, "# Only\n\nOriginal body.\n");
 
     let split_once = advance_job(&store, &job_id, None, false).unwrap();
     assert_eq!(chapter_source_count(&split_once), 1);
@@ -10996,18 +10974,16 @@ fn diagnostic_profiles_have_monotonic_disclosure() {
     .unwrap();
     let completed = run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
 
-    let local = serde_json::to_string(
-        &build_book_pipeline_diagnostic(&completed, "local-full").unwrap(),
-    )
-    .unwrap();
+    let local =
+        serde_json::to_string(&build_book_pipeline_diagnostic(&completed, "local-full").unwrap())
+            .unwrap();
     let support = serde_json::to_string(
         &build_book_pipeline_diagnostic(&completed, "redacted-support").unwrap(),
     )
     .unwrap();
-    let public = serde_json::to_string(
-        &build_book_pipeline_diagnostic(&completed, "public-issue").unwrap(),
-    )
-    .unwrap();
+    let public =
+        serde_json::to_string(&build_book_pipeline_diagnostic(&completed, "public-issue").unwrap())
+            .unwrap();
 
     assert!(local.contains(&completed.artifacts[0].path));
     assert!(local.contains(completed.artifacts[0].sha256.as_deref().unwrap()));
@@ -11060,8 +11036,7 @@ fn diagnostic_bundle_lands_in_the_chosen_folder_under_a_contained_name() {
     // A job id that is not filename-safe must not steer the write out of the
     // folder the user picked.
     let escaped =
-        write_book_pipeline_diagnostic(&out, "../../etc/pwned", "public-issue", &document)
-            .unwrap();
+        write_book_pipeline_diagnostic(&out, "../../etc/pwned", "public-issue", &document).unwrap();
     assert_eq!(escaped.parent(), Some(out.as_path()));
     assert_eq!(
         escaped.file_name().and_then(|name| name.to_str()),
@@ -11199,9 +11174,8 @@ fn skipped_collection_opens_its_hashed_manifest_as_verified_evidence() {
     let output_dir = PathBuf::from(job.output_dir.as_deref().unwrap());
     let manifest_path = output_dir.join("collection-summary.json");
     fs::write(&manifest_path, "{\"schema\":\"fixture\"}\n").unwrap();
-    job.artifacts.push(
-        required_stage_artifact("collection_manifest", &manifest_path, "discover").unwrap(),
-    );
+    job.artifacts
+        .push(required_stage_artifact("collection_manifest", &manifest_path, "discover").unwrap());
 
     derive_job(&mut job);
     let resolved = resolve_book_pipeline_open_target(&job, &[output_dir]).unwrap();
@@ -11304,8 +11278,7 @@ fn artifact_excerpt_returns_truncated_head_within_allowlist() {
 #[test]
 fn artifact_excerpt_rejects_paths_outside_allowlist_and_unknown_artifacts() {
     let root = std::env::temp_dir().join(format!("bp-excerpt-out-{}", std::process::id()));
-    let elsewhere =
-        std::env::temp_dir().join(format!("bp-excerpt-else-{}", std::process::id()));
+    let elsewhere = std::env::temp_dir().join(format!("bp-excerpt-else-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     fs::create_dir_all(&elsewhere).unwrap();
     let artifact_path = elsewhere.join("secret.md");
