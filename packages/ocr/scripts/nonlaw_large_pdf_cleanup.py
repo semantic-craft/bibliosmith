@@ -22,6 +22,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 APP_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
+from cleanup_approval import refuse_unapproved_delete  # noqa: E402
 from zotero_llm_worker import (  # noqa: E402
     Attachment,
     DeadlineReached,
@@ -186,6 +187,11 @@ def delete_source_pdf(
         (pdf_key,),
     ).fetchone()
     if previous and int(previous["source_deleted"] or 0) == 1:
+        return
+    # The launcher records a source-cleanup approval bound to the built
+    # reading artifacts. This is the only place a source PDF is actually
+    # deleted, so it is where that record has to be honoured.
+    if not refuse_unapproved_delete(pdf_key, logger=logging.getLogger(__name__)):
         return
     ZoteroWebClient(config).delete_item(pdf_key)
     upsert_job(
