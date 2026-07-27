@@ -9,10 +9,6 @@ export type LauncherState = {
   dirty: boolean;
   proxyConfigured: boolean;
   platform: string;
-  opencodeInstallRoot: string;
-  opencodeInstalledVersion?: string | null;
-  opencodeClientPath?: string | null;
-  opencodeAvailable: boolean;
 };
 
 export type CommitInfo = {
@@ -31,42 +27,6 @@ export type BiblioSmithUpdateInfo = {
   aheadCount: number;
   hasUpdate: boolean;
   commits: CommitInfo[];
-};
-
-export type OpenCodeUpdateInfo = {
-  installedVersion?: string | null;
-  latestVersion: string;
-  hasUpdate: boolean;
-  assetName: string;
-  assetSize: number;
-  assetUrl: string;
-  installRoot: string;
-  clientPath?: string | null;
-  clientAvailable: boolean;
-  installerPath?: string | null;
-  installerDownloaded: boolean;
-  partialDownloadedBytes: number;
-};
-
-export type OpenCodeLocalStatus = {
-  installedVersion?: string | null;
-  installRoot: string;
-  clientPath?: string | null;
-  clientAvailable: boolean;
-};
-
-export type LauncherUpdateInfo = {
-  installedVersion: string;
-  latestVersion: string;
-  hasUpdate: boolean;
-  releaseNotes?: string | null;
-  assetName: string;
-  assetSize: number;
-  assetUrl: string;
-  installRoot: string;
-  installerPath?: string | null;
-  installerDownloaded: boolean;
-  partialDownloadedBytes: number;
 };
 
 export type ActionResult = {
@@ -151,8 +111,6 @@ export type RuntimeStatus = {
 
 export type LauncherSettings = {
   autoStart: boolean;
-  checkLauncherOnLaunch: boolean;
-  checkOpenCodeOnLaunch: boolean;
   saveLogsToLocal: boolean;
 };
 
@@ -169,7 +127,6 @@ export type BookPipelineSource = {
   path?: string | null;
   selector?: string | null;
   runnerBehavior?: "succeed" | "fail_once" | "always_fail" | null;
-  translationStrategy?: "reflection" | string | null;
   adapterCommand?: string | null;
   fakeZoteroItems?: FakeZoteroItem[] | null;
 };

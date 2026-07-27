@@ -41,7 +41,9 @@ export function SourceCleanupPanel({ locale }: { locale: string }) {
   const copy = cleanupCopy(locale);
   const zh = locale.startsWith("zh");
   const [candidates, setCandidates] = useState<BookPipelineCleanupCandidate[] | null>(null);
-  const [busy, setBusy] = useState(false);
+  // The first preview is already in flight when the panel mounts, so `busy`
+  // starts true instead of being flipped from inside the mount effect.
+  const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState("");
 
   // Refreshing must not clear the message: the reload that follows an approval
@@ -59,8 +61,23 @@ export function SourceCleanupPanel({ locale }: { locale: string }) {
   }, []);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let cancelled = false;
+    void previewBookPipelineCleanup()
+      .then((preview) => {
+        if (!cancelled) setCandidates(preview.candidates);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setCandidates([]);
+        setMessage(String(error));
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const approve = useCallback(
     async (candidateId: string) => {

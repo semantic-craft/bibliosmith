@@ -1,16 +1,18 @@
-import { RefreshCcw } from "lucide-react";
+import { ExternalLink, RefreshCcw } from "lucide-react";
 import type { CommitInfo } from "../../types";
 import type { Copy } from "../../i18n";
 import { CommitTable, type ProductCardProps } from "../../components";
 import "./updates.css";
 
+// The Launcher ships as a local build, so nothing here can know what the latest
+// release is. Rather than assert "up to date" from a stub that never asked, the
+// card states the installed version and links out to the Releases page.
+const RELEASES_URL = "https://github.com/semantic-craft/bibliosmith/releases";
+
 export function UpdatesPage({
   copy,
   biblioSmithCard,
   launcherVersion,
-  launcherLatest,
-  launcherBusy,
-  onCheckLauncher,
   commits,
   displayedCommits,
   latestBiblioSmithVersion,
@@ -24,9 +26,6 @@ export function UpdatesPage({
   copy: Copy;
   biblioSmithCard: ProductCardProps;
   launcherVersion: string;
-  launcherLatest: string;
-  launcherBusy: boolean;
-  onCheckLauncher: () => void;
   commits: CommitInfo[];
   displayedCommits: CommitInfo[];
   latestBiblioSmithVersion: string;
@@ -54,24 +53,19 @@ export function UpdatesPage({
         <article className="up-card">
           <div className="up-card-head">
             <strong>BiblioSmith Launcher</strong>
-            <span className="up-chip success">{copy.upToDate}</span>
           </div>
           <div className="up-versions">
             <div className="up-version-line">
               <span>{copy.currentVersion}</span>
               <strong>{launcherVersion}</strong>
             </div>
-            <div className="up-version-line">
-              <span>{copy.latestVersion}</span>
-              <strong>{launcherLatest || launcherVersion}</strong>
-            </div>
           </div>
           <p className="up-notes">{copy.localBuildNote}</p>
           <div className="up-card-actions">
-            <button className="up-btn" type="button" onClick={onCheckLauncher} disabled={launcherBusy}>
-              <RefreshCcw size={14} />
-              {copy.checkUpdates}
-            </button>
+            <a className="up-btn" href={RELEASES_URL} target="_blank" rel="noreferrer">
+              <ExternalLink size={14} />
+              {copy.viewReleases}
+            </a>
           </div>
         </article>
 

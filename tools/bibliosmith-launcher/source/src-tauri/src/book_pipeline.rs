@@ -532,7 +532,6 @@ pub struct BookPipelineSource {
     pub path: Option<String>,
     pub selector: Option<String>,
     pub runner_behavior: Option<String>,
-    pub translation_strategy: Option<String>,
     pub adapter_command: Option<String>,
     pub fake_zotero_items: Option<Vec<FakeZoteroItem>>,
     /// Per-route-item conversion overrides chosen in the wizard, keyed by route
@@ -4075,7 +4074,6 @@ pub fn choose_book_pipeline_pdf_folder() -> Result<Option<BookPipelineSource>, S
         path: Some(display_path(&folder)),
         selector: None,
         runner_behavior: None,
-        translation_strategy: None,
         adapter_command: None,
         fake_zotero_items: None,
         route_overrides: BTreeMap::new(),
@@ -4100,7 +4098,6 @@ pub fn choose_book_pipeline_markdown_source() -> Result<Option<BookPipelineSourc
         path: Some(display_path(&path)),
         selector: None,
         runner_behavior: None,
-        translation_strategy: None,
         adapter_command: None,
         fake_zotero_items: None,
         route_overrides: BTreeMap::new(),
@@ -5165,7 +5162,6 @@ fn collection_snapshot_child(
             path: member.attachment_path.clone(),
             selector: Some(attachment_key.into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             // Carry only this attachment's override. The child's route is
@@ -8613,7 +8609,6 @@ fn discover_zotero_collection_snapshot<E: RunnerCommandExecutor>(
             path: None,
             selector: Some(snapshot.collection.key),
             runner_behavior: None,
-            translation_strategy: source.translation_strategy.clone(),
             adapter_command: source.adapter_command.clone(),
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -9359,7 +9354,6 @@ fn parse_zotero_plan_source(line: &str) -> Option<BookPipelineSource> {
         path: None,
         selector: Some(key.to_string()),
         runner_behavior: None,
-        translation_strategy: None,
         adapter_command: None,
         fake_zotero_items: Some(vec![item]),
         route_overrides: BTreeMap::new(),
@@ -9393,7 +9387,6 @@ fn parse_zotero_completed_source(line: &str) -> Option<BookPipelineSource> {
         path: None,
         selector: Some(key.to_string()),
         runner_behavior: None,
-        translation_strategy: None,
         adapter_command: None,
         fake_zotero_items: Some(vec![item]),
         route_overrides: BTreeMap::new(),
@@ -9459,7 +9452,6 @@ fn fake_zotero_sources(
             path: None,
             selector: requested_source.selector.clone(),
             runner_behavior: None,
-            translation_strategy: requested_source.translation_strategy.clone(),
             adapter_command: requested_source.adapter_command.clone(),
             fake_zotero_items: Some(items.to_vec()),
             route_overrides: BTreeMap::new(),
@@ -9474,7 +9466,6 @@ fn fake_zotero_sources(
             path: item.attachment_path.clone(),
             selector: Some(item.key.clone()),
             runner_behavior: None,
-            translation_strategy: requested_source.translation_strategy.clone(),
             adapter_command: requested_source.adapter_command.clone(),
             fake_zotero_items: Some(vec![item]),
             route_overrides: BTreeMap::new(),
@@ -9495,7 +9486,6 @@ fn zotero_selection_source(source: &BookPipelineSource) -> Option<BookPipelineSo
         path: None,
         selector: source.selector.clone(),
         runner_behavior: None,
-        translation_strategy: source.translation_strategy.clone(),
         adapter_command: source.adapter_command.clone(),
         fake_zotero_items: source.fake_zotero_items.clone(),
         route_overrides: BTreeMap::new(),
@@ -10052,7 +10042,7 @@ fn create_translation_handoff_project_with_title(
         "cleaned_markdown_ready",
     )?;
     let manifest = project_root.join("metadata").join("source_manifest.json");
-    let mut artifacts = vec![
+    let artifacts = vec![
         BookPipelineArtifact {
             kind: "translation_source".into(),
             path: display_path(&source),
@@ -10070,90 +10060,14 @@ fn create_translation_handoff_project_with_title(
             ..BookPipelineArtifact::default()
         },
     ];
-    let mut log_summary = vec![format!(
+    let log_summary = vec![format!(
         "Translation handoff ready at {}",
         display_path(&project_root)
     )];
-    if uses_reflection_translation_strategy(job) {
-        let reflection_artifacts = write_reflection_translation_artifacts(&project_root)?;
-        artifacts.extend(reflection_artifacts);
-        log_summary.push(
-            "Reflection translation strategy recorded: draft, reflection, and revised phases are ready."
-                .into(),
-        );
-    }
     Ok(TranslationHandoffOutput {
         log_summary,
         artifacts,
     })
-}
-
-fn uses_reflection_translation_strategy(job: &BookPipelineJob) -> bool {
-    job.source
-        .translation_strategy
-        .as_deref()
-        .map(|strategy| {
-            matches!(
-                strategy.trim().to_ascii_lowercase().as_str(),
-                "reflection" | "reflection_translation" | "reflect"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn write_reflection_translation_artifacts(
-    project_root: &Path,
-) -> Result<Vec<BookPipelineArtifact>, String> {
-    let draft = project_root
-        .join("chapters")
-        .join("translated")
-        .join("000_reflection_draft.md");
-    let reflection = project_root.join("qa").join("reflection_strategy.md");
-    let revised = project_root
-        .join("chapters")
-        .join("final")
-        .join("000_reflection_revised.md");
-    fs::write(
-        &draft,
-        "# Translation Draft\n\nReflection strategy phase: draft translation pending.\n",
-    )
-    .map_err(|err| err.to_string())?;
-    fs::write(
-        &reflection,
-        "# Reflection Notes\n\nReview terminology, omissions, register, and paragraph-level fidelity before revision.\n",
-    )
-    .map_err(|err| err.to_string())?;
-    fs::write(
-        &revised,
-        "# Revised Translation\n\nReflection strategy phase: revised translation will be produced here.\n",
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(vec![
-        BookPipelineArtifact {
-            kind: "translation_draft".into(),
-            path: display_path(&draft),
-            sha256: Some(sha256_file(&draft)?),
-            zotero_key: None,
-            producer_stage: Some("handoff".into()),
-            ..BookPipelineArtifact::default()
-        },
-        BookPipelineArtifact {
-            kind: "translation_reflection".into(),
-            path: display_path(&reflection),
-            sha256: Some(sha256_file(&reflection)?),
-            zotero_key: None,
-            producer_stage: Some("handoff".into()),
-            ..BookPipelineArtifact::default()
-        },
-        BookPipelineArtifact {
-            kind: "translation_revised".into(),
-            path: display_path(&revised),
-            sha256: Some(sha256_file(&revised)?),
-            zotero_key: None,
-            producer_stage: Some("handoff".into()),
-            ..BookPipelineArtifact::default()
-        },
-    ])
 }
 
 fn selected_markdown_artifact<'a>(
@@ -17274,7 +17188,6 @@ mod tests {
             path: None,
             selector: None,
             runner_behavior: behavior.map(str::to_string),
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -17288,7 +17201,6 @@ mod tests {
             path: Some(display_path(input)),
             selector: None,
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -17336,7 +17248,6 @@ mod tests {
             path: None,
             selector: Some("DIRECT".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: Some(vec![FakeZoteroItem {
                 key: "DIRECT".into(),
@@ -17359,7 +17270,6 @@ mod tests {
             path: Some(display_path(path)),
             selector: None,
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -17373,7 +17283,6 @@ mod tests {
             path: None,
             selector: Some("MINERU".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: Some(vec![FakeZoteroItem {
                 key: "MINERU".into(),
@@ -17396,7 +17305,6 @@ mod tests {
             path: None,
             selector: Some("COLLECTION".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: Some(vec![
                 FakeZoteroItem {
@@ -18047,7 +17955,6 @@ mod tests {
             path: None,
             selector: Some("COLL1".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -18194,6 +18101,9 @@ mod tests {
         let root = temp_root("legacy-state-migration");
         let store = BookPipelineStore::for_test(&root);
         fs::create_dir_all(store.state_path.parent().unwrap()).unwrap();
+        // `translationStrategy` below is a retired field that still exists in
+        // state files written before it was removed; keeping it in the fixture
+        // proves the loader ignores it instead of failing the migration.
         let legacy_job = |id: &str, status: &str| {
             serde_json::json!({
                 "id": id,
@@ -18269,10 +18179,6 @@ mod tests {
         assert_eq!(routed.translation_mode, TRANSLATION_MODE_FAST);
         assert!(!routed.second_pass_enabled);
         assert!(!routed.text_cleanup);
-        assert_eq!(
-            routed.source.translation_strategy.as_deref(),
-            Some("reflection")
-        );
         assert_eq!(routed.status, STATUS_READY);
         assert_eq!(routed.attempts, 2);
         assert_eq!(routed.last_error.as_deref(), Some("preserved diagnosis"));
@@ -21406,7 +21312,6 @@ mod tests {
             path: Some(display_path(&input)),
             selector: None,
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: Some(display_path(&adapter)),
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -21540,7 +21445,6 @@ mod tests {
             path: None,
             selector: Some("RETRY".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: Some(vec![
                 FakeZoteroItem {
@@ -21632,61 +21536,6 @@ mod tests {
     }
 
     #[test]
-    fn reflection_translation_strategy_records_distinct_phase_artifacts() {
-        let root = temp_root("reflection-translation");
-        let repo = root.join("repo");
-        fs::create_dir_all(repo.join("tools")).unwrap();
-        fs::write(repo.join("AGENTS.md"), "# fixture\n").unwrap();
-        fs::write(
-            repo.join("tools").join("create_local_book_project.py"),
-            "# fixture\n",
-        )
-        .unwrap();
-        let source_path = root.join("source.md");
-        fs::write(
-            &source_path,
-            "# Source\n\nPrivate text stays out of logs.\n",
-        )
-        .unwrap();
-        let mut source = markdown_source(&source_path);
-        source.translation_strategy = Some("reflection".into());
-        let store = BookPipelineStore::for_test(&root);
-        let job = queue_job(
-            &store,
-            source,
-            MODE_TRANSLATE_ONLY.into(),
-            BookPipelinePreviewConfig::default(),
-        )
-        .unwrap();
-
-        let completed = run_job_with_handoff(
-            &store,
-            &SystemPipelineRunner,
-            &LocalProjectHandoffRunner,
-            &job.id,
-            Some(&repo),
-        )
-        .unwrap();
-
-        assert_eq!(completed.status, STATUS_READY);
-        assert_eq!(completed.current_stage_id, "split");
-        for kind in [
-            "translation_draft",
-            "translation_reflection",
-            "translation_revised",
-        ] {
-            assert!(completed
-                .artifacts
-                .iter()
-                .any(|artifact| artifact.kind == kind && artifact.sha256.is_some()));
-        }
-        let logs = completed.log_summary.join("\n");
-        assert!(logs.contains("Reflection translation strategy recorded"));
-        assert!(!logs.contains("Private text stays out of logs"));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn zotero_discovery_parses_worker_dry_run_plan_sources() {
         let root = temp_root("zotero-discovery-plan");
         let worker_root = fake_zotero_worker_root(&root);
@@ -21696,7 +21545,6 @@ mod tests {
             path: None,
             selector: Some("parent_item_type=book".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -21780,7 +21628,6 @@ mod tests {
             path: None,
             selector: Some("query=Geschäftsgeheimnisse".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -21799,7 +21646,6 @@ mod tests {
             path: None,
             selector: Some("COLLECTION".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: Some(vec![FakeZoteroItem {
                 key: "FAKE1".into(),
@@ -21834,7 +21680,6 @@ mod tests {
             path: None,
             selector: Some("ABC123".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -21865,7 +21710,6 @@ mod tests {
             path: None,
             selector: Some("parent_item_type=book".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -21937,7 +21781,6 @@ mod tests {
             path: None,
             selector: Some("query=Der wirtschaftliche Wert".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -22380,7 +22223,6 @@ mod tests {
             path: None,
             selector: Some("parent_item_type=book".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),
@@ -22476,7 +22318,6 @@ mod tests {
             path: None,
             selector: Some("parent_item_type=book".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: Some(vec![
                 FakeZoteroItem {
@@ -22531,7 +22372,6 @@ mod tests {
             path: None,
             selector: Some("parent_item_type=book".into()),
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: Some(vec![
                 FakeZoteroItem {
@@ -22765,7 +22605,6 @@ mod tests {
             path: Some(display_path(&input)),
             selector: None,
             runner_behavior: None,
-            translation_strategy: None,
             adapter_command: None,
             fake_zotero_items: None,
             route_overrides: BTreeMap::new(),

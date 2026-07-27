@@ -16,19 +16,7 @@ export default tseslint.config(
   tseslint.configs.recommended,
   {
     files: ["src/**/*.{ts,tsx}"],
-    // The two long-standing hooks rules are listed by hand rather than pulling
-    // in eslint-plugin-react-hooks' recommended preset. As of v7 that preset
-    // also turns on the React Compiler rule family (set-state-in-effect,
-    // purity, immutability, refs, ...), and set-state-in-effect alone fires 14
-    // times across App.tsx and BookDrawer.tsx. Clearing those means
-    // restructuring effects in the app's core components, which is app
-    // behaviour work rather than CI wiring; tracked separately so this file
-    // does not quietly carry a disabled rule instead.
-    plugins: { "react-hooks": reactHooks },
-    rules: {
-      "react-hooks/rules-of-hooks": "error",
-      "react-hooks/exhaustive-deps": "error",
-    },
+    ...reactHooks.configs.flat["recommended-latest"],
     languageOptions: {
       globals: globals.browser,
     },

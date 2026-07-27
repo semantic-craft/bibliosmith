@@ -55,7 +55,6 @@ export type PipelineDraft = {
   textCleanup: boolean;
   digestMode: boolean;
   outputFormats: BookPipelineOutputFormat[];
-  reflectionTranslation: boolean;
   externalAdapterCommand: string;
   externalAdapterInput: string;
   zoteroSelector: string;
@@ -80,7 +79,6 @@ export const defaultPipelineDraft: PipelineDraft = {
   textCleanup: false,
   digestMode: false,
   outputFormats: ["md", "html", "epub"],
-  reflectionTranslation: false,
   externalAdapterCommand: "",
   externalAdapterInput: "",
   zoteroSelector: "reading-queue",
