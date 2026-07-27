@@ -58,7 +58,7 @@ If you live in a terminal-native AI agent, paste the prompt below and let it do 
 >
 > 1. `git clone` the repo into the current directory (or `~/Projects/zotero-cli-agent` if I'm not already in a project folder).
 > 2. Create a `uv` venv and run `uv pip install -e ".[hf,mcp]"` so I get free local embeddings and the optional MCP server.
-> 3. Ask me for `ZOTERO_API_KEY` and `ZOTERO_LIBRARY_ID` (page: https://www.zotero.org/settings/keys). Default `ZOTERO_LIBRARY_TYPE=users` and `ZSEARCH_EMBEDDING_BACKEND=gemini` unless I say otherwise. In the books-translation monorepo, write them only to the **repository-root `.env`** after confirming it is gitignored; for a standalone install, export them in the process environment. Never write credentials into a global shell rc.
+> 3. Ask me for `ZOTERO_API_KEY` and `ZOTERO_LIBRARY_ID` (page: https://www.zotero.org/settings/keys). Default `ZOTERO_LIBRARY_TYPE=users` and `ZSEARCH_EMBEDDING_BACKEND=gemini` unless I say otherwise. In the bibliosmith monorepo, write them only to the **repository-root `.env`** after confirming it is gitignored; for a standalone install, export them in the process environment. Never write credentials into a global shell rc.
 > 4. Run `zsearch info` to confirm the install, then `zsearch sync` to build the vector index. Show me the output of both.
 > 5. If anything fails, paste the full error verbatim and stop — don't paper over it.
 
@@ -66,7 +66,7 @@ Works in any agent that can run shell commands and read files (Claude Code, Code
 
 ## Configure
 
-In a books-translation source checkout, `zsearch` and `zfulltext` load the repository-root `.env`; already exported variables take precedence. A standalone `uv tool install` has no monorepo root to discover and keeps the original behavior of reading only the process environment. No credential values belong in tracked files.
+In a bibliosmith source checkout, `zsearch` and `zfulltext` load the repository-root `.env`; already exported variables take precedence. A standalone `uv tool install` has no monorepo root to discover and keeps the original behavior of reading only the process environment. No credential values belong in tracked files.
 
 ```bash
 # required for write-side commands (add, edit, tag, coll, note, ingest --add):
@@ -93,7 +93,7 @@ The defaults assume your Zotero data lives at `~/Zotero/zotero.sqlite`; pass `--
 After merge, a user with real credentials can perform the HITL query required by issue #70. This contacts the configured embedding provider, so agents must not run it during offline verification:
 
 ```bash
-cd $HOME/Projects/books-translation
+cd $HOME/Projects/bibliosmith
 uv run --package zotero-cli-agent zsearch query "credential smoke test" -k 1
 ```
 

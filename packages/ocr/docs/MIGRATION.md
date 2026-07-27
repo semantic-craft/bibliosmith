@@ -25,7 +25,7 @@ Created on 2026-06-30 from `D:\Projects\book-translations-win`.
 
 ## Secrets
 
-The original `.env` was not available by the time secrets were approved for migration: the old project contents had already been cleared, and no matching OCR `.env` backup or process/user/machine environment variables were found. Issue #70 later retired the package-local template; create `D:\Projects\books-translation\.env` from the monorepo-root `.env.example` before running OCR jobs that need PaddleOCR, MinerU, or Zotero credentials.
+The original `.env` was not available by the time secrets were approved for migration: the old project contents had already been cleared, and no matching OCR `.env` backup or process/user/machine environment variables were found. Issue #70 later retired the package-local template; create `D:\Projects\bibliosmith\.env` from the monorepo-root `.env.example` before running OCR jobs that need PaddleOCR, MinerU, or Zotero credentials.
 
 ## Data Totals At Migration
 
