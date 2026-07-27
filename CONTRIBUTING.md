@@ -37,14 +37,15 @@ tag before the DMG is built.
 
 | Suite | Command | Expected |
 |---|---|---|
-| Launcher Rust | `cd tools/bibliosmith-launcher/source/src-tauri && cargo test` | 209 passed |
+| Launcher Rust | `cd tools/bibliosmith-launcher/source/src-tauri && cargo test` | 223 passed |
 | Translation engine | `uv run --package translation-engine pytest packages/translation-engine/tests` | 81 passed, 6 subtests passed |
 | OCR | `uv run --package ocr pytest packages/ocr/tests` | 18 passed, 6 subtests passed |
 | Zotero CLI | `uv run --package zotero-cli-agent --extra dev --extra mcp pytest packages/zotero-cli/tests` | 62 passed |
-| Repository suites | `uv run --package digest pytest tests tools/git tools/bibliosmith-launcher/source/scripts/tests` | 89 passed, 2 subtests passed |
-| Launcher frontend | `cd tools/bibliosmith-launcher/source && npx tsc --noEmit && npm test && npm run test:startup-contract` | no output / 122 passed / `startup contract ok` |
+| Repository suites | `uv run --package digest pytest tests tools/git tools/bibliosmith-launcher/source/scripts/tests` | 99 passed, 19 subtests passed |
+| Launcher frontend | `cd tools/bibliosmith-launcher/source && npx tsc --noEmit && npm test && npm run test:startup-contract` | no output / 143 passed / `startup contract ok` |
 
-Counts measured 2026-07-26.
+Counts measured 2026-07-27. They drift upward whenever a branch adds tests, so
+treat a higher number as normal and only a failure as a regression.
 
 The Repository suites row covers three directories, not one. `tests/` is the
 obvious part; `tools/git` holds the commit-message validator that the

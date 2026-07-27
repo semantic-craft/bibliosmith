@@ -126,8 +126,9 @@ cd tools/bibliosmith-launcher/source/src-tauri && cargo test
 cd tools/bibliosmith-launcher/source && npm ci && npx tsc --noEmit && npm test && npm run test:startup-contract
 ```
 
-2026-07-26 实测数量：翻译引擎 81、OCR 18、Zotero CLI 62、repository suites 89、
-启动器后端 209、启动器前端 122。
+2026-07-27 实测数量：翻译引擎 81、OCR 18、Zotero CLI 62、repository suites 99、
+启动器后端 223、启动器前端 143。数字只会随新增测试往上走，对不上不等于回归，判据是
+有没有 failed。
 
 Zotero CLI 那条命令里三个命名陷阱（包名与目录名不同、`--extra dev`、`--extra mcp`）
 见 `CONTRIBUTING.md`。
