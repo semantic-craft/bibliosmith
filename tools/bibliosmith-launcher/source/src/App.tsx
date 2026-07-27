@@ -306,7 +306,7 @@ export default function App() {
   const biblioSmithDownloadDismissedRef = useRef(false);
   const nodeModulesAutoStartRef = useRef(false);
   const startupInitializedRef = useRef(false);
-  const tutorialAutoLoadRef = useRef(false);
+  const tutorialAutoLoadRef = useRef<string | null>(null);
   const floatingToastTimer = useRef<number | null>(null);
 
   const addActivity = useCallback((level: ActivityItem["level"], message: string) => {
@@ -1712,19 +1712,29 @@ export default function App() {
   // The guide document is read from the project on disk, so the auto-load stays
   // in an effect — it also has to fire when a project finishes preparing while
   // the guide tab is already open. Dispatching through a microtask keeps the
-  // loader's state updates out of this render, and the ref stops a second read
-  // from starting while the first is still in flight.
+  // loader's state updates out of this render.
+  //
+  // The guard holds what is being read, not a plain "in flight" flag. A project
+  // switch mid-read has to start the new project's load instead of being
+  // swallowed by the old request's guard, and nothing would re-arm it: the old
+  // request releasing the guard changes no dependency, so the effect would not
+  // run again and the page would sit empty. A stale result that lands late is
+  // discarded by its root tag.
+  // Kind first: it is a two-value enum, so the boundary is unambiguous however
+  // the project path is spelled.
+  const tutorialRequest = `${tutorialKind}:${repoRoot}`;
   useEffect(() => {
-    if (!repoReady || activeTab !== "tutorial" || tutorialDoc || tutorialAutoLoadRef.current) {
-      return;
-    }
-    tutorialAutoLoadRef.current = true;
+    if (!repoReady || activeTab !== "tutorial" || tutorialDoc) return;
+    if (tutorialAutoLoadRef.current === tutorialRequest) return;
+    tutorialAutoLoadRef.current = tutorialRequest;
     void Promise.resolve()
       .then(() => loadTutorial(tutorialKind))
       .finally(() => {
-        tutorialAutoLoadRef.current = false;
+        if (tutorialAutoLoadRef.current === tutorialRequest) {
+          tutorialAutoLoadRef.current = null;
+        }
       });
-  }, [activeTab, loadTutorial, repoReady, tutorialDoc, tutorialKind]);
+  }, [activeTab, loadTutorial, repoReady, tutorialDoc, tutorialKind, tutorialRequest]);
 
   useEffect(() => {
     return () => {
