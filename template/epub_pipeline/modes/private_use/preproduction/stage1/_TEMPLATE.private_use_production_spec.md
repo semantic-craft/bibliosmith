@@ -20,9 +20,9 @@ Do not record the user's local absolute path in reader-facing files or publishab
 
 ## Cover / 封面
 
-Private-use covers must be visually complete but must not present the book as a public-domain or public-domain-books-translation-published edition.
+Private-use covers must be visually complete but must not present the book as a public-domain or BiblioSmith-published edition.
 
-私人自用封面必须完整可读，但不得把书包装成公版或 public-domain-books-translation 项目出版版本。
+私人自用封面必须完整可读，但不得把书包装成公版或 BiblioSmith 项目出版版本。
 
 Required cover text:
 
@@ -50,10 +50,10 @@ The private-use book-info/frontmatter page must not contain public-domain notice
 Required reader-facing wording:
 
 - Edition label: `私人学习版本` or target-language equivalent.
-- Producer line: `参考public-domain-books-translation 开源项目 个人自制`.
+- Producer line: `参考BiblioSmith 开源项目 个人自制`.
 - Local source evidence: local file name and SHA256 summary only.
 - Rights/use boundary: `仅供个人自用，不传播，不商业使用`.
-- Risk boundary: 风险由个人承担；public-domain-books-translation 开源项目仅用于公版书翻译发布，不承担其他个人翻译、保存、传播或使用非公版内容导致的版权风险及责任。
+- Risk boundary: 风险由个人承担；BiblioSmith 开源项目仅用于公版书翻译发布，不承担其他个人翻译、保存、传播或使用非公版内容导致的版权风险及责任。
 
 Forbidden book-info/frontmatter wording:
 

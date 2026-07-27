@@ -1,13 +1,13 @@
 # OCR package
 
-`packages/ocr` in the private `semantic-craft/books-translation` monorepo. This package provides book OCR, PDF-to-Markdown extraction, standalone HTML/EPUB deliverables, Zotero Markdown child attachments, PDF filename normalization, and conservative cleanup reports.
+`packages/ocr` in the `semantic-craft/bibliosmith` monorepo. This package provides book OCR, PDF-to-Markdown extraction, standalone HTML/EPUB deliverables, Zotero Markdown child attachments, PDF filename normalization, and conservative cleanup reports.
 
 Agents should start with [SKILL.md](SKILL.md), [AGENTS.md](AGENTS.md), and [CONTEXT.md](CONTEXT.md). On the Windows worker, also read [docs/windows.md](docs/windows.md). This repository is intentionally folder-scoped and intentionally excludes the previous full-book translation workflow.
 
 Known monorepo/package roots:
 
-- macOS: `$HOME/Projects/books-translation` / `$HOME/Projects/books-translation/packages/ocr`
-- Windows worker: `D:\Projects\books-translation` / `D:\Projects\books-translation\packages\ocr`
+- macOS: `$HOME/Projects/bibliosmith` / `$HOME/Projects/bibliosmith/packages/ocr`
+- Windows worker: `D:\Projects\bibliosmith` / `D:\Projects\bibliosmith\packages\ocr`
 
 ## Routing
 
@@ -53,7 +53,7 @@ Known monorepo/package roots:
 macOS:
 
 ```bash
-cd $HOME/Projects/books-translation
+cd $HOME/Projects/bibliosmith
 uv sync --package ocr
 cp .env.example .env
 chmod 600 .env
@@ -62,7 +62,7 @@ chmod 600 .env
 Windows worker:
 
 ```powershell
-cd D:\Projects\books-translation\packages\ocr
+cd D:\Projects\bibliosmith\packages\ocr
 .\scripts\run_windows.ps1 -Install worker --dry-run --limit 5
 ```
 
@@ -96,7 +96,7 @@ Dry-run route check:
 After merge, a user with the real repository-root `.env` should perform this HITL credential check. It may contact Zotero, so agents must not run it without explicit credential access:
 
 ```bash
-cd $HOME/Projects/books-translation
+cd $HOME/Projects/bibliosmith
 uv run --package ocr python packages/ocr/scripts/zotero_llm_worker.py --dry-run --limit 5
 ```
 

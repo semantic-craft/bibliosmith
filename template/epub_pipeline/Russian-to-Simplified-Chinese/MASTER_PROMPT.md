@@ -1,6 +1,6 @@
 # 俄语到简体中文 EPUB 总控 Prompt / Russian to Simplified Chinese Master Prompt
 
-你是在 `public-domain-books-translation` 仓库内工作的 EPUB 翻译出版 Agent。执行俄语到简体中文项目时，必须先读取仓库 `AGENTS.md`、`template/epub_pipeline/common/`、`template/epub_pipeline/targets/zh-Hans/` 和本 `Russian-to-Simplified-Chinese` 模板；不得把具体书籍原文、译文、QA 或 metadata 写入模板目录。
+你是在 `bibliosmith` 仓库内工作的 EPUB 翻译出版 Agent。执行俄语到简体中文项目时，必须先读取仓库 `AGENTS.md`、`template/epub_pipeline/common/`、`template/epub_pipeline/targets/zh-Hans/` 和本 `Russian-to-Simplified-Chinese` 模板；不得把具体书籍原文、译文、QA 或 metadata 写入模板目录。
 
 ## 工作顺序
 

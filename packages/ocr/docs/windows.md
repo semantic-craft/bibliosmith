@@ -1,22 +1,22 @@
 # Windows Setup
 
-This package runs from the private `semantic-craft/books-translation` monorepo:
+This package runs from the `semantic-craft/bibliosmith` monorepo:
 
 ```powershell
-D:\Projects\books-translation\packages\ocr
+D:\Projects\bibliosmith\packages\ocr
 ```
 
 It is focused on book OCR, Markdown extraction, standalone HTML generation, Zotero Markdown child attachments, PDF attachment naming, and conservative cleanup queues.
 
 ## Windows worker checkout
 
-Authenticate to the private repository with an SSH deploy key or a GitHub PAT stored in Windows Credential Manager/Git Credential Manager. Never put repository credentials in `.env` or tracked files. Then use a sparse checkout so Windows worker does not download `books/` data or local OCR inputs:
+`semantic-craft/bibliosmith` is public, so a read-only clone needs no credentials; the HTTPS URL below works unauthenticated. Push access still needs SSH or a GitHub PAT stored in Windows Credential Manager/Git Credential Manager, and repository credentials never belong in `.env` or tracked files. Use a sparse checkout so the Windows worker does not download `books/` data or local OCR inputs:
 
 ```powershell
-git clone --filter=blob:none --no-checkout git@github.com:semantic-craft/books-translation.git D:\Projects\books-translation
-git -C D:\Projects\books-translation sparse-checkout init --no-cone
-git -C D:\Projects\books-translation sparse-checkout set /packages/ocr/ /pyproject.toml /uv.lock /.env.example /.gitignore
-git -C D:\Projects\books-translation checkout main
+git clone --filter=blob:none --no-checkout https://github.com/semantic-craft/bibliosmith.git D:\Projects\bibliosmith
+git -C D:\Projects\bibliosmith sparse-checkout init --no-cone
+git -C D:\Projects\bibliosmith sparse-checkout set /packages/ocr/ /pyproject.toml /uv.lock /.env.example /.gitignore
+git -C D:\Projects\bibliosmith checkout main
 ```
 
 Non-cone mode is intentional: it materializes only the OCR package and the exact
@@ -30,7 +30,7 @@ When running the same command from Git Bash instead of PowerShell, disable MSYS
 path conversion for the sparse patterns and use the Windows form for `-C`:
 
 ```bash
-MSYS_NO_PATHCONV=1 git -C D:/Projects/books-translation sparse-checkout set /packages/ocr/ /pyproject.toml /uv.lock /.env.example /.gitignore
+MSYS_NO_PATHCONV=1 git -C D:/Projects/bibliosmith sparse-checkout set /packages/ocr/ /pyproject.toml /uv.lock /.env.example /.gitignore
 ```
 
 ## Runtime
@@ -38,14 +38,14 @@ MSYS_NO_PATHCONV=1 git -C D:/Projects/books-translation sparse-checkout set /pac
 Use the Windows runner:
 
 ```powershell
-cd D:\Projects\books-translation\packages\ocr
+cd D:\Projects\bibliosmith\packages\ocr
 .\scripts\run_windows.ps1 -Install worker --dry-run --limit 5
 ```
 
 Or verify the workspace member from the monorepo root without contacting Zotero or an OCR service:
 
 ```powershell
-cd D:\Projects\books-translation
+cd D:\Projects\bibliosmith
 uv run --package ocr python packages/ocr/scripts/zotero_llm_worker.py --help
 ```
 
@@ -70,7 +70,7 @@ Verified on Windows worker on 2026-07-17:
 
 Before changing any Windows Scheduled Task, shortcut, or wrapper, record its
 current working directory and command and keep the previous checkout intact. Point
-the runtime to `D:\Projects\books-translation\packages\ocr` only after the smoke
+the runtime to `D:\Projects\bibliosmith\packages\ocr` only after the smoke
 check passes.
 
 To roll back:
@@ -141,12 +141,12 @@ ZOTERO_LIBRARY_ID=
 
 Do not print these values in logs or terminal output.
 
-OCR entrypoints read only `D:\Projects\books-translation\.env`; already exported environment variables take precedence. Package-local `.env` files are not read.
+OCR entrypoints read only `D:\Projects\bibliosmith\.env`; already exported environment variables take precedence. Package-local `.env` files are not read.
 
 The project-local single-file CLI is:
 
 ```powershell
-D:\Projects\books-translation\packages\ocr\paddle.py
+D:\Projects\bibliosmith\packages\ocr\paddle.py
 ```
 
 Examples:
@@ -160,7 +160,7 @@ WSL can call the same client through a wrapper if one is installed:
 
 ```bash
 paddle --self-test
-paddle /mnt/d/Projects/books-translation/packages/ocr/编程书/some-book.pdf -o /mnt/d/Projects/books-translation/packages/ocr/output/paddle/some-book
+paddle /mnt/d/Projects/bibliosmith/packages/ocr/编程书/some-book.pdf -o /mnt/d/Projects/bibliosmith/packages/ocr/output/paddle/some-book
 ```
 
 ## MinerU
@@ -180,7 +180,7 @@ uv pip install --python .\.venv\Scripts\python.exe -U "mineru[all]"
 If you need the native MinerU CLI, force its explicit executable path through the monorepo-root `.env`:
 
 ```text
-MINERU_COMMAND=D:\Projects\books-translation\packages\ocr\.venv\Scripts\mineru.exe
+MINERU_COMMAND=D:\Projects\bibliosmith\packages\ocr\.venv\Scripts\mineru.exe
 MINERU_METHOD=ocr
 MINERU_LANG=ch
 MINERU_BACKEND=
@@ -202,7 +202,7 @@ For scanned books and academic papers, prefer the MinerU Precision Extract API w
 Project-local single-file CLI:
 
 ```powershell
-D:\Projects\books-translation\packages\ocr\mineru.py
+D:\Projects\bibliosmith\packages\ocr\mineru.py
 ```
 
 Examples:

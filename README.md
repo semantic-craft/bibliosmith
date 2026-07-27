@@ -192,8 +192,9 @@ cd tools/bibliosmith-launcher/source/src-tauri && cargo test
 cd tools/bibliosmith-launcher/source && npm ci && npx tsc --noEmit && npm test && npm run test:startup-contract
 ```
 
-Expected counts, measured 2026-07-26: translation engine 81, OCR 18, Zotero CLI
-62, repository suites 89, launcher backend 209, launcher frontend 122.
+Expected counts, measured 2026-07-27: translation engine 81, OCR 18, Zotero CLI
+62, repository suites 99, launcher backend 223, launcher frontend 143. They drift
+upward whenever a branch adds tests; only a failure is a regression.
 
 `--package translation-engine` is not optional: it installs the workspace member
 so the CLI tests can reach its console scripts. A plain `uv sync` at the
