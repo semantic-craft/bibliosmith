@@ -37,12 +37,12 @@ FORBIDDEN_BIBLIOSMITH_PRODUCER_SNIPPETS = [
 ]
 
 REQUIRED_BOOK_INFO_SNIPPETS = [
-    "参考public-domain-books-translation 开源项目 个人自制",
+    "参考BiblioSmith 开源项目 个人自制",
     "仅供个人自用",
     "不传播",
     "不商业使用",
     "风险由个人承担",
-    "public-domain-books-translation 开源项目仅用于公版书翻译发布",
+    "BiblioSmith 开源项目仅用于公版书翻译发布",
     "不承担其他个人翻译、保存、传播或使用非公版内容导致的版权风险及责任",
 ]
 

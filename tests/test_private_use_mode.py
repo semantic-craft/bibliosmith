@@ -98,7 +98,7 @@ def write_minimal_template(repo_root: Path) -> None:
         "# Private cover\n\n个人学习版\n", encoding="utf-8"
     )
     (mode / "references" / "private_use_frontmatter_policy.md").write_text(
-        "# Private frontmatter\n\n参考public-domain-books-translation 开源项目 个人自制\n", encoding="utf-8"
+        "# Private frontmatter\n\n参考BiblioSmith 开源项目 个人自制\n", encoding="utf-8"
     )
     (mode / "references" / "private_use_artifact_policy.md").write_text(
         "# Private artifacts\n", encoding="utf-8"
@@ -214,7 +214,7 @@ class PrivateUseModeTests(unittest.TestCase):
             )
             declaration = (project_root / "metadata" / "private_use_declaration.md").read_text(encoding="utf-8")
             self.assertIn("风险由个人承担", declaration)
-            self.assertIn("public-domain-books-translation 开源项目仅用于公版书翻译发布", declaration)
+            self.assertIn("BiblioSmith 开源项目仅用于公版书翻译发布", declaration)
             self.assertTrue((project_root / "references" / "private_use_cover_policy.md").exists())
             self.assertTrue((project_root / "references" / "private_use_frontmatter_policy.md").exists())
             self.assertTrue((project_root / "references" / "private_use_artifact_policy.md").exists())
@@ -495,13 +495,13 @@ class PrivateUseModeTests(unittest.TestCase):
                         "书名：私人书籍",
                         "作者：某作者",
                         "版本：私人学习版本",
-                        "制作标识：参考public-domain-books-translation 开源项目 个人自制",
+                        "制作标识：参考BiblioSmith 开源项目 个人自制",
                         "本地书源：source.epub",
                         "书源校验：SHA256 abc123",
                         "",
                         "仅供个人自用，不传播，不商业使用。",
                         "",
-                        "风险由个人承担。public-domain-books-translation 开源项目仅用于公版书翻译发布，不承担其他个人翻译、保存、传播或使用非公版内容导致的版权风险及责任。",
+                        "风险由个人承担。BiblioSmith 开源项目仅用于公版书翻译发布，不承担其他个人翻译、保存、传播或使用非公版内容导致的版权风险及责任。",
                     ]
                 )
                 + "\n",
