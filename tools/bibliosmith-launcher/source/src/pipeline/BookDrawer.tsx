@@ -54,7 +54,7 @@ export type BookDrawerProps = {
   onSelect: (key: string) => void;
   onClose: () => void;
   onRetry: (jobId: string) => void;
-  onDelete: (jobId: string) => void;
+  onDelete: (jobId: string, childId?: string | null) => void;
   onAdvance: (jobId: string, childId: string) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   // Adopting a sampled slot as the book's own. Separate from sampling, because
@@ -68,6 +68,14 @@ export type BookDrawerProps = {
   ) => void;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
+  onRecordReaderEvidence: (
+    jobId: string,
+    childId: string,
+    artifactKind: string,
+    reader: string,
+    readerVersion: string,
+    conclusion: string,
+  ) => void;
   onOpenOutput: (jobId: string) => void;
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
 };
@@ -524,6 +532,7 @@ function AdvancedDetails(props: BookDrawerProps) {
     onAdvance: props.onAdvance,
     onApproveGate: props.onApproveGate,
     onRouteOverride: props.onRouteOverride,
+    onRecordReaderEvidence: props.onRecordReaderEvidence,
     onOpenOutput: props.onOpenOutput,
     onHandoff: props.onHandoff,
     onGoApproval: () => setTab("approval"),
@@ -673,8 +682,8 @@ function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement
 
 export function BookDrawer(props: BookDrawerProps) {
   const { copy, units, unit, busy, onSelect, onClose, onDelete } = props;
-  // Delete removes the job, and a collection job holds every book it queued.
-  const batchSize = unit.job.children.length;
+  // Delete now drops just this book; only the last one left takes the job with
+  // it, so the batch wording is gone and the confirmation is true again.
   const index = units.findIndex((candidate) => candidate.key === unit.key);
   const step = (offset: number) => {
     if (!units.length) return;
@@ -710,15 +719,15 @@ export function BookDrawer(props: BookDrawerProps) {
         <div className="pl-dbody">
           {confirmingDelete && (
             <div className="pl-hintcard errc">
-              <span>{batchSize > 1 ? copy.deleteBookBatchConfirmHint(batchSize) : copy.deleteBookConfirmHint}</span>
+              <span>{copy.deleteBookConfirmHint}</span>
               <span className="pl-spacer" />
               <button
                 className="pl-btn sm danger-ghost"
                 type="button"
                 disabled={busy === "delete"}
-                onClick={() => onDelete(unit.job.id)}
+                onClick={() => onDelete(unit.job.id, unit.child?.id ?? null)}
               >
-                {batchSize > 1 ? copy.deleteBookBatchConfirm(batchSize) : copy.deleteBookConfirm}
+                {copy.deleteBookConfirm}
               </button>
               <button
                 className="pl-btn sm quiet"

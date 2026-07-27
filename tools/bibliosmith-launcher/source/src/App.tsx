@@ -15,6 +15,7 @@ import {
   chooseBookPipelinePdfFolder,
   advanceBookPipelineJob,
   setBookPipelineRouteOverride,
+  recordBookPipelineReaderEvidence,
   approveBookPipelineGate,
   deleteBookPipelineJob,
   discoverBookPipelineZoteroSources,
@@ -486,10 +487,10 @@ export default function App() {
     }
   }, [addActivity, showFloatingToast]);
 
-  const deletePipeline = useCallback(async (jobId: string) => {
+  const deletePipeline = useCallback(async (jobId: string, childId?: string | null) => {
     setPipelineBusy("delete");
     try {
-      const state = await deleteBookPipelineJob(jobId);
+      const state = await deleteBookPipelineJob(jobId, childId);
       setPipelineState(state);
       addActivity("success", `Book Pipeline job deleted: ${jobId}`);
       showFloatingToast(bookPipelineCopy.deleteBookDone, "success");
@@ -540,6 +541,36 @@ export default function App() {
 
   // Re-route a held book in place. The credentials the backend needs to decide
   // whether a forced provider is usable are the same ones the wizard sends.
+  const recordReaderEvidence = useCallback(async (
+    jobId: string,
+    childId: string,
+    artifactKind: string,
+    reader: string,
+    readerVersion: string,
+    conclusion: string,
+  ) => {
+    setPipelineBusy("readerEvidence");
+    try {
+      const job = await recordBookPipelineReaderEvidence(
+        jobId,
+        childId,
+        artifactKind,
+        reader,
+        readerVersion,
+        conclusion,
+      );
+      setPipelineState((current) => upsertPipelineJob(current, job));
+      addActivity("info", `Book Pipeline reader evidence recorded: ${reader} ${readerVersion}`);
+      showFloatingToast(job.currentStep, "success");
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+    } finally {
+      setPipelineBusy(null);
+    }
+  }, [addActivity, showFloatingToast]);
+
   const overridePipelineRoute = useCallback(async (
     jobId: string,
     childId: string,
@@ -1960,7 +1991,7 @@ export default function App() {
               onDiscoverZotero={() => void discoverPipelineZoteroSources()}
               onSearchZotero={(query) => void discoverZoteroByQuery(query)}
               onRetry={(jobId) => void retryPipeline(jobId)}
-              onDelete={(jobId) => void deletePipeline(jobId)}
+              onDelete={(jobId, childId) => void deletePipeline(jobId, childId)}
               onAdvance={(jobId, childId) => void advancePipeline(jobId, childId)}
               onSampleTranslation={(jobId, childId, providerProfileId, providerConfigId) =>
                 void samplePipelineTranslation(jobId, childId, providerProfileId, providerConfigId)
@@ -1975,6 +2006,9 @@ export default function App() {
               onApproveGate={(jobId, childId, stageId) => void approvePipelineGate(jobId, childId, stageId)}
               onRouteOverride={(jobId, childId, routeItemId, routeOverride) =>
                 void overridePipelineRoute(jobId, childId, routeItemId, routeOverride)
+              }
+              onRecordReaderEvidence={(jobId, childId, artifactKind, reader, readerVersion, conclusion) =>
+                void recordReaderEvidence(jobId, childId, artifactKind, reader, readerVersion, conclusion)
               }
               onOpenOutput={(jobId) => void openPipelineOutput(jobId)}
               routeOverrides={pipelineRouteOverrides}

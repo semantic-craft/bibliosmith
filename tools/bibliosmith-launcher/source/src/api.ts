@@ -1118,7 +1118,7 @@ export function retryBookPipelineJob(jobId: string) {
   return invoke<BookPipelineJob>("retry_book_pipeline_job", { jobId });
 }
 
-export function deleteBookPipelineJob(jobId: string) {
+export function deleteBookPipelineJob(jobId: string, childId?: string | null) {
   if (!isTauriRuntime()) {
     previewBookPipelineJobs = previewBookPipelineJobs.filter((job) => job.id !== jobId);
     previewBookPipelineRevision += 1;
@@ -1130,6 +1130,7 @@ export function deleteBookPipelineJob(jobId: string) {
   }
   return invoke<BookPipelineState>("delete_book_pipeline_job", {
     jobId,
+    childId: childId ?? null,
     explicitApproval: true,
   });
 }
@@ -1183,6 +1184,25 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
     return Promise.resolve({ ...job });
   }
   return invoke<BookPipelineJob>("approve_book_pipeline_gate", { jobId, childId, stageId, explicitApproval: true });
+}
+
+/** Record that a person opened the built book in a real reader. */
+export async function recordBookPipelineReaderEvidence(
+  jobId: string,
+  childId: string,
+  artifactKind: string,
+  reader: string,
+  readerVersion: string,
+  conclusion: string,
+): Promise<BookPipelineJob> {
+  return invoke<BookPipelineJob>("record_book_pipeline_reader_evidence", {
+    jobId,
+    childId,
+    artifactKind,
+    reader,
+    readerVersion,
+    conclusion,
+  });
 }
 
 /** Re-route a book the pipeline held back, without deleting and re-queueing it. */

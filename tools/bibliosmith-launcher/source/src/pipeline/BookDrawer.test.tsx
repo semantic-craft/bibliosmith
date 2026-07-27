@@ -37,6 +37,7 @@ function drawerProps(unit: BookUnit, over: Partial<BookDrawerProps> = {}): BookD
     onSaveCustomInstructions: vi.fn(),
     onApproveGate: vi.fn(),
     onRouteOverride: vi.fn(),
+    onRecordReaderEvidence: vi.fn(),
     onOpenOutput: vi.fn(),
     onHandoff: vi.fn(),
     ...over,
@@ -274,19 +275,18 @@ describe("BookDrawer gate card", () => {
     expect(props.onRouteOverride).toHaveBeenCalledWith("job-1", "child-1", "DIRTY", "mineru");
   });
 
-  // Delete removes the whole job, and a collection queues many books under one.
-  // The confirmation used to say "this book" while taking the entire batch.
-  it("says how many books a batch delete actually removes", async () => {
+  // Deleting used to remove the whole job, taking every other book in the batch
+  // with it. It now drops just the book the user pointed at.
+  it("drops only the book it was opened on", async () => {
     const user = userEvent.setup();
     const batch = bookUnit({ status: "completed" });
     batch.job.children = [batch.child!, { ...batch.child!, id: "child-2" }, { ...batch.child!, id: "child-3" }];
 
-    const { container } = renderDrawer(batch);
+    const { container, props } = renderDrawer(batch);
     await user.click(within(container).getByRole("button", { name: copy.deleteBook }));
+    await user.click(screen.getByRole("button", { name: copy.deleteBookConfirm }));
 
-    expect(screen.getByText(copy.deleteBookBatchConfirmHint(3))).toBeTruthy();
-    expect(screen.getByRole("button", { name: copy.deleteBookBatchConfirm(3) })).toBeTruthy();
-    expect(screen.queryByText(copy.deleteBookConfirmHint)).toBeNull();
+    expect(props.onDelete).toHaveBeenCalledWith("job-1", "child-1");
   });
 
   // A single-book job keeps the original wording, which was already accurate.
@@ -315,6 +315,61 @@ describe("BookDrawer gate card", () => {
     rerender(<BookDrawer key={second.key} {...props} unit={second} />);
 
     expect(screen.queryByText(copy.deleteBookConfirmHint)).toBeNull();
+  });
+
+  // The record command, its wrapper and its types all shipped; nothing called
+  // them, so the one thing this feature asks a human for could not be given.
+  it("records reader verification against the built EPUB", async () => {
+    const user = userEvent.setup();
+    const built = bookUnit({
+      status: "completed",
+      stages: [stage("validate_reading", "completed")],
+      childOver: {
+        artifacts: [artifact("reading_epub", { artifactId: "art-epub", sha256: "abcd1234" })],
+        readerEvidence: [
+          {
+            reader: "Calibre",
+            readerVersion: "8.4",
+            artifactKind: "reading_epub",
+            artifactSha256: "0000",
+            conclusion: "passed",
+            recordedAt: "2026-07-26T00:00:00Z",
+            stale: true,
+          },
+        ],
+      },
+    });
+    const { container, props } = renderDrawer(built);
+    await user.click(within(container).getByRole("tab", { name: copy.tabArtifacts }));
+
+    // An existing record is shown, and one taken against an older build says so.
+    const row = screen.getByText(/Calibre 8\.4/).closest(".pl-evi-row");
+    expect(row).toBeTruthy();
+    expect(row!.textContent).toContain(copy.readerEvidenceStale);
+
+    await user.type(screen.getByLabelText(copy.readerEvidenceName), "Apple Books");
+    await user.type(screen.getByLabelText(copy.readerEvidenceVersion), "7.2");
+    await user.click(screen.getByRole("button", { name: copy.readerEvidenceRecord }));
+
+    expect(props.onRecordReaderEvidence).toHaveBeenCalledWith(
+      "job-1",
+      "child-1",
+      "reading_epub",
+      "Apple Books",
+      "7.2",
+      "passed",
+    );
+  });
+
+  // Nothing to open means nothing to verify; the form must not invite a record
+  // that the backend would only reject.
+  it("cannot record reader verification before an EPUB is built", async () => {
+    const user = userEvent.setup();
+    const { container } = renderDrawer(bookUnit({ status: "running" }));
+    await user.click(within(container).getByRole("tab", { name: copy.tabArtifacts }));
+
+    expect(screen.getByText(copy.readerEvidenceNeedsBuild)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: copy.readerEvidenceRecord })).toBeNull();
   });
 
   it("reports the gate's approval to the caller with the focused child", async () => {

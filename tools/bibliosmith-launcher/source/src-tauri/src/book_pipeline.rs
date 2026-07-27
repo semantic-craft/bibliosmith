@@ -367,6 +367,14 @@ pub struct BookPipelineChildJob {
     pub custom_instructions: Option<BookPipelineCustomInstructions>,
     #[serde(default)]
     pub reader_evidence: Vec<BookPipelineReaderEvidence>,
+    /// When this book was dropped from the shelf. A collection's membership
+    /// snapshot is a frozen integrity anchor — `validate_state` requires
+    /// `child_job_ids` to equal the children exactly and
+    /// `validate_state_transitions` rejects any membership change — so removing
+    /// one book of a batch cannot mean removing the child. It means marking it,
+    /// and everything that walks the children skipping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_at: Option<String>,
 }
 
 /// The half of "validated in EPUBCheck **and a real reader**" that a machine
@@ -1585,6 +1593,7 @@ fn collection_child_from_route(
         source_identity: None,
         custom_instructions: None,
         reader_evidence: Vec::new(),
+        removed_at: None,
     };
     if let Some(stage) = child
         .stages
@@ -1801,6 +1810,7 @@ fn legacy_child_from_job(job: &BookPipelineJob, legacy_status: &str) -> BookPipe
         source_identity: None,
         custom_instructions: None,
         reader_evidence: Vec::new(),
+        removed_at: None,
     }
 }
 
@@ -2718,6 +2728,10 @@ fn select_book_pipeline_open_target(job: &BookPipelineJob) -> Option<BookPipelin
 }
 
 fn summarize_children(children: &[BookPipelineChildJob]) -> BookPipelineStatusSummary {
+    let children = children
+        .iter()
+        .filter(|child| child.removed_at.is_none())
+        .collect::<Vec<_>>();
     let mut summary = BookPipelineStatusSummary {
         total: children.len() as u32,
         ..BookPipelineStatusSummary::default()
@@ -3750,18 +3764,29 @@ pub async fn retry_book_pipeline_job(job_id: String) -> Result<BookPipelineJob, 
 #[tauri::command]
 pub async fn delete_book_pipeline_job(
     job_id: String,
+    child_id: Option<String>,
     explicit_approval: bool,
 ) -> Result<BookPipelineState, String> {
     crate::run_blocking(move || {
         let store = BookPipelineStore::default()?;
-        delete_job(&store, &job_id, explicit_approval)
+        delete_job(&store, &job_id, child_id.as_deref(), explicit_approval)
     })
     .await
+}
+
+/// A book still on the shelf. Everything that counts, schedules or displays a
+/// collection's books goes through this, so a dropped one stays in the frozen
+/// membership without being worked on or shown again.
+fn live_children(job: &BookPipelineJob) -> impl Iterator<Item = &BookPipelineChildJob> {
+    job.children
+        .iter()
+        .filter(|child| child.removed_at.is_none())
 }
 
 fn delete_job(
     store: &dyn BookPipelineStateStore,
     job_id: &str,
+    child_id: Option<&str>,
     explicit_approval: bool,
 ) -> Result<BookPipelineState, String> {
     if !explicit_approval {
@@ -3774,6 +3799,34 @@ fn delete_job(
             "This book is currently running; wait for the active stage to finish first.".into(),
         );
     }
+    // The shelf shows one row per book and a collection queues many under one
+    // job, so removing the job for the book the user pointed at took the rest of
+    // the batch with it. Drop just that book when others would remain.
+    if let Some(child_id) = child_id {
+        let job = &mut state.jobs[job_index];
+        let remaining = live_children(job)
+            .filter(|child| child.id != child_id)
+            .count();
+        let target = job
+            .children
+            .iter_mut()
+            .find(|child| child.id == child_id && child.removed_at.is_none())
+            .ok_or_else(|| "Book Pipeline child not found.".to_string())?;
+        if remaining > 0 {
+            target.removed_at = Some(now_label());
+            let title = source_title(&target.source);
+            job.current_step = "Removed one book from this batch".into();
+            job.log_summary
+                .push(format!("Removed {title} from this batch"));
+            job.log_summary = trim_log_summary(&job.log_summary);
+            job.updated_at = now_label();
+            derive_job(job);
+            store.save(&state)?;
+            return store.load();
+        }
+        // Nothing would be left on the shelf, so the row and the job are the
+        // same thing again and an empty batch is not worth keeping.
+    }
     state.jobs.remove(job_index);
     store.save(&state)?;
     store.load()
@@ -3781,7 +3834,7 @@ fn delete_job(
 
 fn job_is_actively_running(job: &BookPipelineJob) -> bool {
     matches!(job.status.as_str(), STATUS_RUNNING | STATUS_HANDOFF_RUNNING)
-        || job.children.iter().any(|child| {
+        || live_children(job).any(|child| {
             child
                 .stages
                 .iter()
@@ -5198,6 +5251,7 @@ fn collection_snapshot_child(
         }),
         custom_instructions: None,
         reader_evidence: Vec::new(),
+        removed_at: None,
     };
     derive_child(&mut child);
     Some(child)
@@ -15140,13 +15194,19 @@ fn locate_child_index(job: &BookPipelineJob, child_id: Option<&str>) -> Result<u
         Some(child_id) => job
             .children
             .iter()
-            .position(|child| child.id == child_id)
+            .position(|child| child.id == child_id && child.removed_at.is_none())
             .ok_or_else(|| "Book Pipeline child not found.".to_string()),
         None => job
             .children
             .iter()
-            .position(|child| deterministic_stage_to_run(child).is_some())
-            .or_else(|| (!job.children.is_empty()).then_some(0))
+            .position(|child| {
+                child.removed_at.is_none() && deterministic_stage_to_run(child).is_some()
+            })
+            .or_else(|| {
+                job.children
+                    .iter()
+                    .position(|child| child.removed_at.is_none())
+            })
             .ok_or_else(|| "This job has no child to advance.".to_string()),
     }
 }
@@ -18038,10 +18098,96 @@ mod tests {
         )
         .unwrap();
 
-        let state = delete_job(&store, &job.id, true).unwrap();
+        let state = delete_job(&store, &job.id, None, true).unwrap();
 
         assert!(state.jobs.is_empty());
         assert!(store.load().unwrap().jobs.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // Deleting the job for the book the user pointed at took the whole batch —
+    // and the child set cannot simply shrink: `validate_state` requires
+    // `child_job_ids` to equal the children exactly and
+    // `validate_state_transitions` rejects any membership change. So the book is
+    // marked, not removed, and everything that walks the children skips it.
+    #[test]
+    fn dropping_one_book_of_a_batch_keeps_the_rest_and_the_frozen_membership() {
+        let root = temp_root("drop-one-of-a-batch");
+        let store = BookPipelineStore::for_test(&root);
+        let job = queue_job(
+            &store,
+            fake_collection_source(),
+            "conversion_only".into(),
+            BookPipelinePreviewConfig {
+                has_paddleocr_credentials: true,
+                has_mineru_credentials: true,
+                route_overrides: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert!(job.children.len() > 1, "the fixture queues a batch");
+        let dropped = job.children[0].id.clone();
+        let survivors = job.children.len() - 1;
+        let membership_before = job.membership.clone();
+
+        let state = delete_job(&store, &job.id, Some(&dropped), true).unwrap();
+
+        let stored = state.jobs.iter().find(|item| item.id == job.id).unwrap();
+        assert_eq!(
+            stored.children.len(),
+            survivors + 1,
+            "the child stays; only the shelf loses it"
+        );
+        assert!(stored
+            .children
+            .iter()
+            .find(|child| child.id == dropped)
+            .unwrap()
+            .removed_at
+            .is_some());
+        assert_eq!(
+            stored.membership, membership_before,
+            "the frozen membership must be untouched, or the save would be rejected"
+        );
+        assert_eq!(
+            stored.summary.total, survivors as u32,
+            "a dropped book is not counted any more"
+        );
+        assert!(live_children(stored).all(|child| child.id != dropped));
+
+        // A dropped book must never be picked up for work again.
+        assert!(locate_child_index(stored, Some(&dropped)).is_err());
+        assert_ne!(locate_child_index(stored, None).unwrap(), 0);
+
+        // Dropping the last one that is left removes the job: an empty batch is
+        // a shelf row nobody could dismiss.
+        for child in stored.children.clone() {
+            if child.removed_at.is_none() {
+                delete_job(&store, &job.id, Some(&child.id), true).unwrap();
+            }
+        }
+        assert!(store.load().unwrap().jobs.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // A single-book job has nothing to narrow to: the child is the job.
+    #[test]
+    fn dropping_the_only_book_removes_the_job() {
+        let root = temp_root("drop-only-book");
+        let store = BookPipelineStore::for_test(&root);
+        let job = queue_job(
+            &store,
+            fake_source(None),
+            "conversion_only".into(),
+            BookPipelinePreviewConfig::default(),
+        )
+        .unwrap();
+        let child_id = job.children[0].id.clone();
+
+        let state = delete_job(&store, &job.id, Some(&child_id), true).unwrap();
+
+        assert!(state.jobs.is_empty());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -18057,11 +18203,11 @@ mod tests {
         )
         .unwrap();
 
-        let refused = delete_job(&store, &job.id, false).unwrap_err();
+        let refused = delete_job(&store, &job.id, None, false).unwrap_err();
         assert!(refused.contains("Explicit approval"), "got: {refused}");
         assert_eq!(store.load().unwrap().jobs.len(), 1);
 
-        let missing = delete_job(&store, "job-nonexistent", true).unwrap_err();
+        let missing = delete_job(&store, "job-nonexistent", None, true).unwrap_err();
         assert!(missing.contains("not found"), "got: {missing}");
         let _ = fs::remove_dir_all(root);
     }
