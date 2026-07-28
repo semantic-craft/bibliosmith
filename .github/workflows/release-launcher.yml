@@ -167,17 +167,12 @@ jobs:
       - name: Verify signed and notarized release
         run: |
           shopt -s nullglob
-          apps=(src-tauri/target/release/bundle/macos/*.app)
           dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
-          if [ "${#apps[@]}" -ne 1 ]; then
-            echo "Expected exactly one release app, found ${#apps[@]}." >&2
-            exit 1
-          fi
           if [ "${#dmgs[@]}" -ne 1 ]; then
             echo "Expected exactly one release DMG, found ${#dmgs[@]}." >&2
             exit 1
           fi
-          ./scripts/verify-macos-release.sh "${apps[0]}" "${dmgs[0]}"
+          ./scripts/verify-macos-release.sh "${dmgs[0]}"
 
       # --repo is github.repository rather than a literal, so a fork that pushes
       # a tag publishes to itself instead of trying to write here.

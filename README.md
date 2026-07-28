@@ -89,6 +89,17 @@ The committed bundle config targets `Developer ID Application`. Release
 maintainers with that certificate can omit `--no-sign` or set an exact
 `APPLE_SIGNING_IDENTITY`; only the Release workflow injects signing and
 notarization secrets.
+
+On macOS, a release maintainer can update the Apple app-specific password
+without placing it in shell history or command arguments:
+
+```sh
+./tools/bibliosmith-launcher/source/scripts/set-apple-password-secret-macos.sh
+```
+
+The script opens a hidden-input dialog and sends the value directly to the
+`APPLE_PASSWORD` GitHub Secret for `semantic-craft/bibliosmith`. An empty or
+cancelled dialog leaves the existing Secret unchanged.
 The Rust tests do not need the frontend bundle; see [Tests](#tests).
 
 ## Quick Start

@@ -2,13 +2,12 @@
 # Verify the public macOS release acceptance boundary before upload.
 set -euo pipefail
 
-if [[ "$#" -ne 2 || ! -d "$1" || "$1" != *.app || ! -f "$2" || "$2" != *.dmg ]]; then
-  echo "usage: verify-macos-release.sh /path/to/app /path/to/dmg" >&2
+if [[ "$#" -ne 1 || ! -f "$1" || "$1" != *.dmg ]]; then
+  echo "usage: verify-macos-release.sh /path/to/dmg" >&2
   exit 2
 fi
 
-app_path="$1"
-dmg_path="$2"
+dmg_path="$1"
 
 verify_app() {
   local candidate="$1"
@@ -29,7 +28,6 @@ verify_app() {
   xcrun stapler validate "$candidate"
 }
 
-verify_app "$app_path"
 hdiutil verify "$dmg_path"
 xcrun stapler validate "$dmg_path"
 

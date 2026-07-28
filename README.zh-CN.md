@@ -71,6 +71,16 @@ npx tauri build --bundles dmg --no-sign  # 不要求证书的本地构建
 `--no-sign`，或用 `APPLE_SIGNING_IDENTITY` 指定精确身份；只有 Release workflow 会注入
 签名与公证 Secrets。
 
+macOS 发布维护者可用下面的脚本更新 Apple App 专用密码，避免密码进入 shell 历史或
+命令参数：
+
+```sh
+./tools/bibliosmith-launcher/source/scripts/set-apple-password-secret-macos.sh
+```
+
+脚本会弹出隐藏输入框，并把内容直接写入 `semantic-craft/bibliosmith` 的
+`APPLE_PASSWORD` GitHub Secret；留空或取消不会改动现有 Secret。
+
 ## 起一本新书
 
 ```bash

@@ -28,6 +28,14 @@ VERIFIER = (
     / "scripts"
     / "verify-macos-release.sh"
 )
+APPLE_PASSWORD_SECRET_SETTER = (
+    REPO_ROOT
+    / "tools"
+    / "bibliosmith-launcher"
+    / "source"
+    / "scripts"
+    / "set-apple-password-secret-macos.sh"
+)
 README_EN = REPO_ROOT / "README.md"
 README_ZH = REPO_ROOT / "README.zh-CN.md"
 LAUNCHER_README_ZH = (
@@ -72,8 +80,6 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
         root = Path(raw)
         bin_dir = root / "bin"
         bin_dir.mkdir()
-        app = root / "BiblioSmith Launcher.app"
-        app.mkdir()
         dmg = root / "BiblioSmith Launcher.dmg"
         dmg.write_bytes(b"test-dmg")
         command_log = root / "commands.log"
@@ -111,7 +117,7 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
             }
         )
         completed = subprocess.run(
-            ["bash", str(VERIFIER), str(app), str(dmg)],
+            ["bash", str(VERIFIER), str(dmg)],
             capture_output=True,
             text=True,
             env=env,
@@ -126,9 +132,6 @@ def test_release_verifier_accepts_a_notarized_developer_id_app() -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert [command.split()[0] for command in commands] == [
-        "codesign",
-        "spctl",
-        "xcrun",
         "hdiutil",
         "xcrun",
         "hdiutil",
@@ -137,16 +140,13 @@ def test_release_verifier_accepts_a_notarized_developer_id_app() -> None:
         "xcrun",
         "hdiutil",
     ]
-    assert "--verify --deep --strict --verbose=2" in commands[0]
-    assert "-a -vvv -t install" in commands[1]
-    assert commands[2].startswith("xcrun stapler validate ")
-    assert commands[3].startswith("hdiutil verify ")
-    assert commands[4].startswith("xcrun stapler validate ")
-    assert commands[5].startswith("hdiutil attach ")
-    assert commands[6].startswith("codesign --verify ")
-    assert commands[7].startswith("spctl -a -vvv -t install ")
-    assert commands[8].startswith("xcrun stapler validate ")
-    assert commands[9].startswith("hdiutil detach ")
+    assert commands[0].startswith("hdiutil verify ")
+    assert commands[1].startswith("xcrun stapler validate ")
+    assert commands[2].startswith("hdiutil attach ")
+    assert "--verify --deep --strict --verbose=2" in commands[3]
+    assert "-a -vvv -t install" in commands[4]
+    assert commands[5].startswith("xcrun stapler validate ")
+    assert commands[6].startswith("hdiutil detach ")
 
 
 def test_release_verifier_rejects_a_non_notarized_gatekeeper_source() -> None:
@@ -154,7 +154,121 @@ def test_release_verifier_rejects_a_non_notarized_gatekeeper_source() -> None:
 
     assert completed.returncode != 0
     assert "Notarized Developer ID" in completed.stderr
-    assert [command.split()[0] for command in commands] == ["codesign", "spctl"]
+    assert [command.split()[0] for command in commands] == [
+        "hdiutil",
+        "xcrun",
+        "hdiutil",
+        "codesign",
+        "spctl",
+        "hdiutil",
+    ]
+
+
+def _run_apple_password_secret_setter(
+    osascript_body: str, dialog_password: str = ""
+) -> tuple[subprocess.CompletedProcess[str], str, str, str]:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        osascript_input = root / "osascript-input.txt"
+        gh_arguments = root / "gh-arguments.txt"
+        gh_stdin = root / "gh-stdin.txt"
+
+        _write_command(bin_dir / "osascript", osascript_body)
+        _write_command(
+            bin_dir / "gh",
+            'printf \'%s\n\' "$*" > "$GH_ARGUMENTS"\n'
+            'cat > "$GH_STDIN"',
+        )
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
+                "OSASCRIPT_INPUT": str(osascript_input),
+                "GH_ARGUMENTS": str(gh_arguments),
+                "GH_STDIN": str(gh_stdin),
+                "DIALOG_PASSWORD": dialog_password,
+            }
+        )
+        completed = subprocess.run(
+            ["bash", str(APPLE_PASSWORD_SECRET_SETTER)],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        return (
+            completed,
+            osascript_input.read_text(encoding="utf-8") if osascript_input.exists() else "",
+            gh_arguments.read_text(encoding="utf-8") if gh_arguments.exists() else "",
+            gh_stdin.read_text(encoding="utf-8") if gh_stdin.exists() else "",
+        )
+
+
+def test_apple_password_secret_setter_uses_a_hidden_dialog_and_stdin() -> None:
+    transient_value = "transient-test-value"
+    completed, prompt, gh_arguments, gh_stdin = _run_apple_password_secret_setter(
+        'cat > "$OSASCRIPT_INPUT"\nprintf \'OK:%s\' "$DIALOG_PASSWORD"',
+        transient_value,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "with hidden answer" in prompt
+    assert (
+        gh_arguments.strip()
+        == "secret set APPLE_PASSWORD --repo semantic-craft/bibliosmith"
+    )
+    assert gh_stdin == transient_value
+    assert transient_value not in completed.stdout
+    assert transient_value not in completed.stderr
+
+
+def test_apple_password_secret_setter_rejects_an_empty_dialog() -> None:
+    completed, _, gh_arguments, gh_stdin = _run_apple_password_secret_setter(
+        "printf 'OK:'"
+    )
+
+    assert completed.returncode != 0
+    assert not gh_arguments
+    assert not gh_stdin
+    assert "empty" in completed.stderr.lower()
+
+
+def test_apple_password_secret_setter_leaves_the_secret_unchanged_when_cancelled() -> None:
+    completed, _, gh_arguments, gh_stdin = _run_apple_password_secret_setter(
+        "printf 'CANCEL'"
+    )
+
+    assert completed.returncode == 0
+    assert not gh_arguments
+    assert not gh_stdin
+    assert "cancelled" in completed.stderr.lower()
+    assert "execution error" not in completed.stderr.lower()
+
+
+def test_apple_password_secret_setter_does_not_confuse_password_text_with_cancel() -> None:
+    marker_text = "__BIBLIOSMITH_DIALOG_CANCELLED__"
+    completed, _, gh_arguments, gh_stdin = _run_apple_password_secret_setter(
+        "printf 'OK:%s' '__BIBLIOSMITH_DIALOG_CANCELLED__'"
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert gh_arguments
+    assert gh_stdin == marker_text
+
+
+def test_apple_password_secret_setter_reports_non_cancel_dialog_failures() -> None:
+    completed, _, gh_arguments, gh_stdin = _run_apple_password_secret_setter(
+        'echo "execution error: Apple events unavailable. (-1743)" >&2\nexit 1'
+    )
+
+    assert completed.returncode != 0
+    assert not gh_arguments
+    assert not gh_stdin
+    assert "could not open" in completed.stderr.lower()
+    assert "execution error" not in completed.stderr.lower()
 
 
 def test_release_workflow_verifies_the_app_before_publishing() -> None:
@@ -169,7 +283,8 @@ def test_release_workflow_verifies_the_app_before_publishing() -> None:
     assert workflow.index(notarytool) < workflow.index(staple)
     assert workflow.index(staple) < workflow.index(verifier)
     assert workflow.index(verifier) < workflow.index('gh release create "$RELEASE_TAG"')
-    assert f'{verifier} "${{apps[0]}}" "${{dmgs[0]}}"' in workflow
+    assert f'{verifier} "${{dmgs[0]}}"' in workflow
+    assert "apps=(src-tauri/target/release/bundle/macos/*.app)" not in workflow
 
 
 def test_install_docs_describe_a_direct_notarized_first_launch() -> None:

@@ -40,6 +40,16 @@ npx tauri build --bundles dmg --no-sign
 会先从 Secrets 导入证书，再由 Tauri 完成 Apple 公证和 staple，并在发布前验证
 Gatekeeper 将应用识别为 `Notarized Developer ID`。
 
+更新 Apple App 专用密码时运行：
+
+```sh
+./scripts/set-apple-password-secret-macos.sh
+```
+
+脚本通过 macOS 隐藏输入框接收密码，再直接写入 `semantic-craft/bibliosmith` 的
+`APPLE_PASSWORD` GitHub Secret，不会把密码放进 shell 历史或命令参数；留空或取消
+不会改动现有 Secret。
+
 ## 测试
 
 ```sh
