@@ -28,8 +28,8 @@ Create `digest.config.json` in a concrete book project:
 {
   "enabled": true,
   "merge_into_epub": true,
-  "source_epub": "output/book.epub",
-  "output_epub": "output/book_digest.epub",
+  "source_epub": "output/reading/book.epub",
+  "output_epub": "output/reading/book_digest.epub",
   "title": "Book Digest",
   "language": "en",
   "max_section_chars": 240
@@ -44,10 +44,10 @@ python -m digest.bibliosmith_digest --book-root books/{target}/{number}_{目标�
 
 ## Boundary
 
-- Input is an already built standard EPUB, defaulting to `output/book.epub`.
+- Input is an already built standard EPUB, defaulting to `output/reading/book.epub`.
 - Each book controls the feature through its own `digest.config.json`.
-- Sidecar mode writes `output/digest/digest.xhtml`, `output/digest/digest_state.json`, and `qa/digest/digest_report.json`.
-- Merge mode writes a new standard EPUB, defaulting to `output/book_digest.epub`.
+- Sidecar mode writes `output/reading/digest/digest.xhtml`, `output/reading/digest/digest_state.json`, and `qa/digest/digest_report.json`.
+- Merge mode writes a new standard EPUB, defaulting to `output/reading/book_digest.epub`.
 - Merge mode adds one reader-visible chapter and updates OPF manifest, spine, and nav.
 - Existing body text, cover, book-info page, frontmatter, and translation QA records are not rewritten.
 - `digest_state.json` stores lightweight topology nodes and reading-order edges for later review or visualization.
@@ -63,4 +63,3 @@ This module is inspired by [spinedigest](https://github.com/oomol-lab/spinediges
 ## License
 
 See [DIGEST_LICENSE.en.md](../../license/DIGEST_LICENSE.en.md).
-

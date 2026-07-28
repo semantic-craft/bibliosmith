@@ -631,7 +631,7 @@ fn choose_repo_folder() -> Result<ActionResult, String> {
         (folder, true)
     } else {
         return Err(format!(
-            "选择的目录不是 BiblioSmith 项目，且目录里已有其他文件。请选择空目录，或选择包含 AGENTS.md、template/ 和 books/ 的 BiblioSmith 项目目录。当前选择：{}",
+            "选择的目录不是 BiblioSmith 项目，且目录里已有其他文件。请选择空目录，或选择包含 AGENTS.md、tools/create_local_book_project.py 和 books/local/ 的 BiblioSmith 项目目录。当前选择：{}",
             folder.display()
         ));
     };
@@ -661,7 +661,7 @@ fn set_repo_folder(repo_root: String) -> Result<ActionResult, String> {
     }
     if !is_dir_empty(&repo_root) {
         return Err(format!(
-            "选择的目录不是 BiblioSmith 项目，且目录里已有其他文件。请选择空目录，或选择包含 AGENTS.md、template/ 和 books/ 的 BiblioSmith 项目目录。当前选择：{}",
+            "选择的目录不是 BiblioSmith 项目，且目录里已有其他文件。请选择空目录，或选择包含 AGENTS.md、tools/create_local_book_project.py 和 books/local/ 的 BiblioSmith 项目目录。当前选择：{}",
             display_path(&repo_root)
         ));
     }
@@ -3506,8 +3506,11 @@ fn repo_root_from_path(path: &Path) -> Option<PathBuf> {
 
 fn is_bibliosmith_repo(path: &Path) -> bool {
     path.join("AGENTS.md").is_file()
-        && path.join("template").join("epub_pipeline").is_dir()
-        && path.join("books").is_dir()
+        && path
+            .join("tools")
+            .join("create_local_book_project.py")
+            .is_file()
+        && path.join("books").join("local").is_dir()
 }
 
 fn repo_status_for_path(path: &Path) -> String {
@@ -4154,71 +4157,50 @@ fn display_path(path: &Path) -> String {
 
 fn project_document_candidates(kind: &str, locale: &str) -> Vec<PathBuf> {
     let locale = locale.to_ascii_lowercase();
+    let is_japanese = locale.starts_with("ja");
     let is_traditional =
         locale.starts_with("zh-tw") || locale.starts_with("zh-hk") || locale.starts_with("zh-hant");
-    let is_simplified = locale.starts_with("zh");
-    let is_japanese = locale.starts_with("ja");
+    let is_simplified = locale.starts_with("zh") && !is_traditional;
 
     match kind {
         "howto" => {
-            let mut candidates = Vec::new();
-            if is_traditional {
-                candidates.push(
-                    PathBuf::from("doc")
-                        .join("public")
-                        .join("how-to-use-prompts.zh-TW.md"),
-                );
+            let guides = PathBuf::from("docs").join("guides");
+            let primary = if is_japanese {
+                guides.join("how-to-use-local-reading.ja.md")
+            } else if is_traditional {
+                guides.join("how-to-use-local-reading.zh-TW.md")
             } else if is_simplified {
-                candidates.push(
-                    PathBuf::from("doc")
-                        .join("public")
-                        .join("how-to-use-prompts.zh-CN.md"),
-                );
-            } else if is_japanese {
-                candidates.push(
-                    PathBuf::from("doc")
-                        .join("public")
-                        .join("how-to-use-prompts.ja.md"),
-                );
+                guides.join("how-to-use-local-reading.zh-CN.md")
             } else {
-                candidates.push(
-                    PathBuf::from("doc")
-                        .join("public")
-                        .join("how-to-use-prompts.en.md"),
-                );
+                guides.join("how-to-use-local-reading.en.md")
+            };
+            let mut candidates = vec![primary];
+            for fallback in [
+                guides.join("how-to-use-local-reading.zh-CN.md"),
+                guides.join("how-to-use-local-reading.en.md"),
+            ] {
+                if !candidates.contains(&fallback) {
+                    candidates.push(fallback);
+                }
             }
-            candidates.push(
-                PathBuf::from("doc")
-                    .join("public")
-                    .join("how-to-use-prompts.zh-CN.md"),
-            );
-            candidates.push(
-                PathBuf::from("doc")
-                    .join("public")
-                    .join("how-to-use-prompts.en.md"),
-            );
-            candidates.push(
-                PathBuf::from("doc")
-                    .join("public")
-                    .join("how-to-use-prompts.ja.md"),
-            );
             candidates
         }
         _ => {
-            let mut candidates = Vec::new();
-            if is_traditional {
-                candidates.push(PathBuf::from("readme").join("README.zh-TW.md"));
+            let primary = if is_japanese {
+                PathBuf::from("readme").join("README.ja.md")
+            } else if is_traditional {
+                PathBuf::from("readme").join("README.zh-TW.md")
             } else if is_simplified {
-                candidates.push(PathBuf::from("README.zh-CN.md"));
-            } else if is_japanese {
-                candidates.push(PathBuf::from("readme").join("README.ja.md"));
+                PathBuf::from("README.zh-CN.md")
             } else {
-                candidates.push(PathBuf::from("README.md"));
+                PathBuf::from("README.md")
+            };
+            let mut candidates = vec![primary];
+            for fallback in [PathBuf::from("README.zh-CN.md"), PathBuf::from("README.md")] {
+                if !candidates.contains(&fallback) {
+                    candidates.push(fallback);
+                }
             }
-            candidates.push(PathBuf::from("README.zh-CN.md"));
-            candidates.push(PathBuf::from("README.md"));
-            candidates.push(PathBuf::from("readme").join("README.zh-TW.md"));
-            candidates.push(PathBuf::from("readme").join("README.ja.md"));
             candidates
         }
     }
@@ -4906,7 +4888,11 @@ mod tests {
             .expect("repo root should resolve from src-tauri path");
         assert!(is_bibliosmith_repo(&root));
         assert!(root.join("AGENTS.md").is_file());
-        assert!(root.join("template").join("epub_pipeline").is_dir());
+        assert!(root
+            .join("tools")
+            .join("create_local_book_project.py")
+            .is_file());
+        assert!(root.join("books").join("local").is_dir());
     }
 
     #[test]
@@ -5038,23 +5024,17 @@ mod tests {
     #[test]
     fn archive_entry_paths_strip_github_root_and_reject_traversal() {
         assert_eq!(
-            safe_archive_entry_relative_path("public-domain-books-translation-main/AGENTS.md")
-                .unwrap(),
+            safe_archive_entry_relative_path("bibliosmith-main/AGENTS.md").unwrap(),
             PathBuf::from("AGENTS.md")
         );
         assert_eq!(
-            safe_archive_entry_relative_path(
-                "public-domain-books-translation-main/template/epub_pipeline/README.md"
-            )
-            .unwrap(),
-            PathBuf::from("template")
-                .join("epub_pipeline")
+            safe_archive_entry_relative_path("bibliosmith-main/templates/local-reading/README.md")
+                .unwrap(),
+            PathBuf::from("templates")
+                .join("local-reading")
                 .join("README.md")
         );
-        assert!(safe_archive_entry_relative_path(
-            "public-domain-books-translation-main/../evil.txt"
-        )
-        .is_err());
+        assert!(safe_archive_entry_relative_path("bibliosmith-main/../evil.txt").is_err());
         assert!(safe_archive_entry_relative_path("single-root-only").is_err());
     }
 
@@ -5074,10 +5054,20 @@ mod tests {
             PathBuf::from("readme").join("README.zh-TW.md")
         );
         assert_eq!(
+            project_document_candidates("readme", "ja")[0],
+            PathBuf::from("readme").join("README.ja.md")
+        );
+        assert_eq!(
             project_document_candidates("howto", "ja")[0],
-            PathBuf::from("doc")
-                .join("public")
-                .join("how-to-use-prompts.ja.md")
+            PathBuf::from("docs")
+                .join("guides")
+                .join("how-to-use-local-reading.ja.md")
+        );
+        assert_eq!(
+            project_document_candidates("howto", "zh-TW")[0],
+            PathBuf::from("docs")
+                .join("guides")
+                .join("how-to-use-local-reading.zh-TW.md")
         );
     }
 
@@ -5137,10 +5127,10 @@ mod tests {
     #[test]
     fn project_document_links_must_stay_inside_repo() {
         assert_eq!(
-            safe_project_relative_path("./doc/public/how-to-use-prompts.zh-CN.md").unwrap(),
-            PathBuf::from("doc")
-                .join("public")
-                .join("how-to-use-prompts.zh-CN.md")
+            safe_project_relative_path("./docs/guides/how-to-use-local-reading.zh-CN.md").unwrap(),
+            PathBuf::from("docs")
+                .join("guides")
+                .join("how-to-use-local-reading.zh-CN.md")
         );
         assert!(safe_project_relative_path("../AGENTS.md").is_err());
         assert!(safe_project_relative_path("C:/Windows/win.ini").is_err());

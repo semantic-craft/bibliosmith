@@ -83,7 +83,7 @@ def run_digest(book_root: str | Path) -> dict[str, Any]:
     knowledge_graph = build_knowledge_graph(book_title or config.title, sections)
     digest_xhtml = render_digest_xhtml(config.title, sections, language, topology, knowledge_graph)
 
-    digest_dir = root / "output" / "digest"
+    digest_dir = root / "output" / "reading" / "digest"
     qa_dir = root / "qa" / "digest"
     digest_dir.mkdir(parents=True, exist_ok=True)
     qa_dir.mkdir(parents=True, exist_ok=True)
@@ -133,9 +133,9 @@ def run_digest(book_root: str | Path) -> dict[str, Any]:
         "merged": merged,
         "source_epub": relpath(config.source_epub, root),
         "output_epub": relpath(config.output_epub, root) if merged else "",
-        "digest_xhtml": "output/digest/digest.xhtml",
-        "knowledge_map": "output/digest/knowledge_map.svg",
-        "agent_packet_manifest": "output/digest/agent_packets/manifest.json",
+        "digest_xhtml": "output/reading/digest/digest.xhtml",
+        "knowledge_map": "output/reading/digest/knowledge_map.svg",
+        "agent_packet_manifest": "output/reading/digest/agent_packets/manifest.json",
         "review_checklist": "qa/digest/digest_review_checklist.md",
         "section_count": len(sections),
         "auto_decision": "generated" if config.enabled is None else "forced",
@@ -157,8 +157,8 @@ def load_config(root: Path) -> DigestConfig:
         data = json.loads(path.read_text("utf-8"))
     enabled = parse_enabled(data.get("enabled", None if not path.exists() else False))
 
-    source_epub = root / data.get("source_epub", "output/book.epub")
-    output_epub = root / data.get("output_epub", "output/book_digest.epub")
+    source_epub = root / data.get("source_epub", "output/reading/book.epub")
+    output_epub = root / data.get("output_epub", "output/reading/book_digest.epub")
     return DigestConfig(
         enabled=enabled,
         merge_into_epub=bool(data.get("merge_into_epub", False)),
@@ -546,7 +546,7 @@ Digest title: {config.title}
         "packets": [
             {
                 "id": "000_digest_generation",
-                "path": "output/digest/agent_packets/000_digest_generation.md",
+                "path": "output/reading/digest/agent_packets/000_digest_generation.md",
                 "section_count": len(sections),
             }
         ],

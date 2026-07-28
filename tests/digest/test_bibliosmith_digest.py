@@ -41,8 +41,8 @@ class BiblioSmithDigestTest(unittest.TestCase):
             self.assertEqual(result["status"], "PASS")
             self.assertEqual(result["auto_decision"], "generated")
             self.assertFalse(result["merged"])
-            self.assertTrue((root / "output" / "digest" / "digest.xhtml").exists())
-            self.assertFalse((root / "output" / "book_digest.epub").exists())
+            self.assertTrue((root / "output" / "reading" / "digest" / "digest.xhtml").exists())
+            self.assertFalse((root / "output" / "reading" / "book_digest.epub").exists())
 
     def test_missing_config_auto_skips_short_stories_and_natural_science(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,7 +53,7 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             self.assertEqual(result["status"], "SKIPPED")
             self.assertEqual(result["reason"], "auto_policy_excluded")
-            self.assertFalse((root / "output" / "digest").exists())
+            self.assertFalse((root / "output" / "reading" / "digest").exists())
 
     def test_disabled_config_leaves_epub_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -67,7 +67,7 @@ class BiblioSmithDigestTest(unittest.TestCase):
             self.assertEqual(result["status"], "SKIPPED")
             self.assertEqual(result["reason"], "disabled")
             self.assertEqual(sha256(epub), before)
-            self.assertFalse((root / "output" / "digest").exists())
+            self.assertFalse((root / "output" / "reading" / "digest").exists())
 
     def test_enabled_config_can_generate_sidecar_without_merging(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -79,25 +79,36 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             self.assertEqual(result["status"], "PASS")
             self.assertEqual(result["merged"], False)
-            digest_xhtml = root / "output" / "digest" / "digest.xhtml"
+            digest_xhtml = root / "output" / "reading" / "digest" / "digest.xhtml"
             report = json.loads((root / "qa" / "digest" / "digest_report.json").read_text("utf-8"))
             self.assertTrue(digest_xhtml.exists())
             digest_text = digest_xhtml.read_text("utf-8")
             self.assertIn("全书导读", digest_text)
             self.assertIn("<svg", digest_text)
             self.assertIn("第一章", digest_text)
-            state = json.loads((root / "output" / "digest" / "digest_state.json").read_text("utf-8"))
+            state = json.loads(
+                (root / "output" / "reading" / "digest" / "digest_state.json").read_text("utf-8")
+            )
             self.assertEqual(state["topology"]["nodes"][0]["title"], "第一章")
             self.assertEqual(state["topology"]["edges"], [])
             self.assertIn("knowledge_graph", state)
             self.assertIn("agent_packet_manifest", state)
-            self.assertTrue((root / "output" / "digest" / "knowledge_map.svg").exists())
-            self.assertTrue((root / "output" / "digest" / "agent_packets" / "000_digest_generation.md").exists())
+            self.assertTrue((root / "output" / "reading" / "digest" / "knowledge_map.svg").exists())
+            self.assertTrue(
+                (
+                    root
+                    / "output"
+                    / "reading"
+                    / "digest"
+                    / "agent_packets"
+                    / "000_digest_generation.md"
+                ).exists()
+            )
             self.assertTrue((root / "qa" / "digest" / "digest_review_checklist.md").exists())
             self.assertIn("章节拓扑", digest_text)
             self.assertIn("知识脉络图", digest_text)
             self.assertEqual(report["status"], "PASS")
-            self.assertFalse((root / "output" / "book_digest.epub").exists())
+            self.assertFalse((root / "output" / "reading" / "book_digest.epub").exists())
 
     def test_enabled_config_can_merge_digest_as_epub_chapter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -107,7 +118,7 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             result = run_digest(root)
 
-            merged = root / "output" / "book_digest.epub"
+            merged = root / "output" / "reading" / "book_digest.epub"
             self.assertEqual(result["status"], "PASS")
             self.assertEqual(result["merged"], True)
             self.assertTrue(merged.exists())
@@ -121,7 +132,9 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             run_digest(root)
 
-            digest_text = (root / "output" / "digest" / "digest.xhtml").read_text("utf-8")
+            digest_text = (
+                root / "output" / "reading" / "digest" / "digest.xhtml"
+            ).read_text("utf-8")
             self.assertIn('xml:lang="en"', digest_text)
             self.assertIn('lang="en"', digest_text)
 
@@ -134,8 +147,8 @@ class BiblioSmithDigestTest(unittest.TestCase):
                 {
                     "enabled": True,
                     "merge_into_epub": True,
-                    "source_epub": "output/book.epub",
-                    "output_epub": "output/book.epub",
+                    "source_epub": "output/reading/book.epub",
+                    "output_epub": "output/reading/book.epub",
                 },
             )
 
@@ -165,7 +178,9 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn('"status": "PASS"', completed.stdout)
-            self.assertTrue((root / "output" / "digest" / "digest.xhtml").exists())
+            self.assertTrue(
+                (root / "output" / "reading" / "digest" / "digest.xhtml").exists()
+            )
 
     def assert_epub_contains_digest(self, epub):
         with zipfile.ZipFile(epub) as archive:
@@ -207,25 +222,14 @@ class BiblioSmithDigestDocumentationTest(unittest.TestCase):
             self.assertTrue(path.exists(), f"Missing Digest module asset: {path}")
 
     def test_main_readmes_expose_digest_with_same_language_links(self):
-        # Local-reading fork note: the root README.md and README.zh-CN.md were
-        # intentionally rewritten into the "本地阅读翻译工作台" local-reading entry
-        # (see AGENTS.md), which does not advertise the post-EPUB Digest module on
-        # the front page. The upstream Digest marketing survives in the readme/*.md
-        # localized copies, which are the surfaces this test still guards.
         readmes = [
             {
-                "path": REPO_ROOT / "readme" / "README.zh-TW.md",
-                "link": "./digest/README.zh-TW.md",
-                "prompt": "未聲明是否啟用 BiblioSmith Digest 時，請自動判斷；長篇小說、專業書籍、哲學書在 EPUB 輸出後生成 Digest，短篇小說、自然科學類和其他類型不生成。",
-                "command": "python -m digest.bibliosmith_digest --book-root",
-                "layout": "`digest/`",
+                "path": REPO_ROOT / "README.md",
+                "link": "readme/digest/README.en.md",
             },
             {
-                "path": REPO_ROOT / "readme" / "README.ja.md",
-                "link": "./digest/README.ja.md",
-                "prompt": "BiblioSmith Digest の利用が明示されていない場合は自動判断します。長編小説、専門書、哲学書は EPUB 出力後に Digest を生成し、短編小説、自然科学系、その他の種類では生成しません。",
-                "command": "python -m digest.bibliosmith_digest --book-root",
-                "layout": "`digest/`",
+                "path": REPO_ROOT / "README.zh-CN.md",
+                "link": "readme/digest/README.zh-CN.md",
             },
         ]
 
@@ -233,19 +237,18 @@ class BiblioSmithDigestDocumentationTest(unittest.TestCase):
             text = item["path"].read_text("utf-8")
             self.assertIn("BiblioSmith Digest", text, str(item["path"]))
             self.assertIn(item["link"], text, str(item["path"]))
-            self.assertIn(item["prompt"], text, str(item["path"]))
-            self.assertIn(item["command"], text, str(item["path"]))
+            self.assertIn("python -m digest.bibliosmith_digest --book-root", text, str(item["path"]))
             self.assertIn("digest.config.json", text, str(item["path"]))
-            self.assertIn(item["layout"], text, str(item["path"]))
-            digest_index = text.index("## BiblioSmith Digest")
-            layout_index = text.index("Repository Layout") if "Repository Layout" in text else text.index("仓库结构") if "仓库结构" in text else text.index("倉庫結構") if "倉庫結構" in text else text.index("リポジトリ構成")
-            folders_index = text.index("Important Folders For Users") if "Important Folders For Users" in text else text.index("用户需要知道的重要目录") if "用户需要知道的重要目录" in text else text.index("使用者需要知道的重要目錄") if "使用者需要知道的重要目錄" in text else text.index("ユーザーが知っておくべき重要フォルダ")
-            self.assertLess(folders_index, digest_index, str(item["path"]))
-            self.assertLess(digest_index, layout_index, str(item["path"]))
+            self.assertIn("books/local/", text, str(item["path"]))
 
     def test_how_to_use_prompt_guide_mentions_digest_decision_and_command(self):
-        text = (REPO_ROOT / "doc" / "public" / "how-to-use-prompts.zh-CN.md").read_text("utf-8")
-        self.assertIn("未声明是否启用 BiblioSmith Digest 时，请自动判断", text)
+        text = (
+            REPO_ROOT
+            / "docs"
+            / "guides"
+            / "how-to-use-local-reading.zh-CN.md"
+        ).read_text("utf-8")
+        self.assertIn("明确勾选 BiblioSmith Digest", text)
         self.assertIn("python -m digest.bibliosmith_digest --book-root", text)
         self.assertIn("digest.config.json", text)
         self.assertIn("输出仍然是标准 EPUB", text)
@@ -326,7 +329,7 @@ def sha256(path):
 
 
 def create_minimal_epub(root, title="测试书", chapters=None):
-    output = root / "output"
+    output = root / "output" / "reading"
     output.mkdir(parents=True)
     epub = output / "book.epub"
     chapters = chapters or [("第一章", "这是第一章的内容。它说明了故事的起点和主要问题。")]

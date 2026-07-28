@@ -33,11 +33,13 @@ def write_fixture(root: Path, source: str, target: str) -> None:
         encoding="utf-8",
     )
     (root / "metadata/source_manifest.json").write_text(
-        json.dumps({"source_language": "en", "target_language": "zh-Hans"}),
-        encoding="utf-8",
-    )
-    (root / "metadata/book.yaml").write_text(
-        "title: Bilingual Fixture\nauthor: Test Author\n",
+        json.dumps(
+            {
+                "source_file_name": "Bilingual Fixture.epub",
+                "source_language": "en",
+                "target_language": "zh-Hans",
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -63,6 +65,7 @@ def test_builder_interleaves_equal_paragraphs(tmp_path: Path) -> None:
     )
 
     epub_path = BUILDER.build_book(tmp_path)
+    assert epub_path == tmp_path / "output/reading/book_bilingual.epub"
     chapter = epub_member(epub_path, "EPUB/chapter_001.xhtml")
     body = chapter.split("<body>", 1)[1]
 
@@ -73,6 +76,8 @@ def test_builder_interleaves_equal_paragraphs(tmp_path: Path) -> None:
     package = epub_member(epub_path, "EPUB/package.opf")
     assert "<dc:language>en</dc:language>" in package
     assert "<dc:language>zh-Hans</dc:language>" in package
+    assert "<dc:title>Bilingual Fixture</dc:title>" in package
+    assert "Unknown" not in package
     with zipfile.ZipFile(epub_path) as archive:
         assert archive.getinfo("mimetype").compress_type == zipfile.ZIP_STORED
 

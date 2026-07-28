@@ -1,11 +1,8 @@
-"""Pin the local-absolute-path portability gate in both directions.
+"""Pin the repository-level local-absolute-path portability gate.
 
-The gate at template/epub_pipeline/common/scripts/check_no_local_absolute_paths.py
-runs from ten template package.json files plus books/, and had no test of its own.
-It has to fail closed on a contributor's real workspace path while leaving
-ordinary slash-separated prose alone, and issue #6 was filed believing it got the
-second half wrong. It does not -- but nothing pinned that, so a later widening of
-the scan roots or a looser regex could introduce the false positive for real.
+The gate has to fail closed on a contributor's real workspace path while leaving
+ordinary slash-separated prose alone. A later widening of the scan roots or a
+looser regex must not introduce false positives.
 
 Both directions are asserted through scan_file() rather than against the regexes
 directly, so the scan-scope rules are exercised too: a fixture placed outside the
@@ -22,17 +19,10 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_PATH = (
-    REPO_ROOT
-    / "template"
-    / "epub_pipeline"
-    / "common"
-    / "scripts"
-    / "check_no_local_absolute_paths.py"
-)
+SCRIPT_PATH = REPO_ROOT / "tools" / "check_no_local_absolute_paths.py"
 # A path that is generic-scanned in repo scope, so a fixture written here is
 # actually run through the detectors instead of being skipped by scope rules.
-SCANNED_REL = "doc/public/fixture.md"
+SCANNED_REL = "books/local/zh-Hans/001_fixture/metadata/fixture.md"
 
 # The home-directory fixtures are assembled at runtime. Spelling them out as
 # literals would put "/Users/<name>/" in a tracked file, which the repo's own
@@ -99,7 +89,7 @@ class SlashSeparatedProseIsNotAPath(GateFixture):
             "The worker speaks TCP/IP.",
             "Runs 24/7 on the queue.",
             "See docs/windows.md for the runbook.",
-            "Relative paths like books/zh-Hans/001 stay relative.",
+            "Relative paths like books/local/zh-Hans/001 stay relative.",
         ):
             with self.subTest(line=line):
                 self.assertClean(line)
@@ -162,15 +152,14 @@ class ScanScopeIsDeliberate(unittest.TestCase):
         for rel_path in (
             "doc/public/how-to-use-prompts.en.md",
             "doc/project/notes.md",
-            "template/epub_pipeline/English-to-Simplified-Chinese/README.md",
-            "books/zh-Hans/001_example/metadata/book.opf",
+            "books/local/zh-Hans/001_example/metadata/book.opf",
         ):
             with self.subTest(rel_path=rel_path):
                 self.assertTrue(gate.should_scan_for_generic_local_path("repo", rel_path))
 
-    def test_template_scripts_and_packages_are_not(self):
+    def test_tools_and_packages_are_not_generic_scanned(self):
         for rel_path in (
-            "template/epub_pipeline/common/scripts/build_epub.py",
+            "tools/build_epub.py",
             "packages/ocr/docs/windows.md",
             "packages/ocr/scripts/mineru_law_politics_markdown.py",
         ):

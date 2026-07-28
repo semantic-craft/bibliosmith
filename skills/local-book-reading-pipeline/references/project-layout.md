@@ -23,4 +23,4 @@ books/local/{target}/{number}_{title_author}/
     reading/
 ```
 
-`source_manifest.json` is not a copyright or public-domain record. It only records local file identity and processing status.
+`source_manifest.json` records only local file identity and processing status.

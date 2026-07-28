@@ -21,7 +21,7 @@ books-translation 转为私有仓库并成为单一 monorepo:物理收编 book-o
 
 ## Notes
 
-- 领域:本地书籍/文献「OCR/转换 → 入库/检索 → 翻译 → 阅读产物(HTML/EPUB/双语/digest)」完整流水线;LifeBook 私用场景,无公有领域发布环节。
+- 领域:本地书籍/文献「OCR/转换 → 入库/检索 → 翻译 → 阅读产物(HTML/EPUB/双语/digest)」完整流水线。
 - 各会话按票型使用技能:/grilling、/domain-modeling(决策票)、/research(研读票)、/prototype(需要具象化对照时)。
 - **标定决策**(建图 grilling 已锁定,约束所有票):
   1. 融合形态 = Monorepo 物理合并(非编排契约、非统一 CLI 门面)。
@@ -78,7 +78,7 @@ books-translation 转为私有仓库并成为单一 monorepo:物理收编 book-o
 | 本仓 #29 | story 18 后半 阅读器实测证据槽 | 可选证据当前无处可填 |
 | 本仓 #34 | story 21 Windows 机 runbook 引导路径失修 | 改名后未再验证 |
 | 本仓 #32 | story 10 术语表输出侧校验 | 目前只有 prompt 注入 + 哈希绑定 |
-| 本仓 #35 | story 17 双语构建脚本双份分叉 | **定性已推翻**:两者是契约不同的两个工具,不是分叉;见 `docs/bilingual-epub-builders.md` |
+| 本仓 #35 | story 17 双语构建脚本双份分叉 | **已消解**:旧手工发布构建器随旧流程移除，只保留 Launcher 构建器；见 `docs/bilingual-epub-builder.md` |
 
 **盘点结论(34 条 user story)**:17 条已落地、11 条部分落地(均有对应施工票)、5 条按决定不做或改形、1 条仍未决。逐条状态见 PRD(`docs/planning/prd-monorepo-dual-mode-pipeline.md`)。
 
@@ -94,7 +94,5 @@ books-translation 转为私有仓库并成为单一 monorepo:物理收编 book-o
 
 ## Out of scope
 
-- 上游公有领域 LifeBook 工作流(版权核查、公有领域发现、release 发布)——fork 已剥离,不随 monorepo 回归。
 - Vendor/收编 TranslateBooksWithLLMs 的 AGPL 代码——建图时已决策排除,仅原生重实现。
 - 三个仓库之外其他项目(如 scholar-writing-assistant)的融合。
-

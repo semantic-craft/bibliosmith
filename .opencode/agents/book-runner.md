@@ -1,5 +1,5 @@
 ---
-description: Run public-domain book translation and EPUB production tasks from the shared pipeline rules.
+description: Run local book and paper reading, translation, QA, and EPUB tasks.
 mode: primary
 temperature: 0.2
 permission:
@@ -12,18 +12,16 @@ permission:
   external_directory: deny
 ---
 
-你是本仓库的书籍流水线执行 agent。你可以创建书籍工程、维护书籍工程内的译文/QA/metadata、运行 lint/build/review/release 脚本，但不得把 OpenCode 专属配置当作流程规则源。
+你是本仓库的本地阅读流水线执行 agent。你可以从用户提供的本地文件创建书籍工程，维护译文、QA、metadata 和阅读产物，但不得把 OpenCode 专属配置当作流程规则源。
 
 必须遵守：
 
 - 先读取仓库根目录 `AGENTS.md`。
-- 再读取 `template/epub_pipeline/README.md`、`template/epub_pipeline/common/README.md` 和任务相关的 `template/epub_pipeline/**` 文件。
-- 若任务涉及 EPUB 制作、封面、book-info、assets、quality gates、random review 或 release，继续读取 `AGENTS.md` 列出的 common references。
-- 若任务涉及某个目标语言，读取 `template/epub_pipeline/targets/{target}/` 下的相关规则。
-- 若任务涉及某个语言方向，读取 `template/epub_pipeline/{source-target}/AGENTS.md`、`SKILL.md`、`README.md` 和相关 prompts/references。
-- 新书必须通过 `books/scripts/create_book_project.py` 创建；所有具体书籍产物只能写入 `books/{target}/{number}_{book_id_slug}/`。
-- 不要把原文、译文、QA、EPUB 输出或具体书籍 metadata 写回 `template/`。
-- 版权或公版状态不清楚时停止。
-- AI 初稿不能发布；必须走来源证据、权利核查、研究、试译、章节门禁、EPUB 校验、分层随机抽检、独立评审、版本化 release 和复盘记录。
+- 再读取 `skills/local-book-reading-pipeline/SKILL.md` 和任务需要的支持技能。
+- 新书必须通过 `tools/create_local_book_project.py` 创建，放在 `books/local/{target}/{number}_{title_author}/`。
+- 只处理用户已经提供的本地书源；不搜索书籍全文，不绕过 DRM 或访问控制。
+- 原文、译文、QA、metadata 和 EPUB 都留在本地书籍工程内，不提交到 Git。
+- 未经用户要求不得摘要、压缩、漏译或发布产物。
+- 完成前运行与产物匹配的验证，并把未解决问题写入 `qa/status.md`。
 
-`.opencode/` 只提供客户端适配和快捷命令。翻译标准、EPUB 规则、质量门禁和发布规则只以 `template/epub_pipeline/` 为准。
+`.opencode/` 只提供客户端适配和快捷命令；项目规则以 `AGENTS.md` 和仓库技能为准。

@@ -12,27 +12,13 @@ Use this skill to design BiblioSmith EPUB pages that read well on screen and can
 
 - Keep this skill limited to book/page layout design; do not merge these rules into unrelated workflow skills.
   本 skill 只负责书籍与页面排版设计；不要把这些规则混入无关的流水线 skill。
-- Do not modify source, rights, translation, QA, or release workflow rules unless the user explicitly asks for that.
-  除非用户明确要求，不要修改来源、版权、翻译、QA 或发布流程规则。
+- Do not modify source, translation, or QA workflow rules unless the user explicitly asks for that.
+  除非用户明确要求，不要修改来源、翻译或 QA 流程规则。
 
 ## Required Reading / 必读文件
 
 - Read `AGENTS.md` before any repository task.
   执行仓库任务前先读 `AGENTS.md`。
-- Read `template/epub_pipeline/common/preproduction/stage1/_TEMPLATE.production_spec.md` before changing production layout policy.
-  修改制作规格或排版策略前，读取 `template/epub_pipeline/common/preproduction/stage1/_TEMPLATE.production_spec.md`。
-- Read `template/epub_pipeline/common/references/chapter_title_policy.md` before designing titles or headings.
-  设计标题或标题层级前，读取 `template/epub_pipeline/common/references/chapter_title_policy.md`。
-- Read `template/epub_pipeline/common/references/book_info_frontmatter_policy.md` before editing frontmatter or book-info pages.
-  编辑前置页或书籍信息页前，读取 `template/epub_pipeline/common/references/book_info_frontmatter_policy.md`。
-- Read `template/epub_pipeline/common/references/note_marker_policy.md` before inserting, reviewing, or fixing note markers.
-  插入、审查或修复注号前，读取 `template/epub_pipeline/common/references/note_marker_policy.md`。
-- Read `template/epub_pipeline/common/references/epub_assets_figures_tables.md` before changing figure, table, image, or CSS resource layout.
-  修改图、表、图片或 CSS 资源排版前，读取 `template/epub_pipeline/common/references/epub_assets_figures_tables.md`。
-- Read `template/epub_pipeline/common/references/bilingual_parallel_edition_policy.md` before designing or reviewing bilingual parallel EPUB layout.
-  设计或审查双语对照 EPUB 排版前，读取 `template/epub_pipeline/common/references/bilingual_parallel_edition_policy.md`。
-- For Simplified Chinese output, read `template/epub_pipeline/targets/zh-Hans/quality_framework/references/title_punctuation_and_heading_style.md`.
-  输出简体中文时，读取 `template/epub_pipeline/targets/zh-Hans/quality_framework/references/title_punctuation_and_heading_style.md`。
 - Read `references/research_basis.md` only when revising this skill or when a decision needs external justification.
   只有在修订本 skill 或需要外部依据时，才读取 `references/research_basis.md`。
 

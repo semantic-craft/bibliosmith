@@ -28,8 +28,8 @@ BiblioSmith Digest 是 BiblioSmith 翻译发布系统的可选 EPUB 后处理模
 {
   "enabled": true,
   "merge_into_epub": true,
-  "source_epub": "output/book.epub",
-  "output_epub": "output/book_digest.epub",
+  "source_epub": "output/reading/book.epub",
+  "output_epub": "output/reading/book_digest.epub",
   "title": "全书导读",
   "language": "zh-CN",
   "max_section_chars": 240
@@ -44,10 +44,10 @@ python -m digest.bibliosmith_digest --book-root books/{target}/{number}_{目标�
 
 ## 设计边界
 
-- 输入是某本书已经生成的标准 EPUB，默认 `output/book.epub`。
+- 输入是某本书已经生成的标准 EPUB，默认 `output/reading/book.epub`。
 - 每本书通过自己的 `digest.config.json` 决定是否启用、是否合并进 EPUB。
-- 启用但不合并时，只生成 `output/digest/` 和 `qa/digest/` 下的旁路文件。
-- 启用并合并时，输出仍是标准 EPUB，默认写到 `output/book_digest.epub`。
+- 启用但不合并时，只生成 `output/reading/digest/` 和 `qa/digest/` 下的旁路文件。
+- 启用并合并时，输出仍是标准 EPUB，默认写到 `output/reading/book_digest.epub`。
 - 合并只新增一个读者可见章节，并更新该 EPUB 内部的 OPF manifest、spine 和 nav。
 - 原有正文、封面、书籍信息页、前置页和翻译 QA 记录不被重写。
 
@@ -62,4 +62,3 @@ python -m digest.bibliosmith_digest --book-root books/{target}/{number}_{目标�
 ## 许可证
 
 见 [DIGEST_LICENSE.md](../../license/DIGEST_LICENSE.md)。
-

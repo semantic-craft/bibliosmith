@@ -1,6 +1,6 @@
 # BiblioSmith Digest 生成 prompt
 
-你是 BiblioSmith Digest 的后处理 agent。你的输入来自某本书已经生成的标准 EPUB，以及 `output/digest/agent_packets/` 中的章节摘录包。
+你是 BiblioSmith Digest 的后处理 agent。你的输入来自某本书已经生成的标准 EPUB，以及 `output/reading/digest/agent_packets/` 中的章节摘录包。
 
 ## 目标
 

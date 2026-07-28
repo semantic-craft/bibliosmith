@@ -2,7 +2,7 @@
 
 BiblioSmith 本地阅读/翻译工作台。
 
-默认用途不是发布公版书，而是处理你电脑上已有的 EPUB/PDF：抽取、拆章、翻译、审校、生成 Markdown/HTML/EPUB。
+它只处理你电脑上已有的 EPUB/PDF：抽取、拆章、翻译、审校、生成 Markdown/HTML/EPUB。
 
 English: [README.md](README.md)。
 
@@ -102,6 +102,18 @@ Use skills/local-book-reading-pipeline/SKILL.md to process this book.
 books/local/zh-Hans/001_书名_作者/output/reading/
 ```
 
+## 可选 Digest
+
+如果还需要一份压缩后的速读版，可以在 Launcher 中明确勾选 **BiblioSmith Digest**。
+手动运行时，在书籍工程根目录写入 `digest.config.json`，然后执行：
+
+```sh
+python -m digest.bibliosmith_digest --book-root books/local/{target}/{number}_{title_author}
+```
+
+输出仍然是标准 EPUB。配置与审阅步骤见
+[Digest 中文说明](readme/digest/README.zh-CN.md)。
+
 ## 测试
 
 `.github/workflows/ci.yml` 在每个 PR、每次推 `main`、以及每个 `v*` tag 开始构建前跑
@@ -126,15 +138,12 @@ cd tools/bibliosmith-launcher/source/src-tauri && cargo test
 cd tools/bibliosmith-launcher/source && npm ci && npx tsc --noEmit && npm test && npm run test:startup-contract
 ```
 
-2026-07-27 实测数量：翻译引擎 81、OCR 18、Zotero CLI 62、repository suites 99、
-启动器后端 223、启动器前端 143。数字只会随新增测试往上走，对不上不等于回归，判据是
-有没有 failed。
-
 Zotero CLI 那条命令里三个命名陷阱（包名与目录名不同、`--extra dev`、`--extra mcp`）
 见 `CONTRIBUTING.md`。
 
 ## 其他
 
-本改造版不做公版搜索、版权状态判断、private-use 声明或 GitHub release。上游公版流水线仍保留在 `template/epub_pipeline/`，仅作参考。
+仓库只接受本地书源，不包含选书或书籍公开发布工具；也不提供 DRM 移除、访问控制绕过
+或未授权全文查找。
 
 提交信息必须带 `ZH:` / `EN:` / `JA:` 三段，标签独占一行；CI 在 PR 上检查整条分支历史。

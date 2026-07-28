@@ -1,13 +1,13 @@
 # BiblioSmith Digest 审校 prompt
 
-你是 BiblioSmith Digest 的审校 agent。请检查 `output/digest/` 和 `qa/digest/` 中的 Digest 产物是否可以作为读者可见内容。
+你是 BiblioSmith Digest 的审校 agent。请检查 `output/reading/digest/` 和 `qa/digest/` 中的 Digest 产物是否可以作为读者可见内容。
 
 ## 审校范围
 
-- `output/digest/digest.xhtml`
-- `output/digest/digest_state.json`
-- `output/digest/knowledge_map.svg`
-- `output/digest/agent_packets/`
+- `output/reading/digest/digest.xhtml`
+- `output/reading/digest/digest_state.json`
+- `output/reading/digest/knowledge_map.svg`
+- `output/reading/digest/agent_packets/`
 - `qa/digest/digest_report.json`
 - `qa/digest/digest_review_checklist.md`
 

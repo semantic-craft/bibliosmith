@@ -19,8 +19,8 @@ Migrated: 2026-07-26 · Source: `semantic-craft/bibliosmith-private-archive#52`
   该决定在本仓留档。
 - **归档仓 `#90`(digest 无 UI 闸口)与 `#91`(预飞样本未透传参数)已消解**,正文中
   已就地标注。
-- **归档仓 `#99`(双语构建脚本双份分叉)的定性被推翻** —— 两份脚本是契约不同的两个
-  工具,不是同一算法的分叉,详见 `docs/bilingual-epub-builders.md`。
+- **归档仓 `#99`(双语构建脚本双份分叉)已消解** —— 旧手工发布流水线已从仓库移除，
+  当前只保留 Launcher 使用的一份双语构建器，详见 `docs/bilingual-epub-builder.md`。
 - **测试基线数字已过时**:原文记 Rust 177 / 引擎 64。2026-07-26 实测 cargo test 209 通过。
 - **目录名已变**:原文的 `tools/lifebook-launcher` 现为 `tools/bibliosmith-launcher`。
 - **仓库拓扑已变**:开源重建后 `semantic-craft/bibliosmith` 是一个全新的公开仓,不再是
@@ -67,7 +67,7 @@ Migrated: 2026-07-26 · Source: `semantic-craft/bibliosmith-private-archive#52`
 14. ✅ As a 私人读者, I want expert_qa 闸门对快速/专家两种模式的产出统一生效, so that 任何译文晋升 final 前都过同一道质量关。 —— QA policy 分层(自动化全量 + 专家抽检 + 缺陷扩检),晋升闸绑 policy 哈希 + 抽检证据。
 15. ✅ As a 编排者, I want approve_translation 与 approve_promotion 两道人工闸门保留在自动化 runner 里, so that 自动化提速但关键节点仍由我拍板。 —— 两闸均重新推导绑定并在漂移时拒绝,promote 前再校验一次。
 16. ✅ As a 编排者, I want handoff 之后的 split→prepare→translate→expert_qa→promote→build_reading→validate_reading **逐阶段显式推进,闸门处停**, so that 每一步的产物我都看得见,关键节点由我拍板而不是被自动跑过去。 —— **【2026-07-26 按归档仓 #88 定性 B 改写】** 原措辞是「全链自动推进」,与 `docs/adr/0002-progress-and-terminal-notifications.md` 的「审批记录一个当前哈希绑定的决定,但不执行下一阶段」直接冲突。ADR 0002 是更晚、更权威的决定,故认定 story 16 原措辞过时,改写本条以与 ADR 对齐,**不写代码**。当前实现(`advance_job_with_executor` 每次调用推进一个阶段)即为目标形态,不是缺口。归档仓 #88 无法关闭(整仓只读),此决定在本仓留档。
-17. 🚧 As a 私人读者, I want 每本书产出 HTML、EPUB、双语 EPUB 与 digest 版, so that 不同阅读场景(通读、对照、速览)各有其形。 —— 四种产物后端均已落地并接进 runner,但 digest 在 UI 上不可达(归档仓 #90,**已消解**:`NewJobWizard.tsx` 现有勾选框),双语构建脚本有两份(本仓 #35;**定性已推翻**:不是分叉,是契约不同的两个工具,见 `docs/bilingual-epub-builders.md`)。默认集合为 `["md","html","epub"]`,双语与 digest 需显式勾选。
+17. 🚧 As a 私人读者, I want 每本书产出 HTML、EPUB、双语 EPUB 与 digest 版, so that 不同阅读场景(通读、对照、速览)各有其形。 —— 四种产物后端均已落地并接进 runner,digest 的 UI 勾选框已存在；旧手工发布流水线移除后只剩 Launcher 使用的一份双语构建器(见 `docs/bilingual-epub-builder.md`)。默认集合为 `["md","html","epub"]`,双语与 digest 需显式勾选。
 18. 🚧 As a 私人读者, I want 成品 EPUB 通过 EPUBCheck 与实际阅读器校验, so that 产物在我的设备上真正可读而非仅仅生成。 —— EPUBCheck 已落地(版本钉住,标准与双语 EPUB 都查,fatal/error 即失败)。**阅读器实测证据无处可记** → 本仓 #29。
 19. 🚧 As a 文献研究者, I want zsearch/zfulltext 以同名 CLI 继续独立安装可用, so that 其他项目的 agent 检索文献的方式不因融合而改变。 —— 仓内 `[project.scripts]` 完好,但 **PATH 上那份是合库前的旧快照**(源目录 `~/Projects/lrt-zotero` 已不存在,缺 `collection-snapshot`/`index`/`profile`);另有一个已装载的 zsearch 同步定时任务指向已删除的 `~/Projects/zotero-cli-agent`,持续报错 → 本仓 #33。
 20. ⛔ As a 编排者, I want 每日定时 OCR 任务在 monorepo 下继续运行, so that 文献库的增量附件持续自动转换,无需我记得手动跑。 —— **2026-07-18 用户决定停用自动 OCR**(原话:「自己决定要不要 OCR」),4 个 launchd 任务(`com.semantic-craft.books-translation.ocr.daily` + 3 个个人命名空间下的 `zotero-*-ocr`)全部 unload 并移入废纸篓,备份 plist 留存。安装脚本与目标路径仍然正确、随时可重建(`packages/ocr/scripts/install_launch_agent.sh`),但**重建需用户重新拍板**;手动 OCR 走 `packages/ocr/scripts/zotero_llm_worker.py --attachment-key <KEY>`。**本条不再是欠账,不要顺手装回去。**
@@ -124,7 +124,6 @@ Migrated: 2026-07-26 · Source: `semantic-craft/bibliosmith-private-archive#52`
 
 ## Out of Scope
 
-- 上游公有领域 LifeBook 工作流(版权核查、公有领域发现、release 发布)——fork 已剥离,不随 monorepo 回归。
 - Vendor/收编 TranslateBooksWithLLMs 的 AGPL 代码。
 - 三仓之外其他项目(如 scholar-writing-assistant)的融合。
 - 本 PRD 不含实施排期;实施 issue 集由地图完成时统一切分(标定决策 7:规划到可施工)。**已完成:第一批 #82–#86(均已落地并合入 main),第二批 #88–#99**。
@@ -135,4 +134,3 @@ Migrated: 2026-07-26 · Source: `semantic-craft/bibliosmith-private-archive#52`
 - 三仓现状与 TBL 机制的详细侦察报告见 归档仓 #40 首条评论;既有融合契约设计见 docs/prototypes 下的统一作业模型文档。
 - ~~风险提示:本地 fork 与 origin 分叉未调和(#42)前,任何基线操作(push/pull/迁移)都可能造成返工;book-ocr-conversion 工作树有大量未提交内容,搬入前必须先在原仓收编。~~ **已消解**:#42 分叉调和完成(本地实现线成 trunk,ahead/behind=0);#53 收编 book-ocr-conversion 未提交工作完成;#55/#56 搬包完成。
 - **仓库已于 2026-07-18 改名 `semantic-craft/bibliosmith`(#80)**。~~旧名自动跳转,本文中的 `books-translation` 链接仍可用。~~ **【迁移时校订】** 这一句现在不成立:开源重建后 `semantic-craft/bibliosmith` 是一个全新的公开仓,`books-translation` 的跳转指向的是被归档的 `semantic-craft/bibliosmith-private-archive`。#80 有意保留四处旧名:`docs/monorepo-migration-plan.md` 历史路径、`book_pipeline.rs` 报错字符串、pyproject 包名、launchd label——**这些不是待清理的残留**。
-

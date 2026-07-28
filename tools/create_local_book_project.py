@@ -141,7 +141,7 @@ def create_project(project_root: Path, source_path: Path, args: argparse.Namespa
         project_root / "AGENTS.md",
         "# Book Project Instructions\n\n"
         "- Use `skills/local-book-reading-pipeline/SKILL.md` from the repository root.\n"
-        "- Do not run public-domain rights checks or release/private-use artifact steps.\n"
+        "- Process only the local source stored in this project.\n"
         "- Write extracted text to `source/source.md`.\n"
         "- Put source chapters in `chapters/src/`, drafts in `chapters/translated/`, final text in `chapters/final/`.\n"
         "- Put readable outputs in `output/reading/`.\n",

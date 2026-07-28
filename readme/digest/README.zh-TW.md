@@ -28,8 +28,8 @@ BiblioSmith Digest 是 BiblioSmith 翻譯發布系統的可選 EPUB 後處理模
 {
   "enabled": true,
   "merge_into_epub": true,
-  "source_epub": "output/book.epub",
-  "output_epub": "output/book_digest.epub",
+  "source_epub": "output/reading/book.epub",
+  "output_epub": "output/reading/book_digest.epub",
   "title": "全書導讀",
   "language": "zh-TW",
   "max_section_chars": 240
@@ -44,10 +44,10 @@ python -m digest.bibliosmith_digest --book-root books/{target}/{number}_{目标�
 
 ## 設計邊界
 
-- 輸入是已經生成的標準 EPUB，預設為 `output/book.epub`。
+- 輸入是已經生成的標準 EPUB，預設為 `output/reading/book.epub`。
 - 每本書用自己的 `digest.config.json` 控制是否啟用、是否合併。
-- 旁路模式寫入 `output/digest/digest.xhtml`、`output/digest/digest_state.json` 和 `qa/digest/digest_report.json`。
-- 合併模式輸出新的標準 EPUB，預設為 `output/book_digest.epub`。
+- 旁路模式寫入 `output/reading/digest/digest.xhtml`、`output/reading/digest/digest_state.json` 和 `qa/digest/digest_report.json`。
+- 合併模式輸出新的標準 EPUB，預設為 `output/reading/book_digest.epub`。
 - 合併只新增一個讀者可見章節，並更新 OPF manifest、spine 和 nav。
 - 既有正文、封面、書籍資訊頁、前置頁和翻譯 QA 記錄不會被重寫。
 - `digest_state.json` 保存輕量拓撲節點和閱讀順序邊，供後續審校或視覺化擴展。
@@ -63,4 +63,3 @@ python -m digest.bibliosmith_digest --book-root books/{target}/{number}_{目标�
 ## 授權
 
 見 [DIGEST_LICENSE.zh-TW.md](../../license/DIGEST_LICENSE.zh-TW.md)。
-
