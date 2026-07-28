@@ -12,6 +12,8 @@ It is focused on book OCR, Markdown extraction, standalone HTML generation, Zote
 
 `semantic-craft/bibliosmith` is public, so a read-only clone needs no credentials; the HTTPS URL below works unauthenticated. Push access still needs SSH or a GitHub PAT stored in Windows Credential Manager/Git Credential Manager, and repository credentials never belong in `.env` or tracked files. Use a sparse checkout so the Windows worker does not download `books/` data or local OCR inputs:
 
+Clone by the name below and not by the pre-rename `semantic-craft/books-translation`. That name now redirects to the private `semantic-craft/bibliosmith-private-archive`, so an authenticated clone of the old name does not fail — it silently checks out archived history, and the worker ends up tracking the wrong repository.
+
 ```powershell
 git clone --filter=blob:none --no-checkout https://github.com/semantic-craft/bibliosmith.git D:\Projects\bibliosmith
 git -C D:\Projects\bibliosmith sparse-checkout init --no-cone
