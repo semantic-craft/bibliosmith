@@ -28,14 +28,17 @@ npm ci
 npx tauri dev
 ```
 
-打包（与发布流程同一条命令）：
+本地打包（不会注入发布 Secrets）：
 
 ```sh
-npx tauri build --bundles dmg
+npx tauri build --bundles dmg --no-sign
 ```
 
-产物在 `src-tauri/target/release/bundle/dmg/`。DMG 是 ad-hoc 签名、未公证的，所以
-装完第一次打开必然被 Gatekeeper 拦，处理办法见根 README。
+产物在 `src-tauri/target/release/bundle/dmg/`。配置默认指向
+`Developer ID Application`；没有证书的普通开发机使用上面的 `--no-sign`。持有证书的
+发布维护者可以去掉该参数，或用 `APPLE_SIGNING_IDENTITY` 指定精确身份。正式 Release
+会先从 Secrets 导入证书，再由 Tauri 完成 Apple 公证和 staple，并在发布前验证
+Gatekeeper 将应用识别为 `Notarized Developer ID`。
 
 ## 测试
 

@@ -35,22 +35,13 @@ when this source was private, and stay there:
 Take the newest `BiblioSmith.Launcher_<version>_aarch64.dmg`, open it, and drag
 `BiblioSmith Launcher.app` into `/Applications`.
 
-### 2. Get past Gatekeeper on first open
+### 2. Open the app
 
-The DMG is **ad-hoc signed and not notarized** (`"signingIdentity": "-"` in
-`src-tauri/tauri.conf.json`). macOS therefore refuses the first launch with a
-message about an unidentified developer or damaged app. This is expected.
-
-1. Double-click the app once and let macOS refuse it.
-2. Open **System Settings → Privacy & Security**, scroll to the Security
-   section, and click **Open Anyway** next to the BiblioSmith Launcher entry.
-3. Confirm at the next prompt. macOS remembers the decision.
-
-If that entry does not appear, clear the quarantine attribute instead:
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/BiblioSmith Launcher.app"
-```
+The release workflow signs the app with a **Developer ID Application**
+certificate, notarizes it with Apple, and staples the notarization ticket before
+publishing. Gatekeeper therefore accepts the app with source
+`Notarized Developer ID`: after dragging it to `/Applications`, double-click it
+normally. No Privacy & Security override or quarantine removal is required.
 
 There is no auto-update. A new version means downloading the new DMG.
 
@@ -90,10 +81,14 @@ for you), **[uv](https://docs.astral.sh/uv/)** for the Python packages, and a
 cd tools/bibliosmith-launcher/source
 npm ci
 npx tauri dev      # development window with hot reload
-npx tauri build --bundles dmg   # produces the same DMG the release job ships
+npx tauri build --bundles dmg --no-sign   # portable local build
 ```
 
 `npx tauri dev` compiles the Rust backend on first run, which takes a while.
+The committed bundle config targets `Developer ID Application`. Release
+maintainers with that certificate can omit `--no-sign` or set an exact
+`APPLE_SIGNING_IDENTITY`; only the Release workflow injects signing and
+notarization secrets.
 The Rust tests do not need the frontend bundle; see [Tests](#tests).
 
 ## Quick Start

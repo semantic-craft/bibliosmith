@@ -13,8 +13,9 @@ name: Release Launcher
 # is enough. Releases v1.4.0 through v1.12.0 stay where they are; recreating
 # them here would mean inventing tags for commits this history does not have.
 #
-# No secret needs configuring. The job below grants itself contents: write,
-# which is what the built-in token needs to create a release here.
+# The built-in token creates the release. Developer ID signing and Apple
+# notarization credentials are repository secrets and are exposed only to the
+# build-and-release job.
 #
 # Release flow: update tools/bibliosmith-launcher/source/launcher-version.json
 # and tools/bibliosmith-launcher/source/RELEASE_NOTES.md, merge to main, then push a
@@ -104,8 +105,79 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          keychain_path="$RUNNER_TEMP/bibliosmith-signing.keychain-db"
+          trap 'rm -f "$certificate_path"' EXIT
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          identity=$(security find-identity -v -p codesigning "$keychain_path" \
+            | awk -F'"' '/Developer ID Application/ { print $2; exit }')
+          if [ -z "$identity" ]; then
+            echo "Imported certificate does not contain a Developer ID Application identity." >&2
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+
       - name: Build DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npx tauri build --bundles dmg
+
+      - name: Notarize and staple DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          shopt -s nullglob
+          dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "Expected exactly one release DMG, found ${#dmgs[@]}." >&2
+            exit 1
+          fi
+          xcrun notarytool submit "${dmgs[0]}" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "${dmgs[0]}"
+
+      - name: Verify signed and notarized release
+        run: |
+          shopt -s nullglob
+          apps=(src-tauri/target/release/bundle/macos/*.app)
+          dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
+          if [ "${#apps[@]}" -ne 1 ]; then
+            echo "Expected exactly one release app, found ${#apps[@]}." >&2
+            exit 1
+          fi
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "Expected exactly one release DMG, found ${#dmgs[@]}." >&2
+            exit 1
+          fi
+          ./scripts/verify-macos-release.sh "${apps[0]}" "${dmgs[0]}"
 
       # --repo is github.repository rather than a literal, so a fork that pushes
       # a tag publishes to itself instead of trying to write here.
@@ -119,3 +191,7 @@ jobs:
             --title "BiblioSmith Launcher $RELEASE_TAG" \
             --notes-file tools/bibliosmith-launcher/source/RELEASE_NOTES.md \
             "tools/bibliosmith-launcher/source/src-tauri/target/release/bundle/dmg/"*.dmg
+
+      - name: Delete temporary signing keychain
+        if: ${{ always() }}
+        run: security delete-keychain "$RUNNER_TEMP/bibliosmith-signing.keychain-db" || true
