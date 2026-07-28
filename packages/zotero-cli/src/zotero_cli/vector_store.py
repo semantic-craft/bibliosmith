@@ -133,20 +133,55 @@ class SQLiteVecStore:
                 (rowid, _serialize_vec(vec)),
             )
 
-    def query(self, vector: list[float], top_k: int = 10) -> list[tuple[str, float, dict]]:
-        """Top-K nearest neighbors. Returns (key, distance, metadata)."""
+    def query(
+        self,
+        vector: list[float],
+        top_k: int = 10,
+        *,
+        allowed_parent_keys: set[str] | None = None,
+    ) -> list[tuple[str, float, dict]]:
+        """Top-K nearest neighbors, optionally prefiltered by parent item key."""
+        if allowed_parent_keys is not None and not allowed_parent_keys:
+            return []
         cur = self._conn.cursor()
-        rows = cur.execute(
-            """
-            SELECT i.key, v.distance, i.metadata_json
-            FROM vec_items v
-            JOIN items i ON i.rowid = v.rowid
-            WHERE v.embedding MATCH ?
-              AND k = ?
-            ORDER BY v.distance
-            """,
-            (_serialize_vec(vector), top_k),
-        ).fetchall()
+        if allowed_parent_keys is None:
+            rows = cur.execute(
+                """
+                SELECT i.key, v.distance, i.metadata_json
+                FROM vec_items v
+                JOIN items i ON i.rowid = v.rowid
+                WHERE v.embedding MATCH ?
+                  AND k = ?
+                ORDER BY v.distance
+                """,
+                (_serialize_vec(vector), top_k),
+            ).fetchall()
+        else:
+            rows = cur.execute(
+                """
+                SELECT i.key, v.distance, i.metadata_json
+                FROM vec_items v
+                JOIN items i ON i.rowid = v.rowid
+                WHERE v.embedding MATCH ?
+                  AND k = ?
+                  AND v.rowid IN (
+                      SELECT candidate.rowid
+                      FROM items candidate
+                      JOIN json_each(?) allowed
+                        ON allowed.value = CASE
+                            WHEN instr(candidate.key, '#c') > 0
+                            THEN substr(candidate.key, 1, instr(candidate.key, '#c') - 1)
+                            ELSE candidate.key
+                        END
+                  )
+                ORDER BY v.distance
+                """,
+                (
+                    _serialize_vec(vector),
+                    top_k,
+                    json.dumps(sorted(allowed_parent_keys)),
+                ),
+            ).fetchall()
         return [(key, dist, json.loads(meta)) for key, dist, meta in rows]
 
     def count(self) -> int:

@@ -125,7 +125,7 @@ zsearch ls                                        # list all collections
 zsearch ls <COLL_KEY>                             # list items in a collection
 zsearch tags -n 50                                # most-used tags
 zsearch recent -n 20                              # recently modified items
-zsearch grep "fair use"                           # literal substring search over title + abstract
+zsearch grep "fair use"                           # SQL substring search over title, abstract + creators
 zsearch notes <KEY>                               # notes attached to an item
 zsearch open <KEY>                                # launch the item in the Zotero desktop app
 ```

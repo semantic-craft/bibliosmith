@@ -403,8 +403,8 @@ def test_sync_replaces_changed_fulltext_when_parent_date_is_unchanged(
         monkeypatch.setattr(search_module, "iter_items", lambda _db_path: [item])
         monkeypatch.setattr(
             search_module,
-            "resolve_fulltext_artifact",
-            lambda _key, _db_path: (new_text, new_sha256),
+            "resolve_fulltext_artifacts",
+            lambda _keys, _db_path: {item.key: (new_text, new_sha256)},
         )
 
         stats = sync(store, embedder, db_path=tmp_path / "zotero.sqlite")
@@ -457,10 +457,11 @@ def test_sync_rebuilds_chunks_when_the_chunk_contract_changes(
             date_modified=[item.date_modified],
         )
         monkeypatch.setattr(search_module, "iter_items", lambda _db_path: [item])
+        # sync now resolves attachments in bulk (#70); patch the plural entrypoint.
         monkeypatch.setattr(
             search_module,
-            "resolve_fulltext_artifact",
-            lambda _key, _db_path: (text, sha256),
+            "resolve_fulltext_artifacts",
+            lambda _keys, _db_path: {item.key: (text, sha256)},
         )
 
         stats = sync(store, embedder, db_path=tmp_path / "zotero.sqlite")
@@ -518,7 +519,11 @@ def test_full_sync_preserves_item_scoped_chunks_before_zotero_storage_catches_up
             embedding_profile_id="fixture-embedding:3",
         )
         monkeypatch.setattr(search_module, "iter_items", lambda _db_path: [item])
-        monkeypatch.setattr(search_module, "resolve_fulltext_artifact", lambda _key, _db_path: None)
+        monkeypatch.setattr(
+            search_module,
+            "resolve_fulltext_artifacts",
+            lambda _keys, _db_path: {},
+        )
 
         sync(store, embedder, db_path=tmp_path / "zotero.sqlite", full=True)
         stored = store.item_chunk_metadatas(item.key)
