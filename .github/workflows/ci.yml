@@ -204,9 +204,11 @@ jobs:
   secrets:
     name: Secret and personal-info scan (gitleaks)
     # Backstop for the local hooks: those live in .git/hooks and so do not
-    # travel with a clone or to another machine. Uses this repo's
-    # .gitleaks.toml, which adds the personal-info and system-info rules that
-    # GitHub's own secret scanning knows nothing about.
+    # travel with a clone or to another machine. Two configs on purpose (issue
+    # #77): .gitleaks.toml keeps useDefault secret rules; .gitleaks-personal.toml
+    # catches home paths + private IPs without the default allowlist that
+    # swallows /home/... matches. GitHub's own secret scanning covers neither
+    # personal-info category.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -229,8 +231,14 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
-      - name: Scan published history
-        run: gitleaks git . --no-banner --redact
+      - name: Scan published history (secrets)
+        run: gitleaks git . --config .gitleaks.toml --no-banner --redact
 
-      - name: Scan tracked tree
-        run: gitleaks dir . --no-banner --redact
+      - name: Scan tracked tree (secrets)
+        run: gitleaks dir . --config .gitleaks.toml --no-banner --redact
+
+      # Personal-info is tip-tree only: older commits still contain real
+      # /Users/... paths from pre-cleanup docs, and rewriting published history
+      # is out of scope. New home-path leaks are blocked on the current tree.
+      - name: Scan tracked tree (personal-info)
+        run: gitleaks dir . --config .gitleaks-personal.toml --no-banner --redact

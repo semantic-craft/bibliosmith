@@ -1,0 +1,47 @@
+# Personal-info / system-info scan for BiblioSmith.
+#
+# Intentionally does NOT set `[extend] useDefault = true`. The default gitleaks
+# allowlist swallows every `/home/<user>/...` match when those rules are merged
+# into the secrets config (see issue #77). Running this file as a second pass
+# keeps secret detection on the full default ruleset while still catching
+# absolute developer home paths and private network addresses.
+#
+# Scope: current tree only (hooks + CI `gitleaks dir`). Full-history `gitleaks
+# git` is not used here because pre-open-source commits already contain real
+# `/Users/...` paths; rewriting published history is out of scope. New leaks are
+# blocked at the tip tree and on pre-commit staged content.
+#
+# Used by tools/git/hooks/pre-commit, tools/git/hooks/pre-push and the CI
+# secrets job, always alongside .gitleaks.toml.
+title = "BiblioSmith personal-info"
+
+[[rules]]
+id = "developer-home-path"
+description = "Absolute path into a developer home directory"
+regex = '''(?:/Users/|/home/)[A-Za-z0-9._-]{2,32}/'''
+tags = ["personal-info"]
+
+[[rules]]
+id = "private-network-address"
+description = "Private-range IPv4 address"
+regex = '''\b(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b'''
+tags = ["system-info"]
+
+[allowlist]
+description = "CI runners, self-reference, VCS metadata, and dependency trees"
+paths = [
+  # Config files necessarily contain path-shaped patterns.
+  '''\.gitleaks.*\.toml$''',
+  # Git metadata is not published as product content; worktree absolute paths
+  # often appear inside .git/ and would otherwise false-positive every scan.
+  '''(^|/)\.git(/|$)''',
+  # Third-party / build trees are not shipped.
+  '''(^|/)node_modules/''',
+  '''(^|/)\.venv/''',
+  '''(^|/)target/''',
+]
+regexes = [
+  # GitHub-hosted (and many self-hosted) Actions runners use /home/runner/…
+  # That is infrastructure, not a contributor's home directory.
+  '''/home/runner(?:/|\b)''',
+]

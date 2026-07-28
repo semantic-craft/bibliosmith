@@ -1,40 +1,25 @@
-# gitleaks configuration for BiblioSmith.
+# gitleaks configuration for BiblioSmith — secret rules only.
 #
-# Extends the default secret ruleset with the categories that secret scanners —
-# GitHub push protection included — do not detect at all: absolute developer
-# home paths and private network addresses.
-#
-# These rules are deliberately GENERIC. A guard against publishing personal data
-# must not itself publish that data, so no real user name, e-mail address or
-# machine name appears here. Identifier-specific checks are done by hash in
-# tests/test_public_privacy.py instead.
+# Personal-info / system-info rules live in .gitleaks-personal.toml and are
+# scanned in a second pass. They cannot share this file: `[extend] useDefault`
+# inherits gitleaks' global allowlist, which silently drops every `/home/...`
+# match (issue #77). Keep the two configs separate so secrets keep the full
+# default ruleset while home-path detection stays complete.
 #
 # Used by tools/git/hooks/pre-commit, tools/git/hooks/pre-push and the CI
-# secrets job, so a clean tree scans to zero findings.
-title = "BiblioSmith"
+# secrets job. A clean tree scans to zero findings under both configs.
+title = "BiblioSmith secrets"
 
 [extend]
 useDefault = true
 
-[[rules]]
-id = "developer-home-path"
-description = "Absolute path into a developer home directory"
-regex = '''(?:/Users/|/home/)[A-Za-z0-9._-]{2,32}/'''
-tags = ["personal-info"]
-
-[[rules]]
-id = "private-network-address"
-description = "Private-range IPv4 address"
-regex = '''\b(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b'''
-tags = ["system-info"]
-
 [allowlist]
-description = "Known false positives"
+description = "Known false positives for default secret rules"
 regexes = [
   # engine.py emits a token-counting algorithm version string, not a secret.
   '''utf8-byte-upper-bound-v1''',
 ]
 paths = [
-  # This config necessarily contains the patterns it searches for.
-  '''\.gitleaks\.toml''',
+  # Sibling personal-info config necessarily contains path-shaped patterns.
+  '''\.gitleaks.*\.toml$''',
 ]
