@@ -6242,6 +6242,72 @@ fn zotero_discovery_failure_is_redacted() {
 }
 
 #[test]
+fn zotero_worker_route_carries_the_handoff_row_like_every_other_source_kind() {
+    let root = temp_root("zotero-route-handoff");
+    let worker_root = fake_zotero_worker_root(&root);
+    let source = BookPipelineSource {
+        kind: "zotero_filter".into(),
+        title: Some("Handoff parity".into()),
+        path: None,
+        selector: Some("parent_item_type=book".into()),
+        runner_behavior: None,
+        adapter_command: None,
+        fake_zotero_items: None,
+        route_overrides: BTreeMap::new(),
+    };
+    let config = || BookPipelinePreviewConfig {
+        has_paddleocr_credentials: true,
+        has_mineru_credentials: true,
+        route_overrides: BTreeMap::new(),
+    };
+
+    // A conversion-only run ends at conversion, so no handoff row.
+    let conversion_only = preview_zotero_route_from_worker(
+        &ZoteroRoutePreviewExecutor,
+        &source,
+        "conversion_only",
+        config(),
+        20,
+        &worker_root,
+    )
+    .expect("worker preview should resolve");
+    assert!(
+        !conversion_only
+            .iter()
+            .any(|item| item.route_kind == "translation_handoff"),
+        "conversion_only must not promise a handoff"
+    );
+
+    // A handoff mode must carry it, exactly as preview_route does for every
+    // other source kind -- the wizard's preflight table would otherwise
+    // under-report the work for live Zotero sources only.
+    for mode in [MODE_CONVERT_THEN_TRANSLATE, MODE_TRANSLATE_ONLY] {
+        let route = preview_zotero_route_from_worker(
+            &ZoteroRoutePreviewExecutor,
+            &source,
+            mode,
+            config(),
+            20,
+            &worker_root,
+        )
+        .expect("worker preview should resolve");
+        assert!(
+            route
+                .iter()
+                .any(|item| item.route_kind == "translation_handoff"),
+            "{mode} must carry the handoff row"
+        );
+        assert_eq!(
+            route.last().map(|item| item.route_kind.as_str()),
+            Some("translation_handoff"),
+            "{mode} must append the handoff row last, as preview_route does"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn zotero_route_preview_uses_worker_dry_run_policy() {
     let root = temp_root("zotero-route-preview");
     let worker_root = fake_zotero_worker_root(&root);
@@ -6259,6 +6325,7 @@ fn zotero_route_preview_uses_worker_dry_run_policy() {
     let route = preview_zotero_route_from_worker(
         &ZoteroRoutePreviewExecutor,
         &source,
+        "conversion_only",
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: false,
             has_mineru_credentials: true,
@@ -6297,6 +6364,7 @@ fn zotero_route_preview_uses_worker_dry_run_policy() {
     let route_with_remote_ocr = preview_zotero_route_from_worker(
         &ZoteroRoutePreviewExecutor,
         &source,
+        "conversion_only",
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -6772,6 +6840,7 @@ fn zotero_preview_reconciles_completed_and_changed_fingerprints() {
     let route = preview_zotero_route_from_worker(
         &ZoteroFingerprintPreviewExecutor,
         &source,
+        "conversion_only",
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
