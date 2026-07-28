@@ -457,10 +457,11 @@ def test_sync_rebuilds_chunks_when_the_chunk_contract_changes(
             date_modified=[item.date_modified],
         )
         monkeypatch.setattr(search_module, "iter_items", lambda _db_path: [item])
+        # sync now resolves attachments in bulk (#70); patch the plural entrypoint.
         monkeypatch.setattr(
             search_module,
-            "resolve_fulltext_artifact",
-            lambda _key, _db_path: (text, sha256),
+            "resolve_fulltext_artifacts",
+            lambda _keys, _db_path: {item.key: (text, sha256)},
         )
 
         stats = sync(store, embedder, db_path=tmp_path / "zotero.sqlite")
