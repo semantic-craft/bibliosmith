@@ -2127,6 +2127,7 @@ fn preview_book_pipeline_route_with_executor<E: RunnerCommandExecutor>(
         return preview_zotero_route_from_worker(
             executor,
             source,
+            mode,
             config,
             20,
             &book_ocr_conversion_root(),
@@ -3198,7 +3199,7 @@ fn queue_standard_job_for_root<E: RunnerCommandExecutor>(
     // wizard previewed; the offline preview only ever routes explicit
     // discovery evidence and would otherwise queue phantom children.
     let route = if is_zotero_source(&source) && source.fake_zotero_items.is_none() {
-        preview_zotero_route_from_worker(executor, &source, config, 20, root)?
+        preview_zotero_route_from_worker(executor, &source, &mode, config, 20, root)?
     } else {
         preview_route(&source, &mode, config)
     };
@@ -7167,6 +7168,7 @@ fn snapshot_outcome_counts(snapshot: &ZoteroCollectionSnapshot) -> BTreeMap<Stri
 fn preview_zotero_route_from_worker<E: RunnerCommandExecutor>(
     executor: &E,
     source: &BookPipelineSource,
+    mode: &str,
     config: BookPipelinePreviewConfig,
     limit: u32,
     root: &Path,
@@ -7187,6 +7189,12 @@ fn preview_zotero_route_from_worker<E: RunnerCommandExecutor>(
         &config.route_overrides
     };
     apply_route_overrides(&mut routes, overrides, Some(&config));
+    // Same handoff contract preview_route applies to every other source kind:
+    // a runnable route in a handoff mode carries the handoff row. Appended
+    // after the overrides, which can flip whether the route runs at all.
+    if should_handoff_after_run(mode) && route_is_runnable_for_source(source, &routes) {
+        routes.push(translation_handoff_route_item(source));
+    }
     Ok(routes)
 }
 
