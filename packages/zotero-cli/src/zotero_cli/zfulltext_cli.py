@@ -17,7 +17,14 @@ from . import __version__
 from .agent_contract import AgentGroup, not_found_error, validation_error
 from .embed import make_embedder, resolve_embedder_config
 from .root_env import load_root_dotenv
-from .search import get_item_chunks, index_markdown_item, query_fulltext, sync as do_sync
+from .search import (
+    SEARCH_MODES,
+    SearchMode,
+    get_item_chunks,
+    index_markdown_item,
+    query_fulltext,
+    sync as do_sync,
+)
 from .vector_store import DEFAULT_DB_PATH, SQLiteVecStore, VectorStoreConfig
 
 console = Console()
@@ -59,23 +66,48 @@ main.agent_entry_point = "zfulltext"
 @click.option("--year", default=None, help="Year filter: '2020', '2020..', '..2024', '2020..2024'")
 @click.option("--tag", default=None, help="Filter by tag")
 @click.option("--rerank", is_flag=True, help="Re-rank with the backend's reranker")
+@click.option("--mode", type=click.Choice(SEARCH_MODES), default="hybrid",
+              show_default=True, help="Retrieval mode")
 @click.option("--context", "ctx", default=2, type=int, help="Surrounding chunks to show (default 2)")
 @click.option("--json", "as_json", is_flag=True, help="Emit raw JSON")
 @click.option("--db", "db_path", type=click.Path(exists=True, path_type=Path), default=None)
 def query(
     text: str, top_k: int, item_type: str | None, year: str | None,
-    tag: str | None, rerank: bool, ctx: int, as_json: bool,
+    tag: str | None, rerank: bool, mode: SearchMode, ctx: int, as_json: bool,
     db_path: Path | None,
 ) -> None:
-    """Semantic search over PDF body text (fulltext chunks only)."""
+    """Search PDF body text (fulltext chunks only)."""
     year_range = _parse_year(year)
-    with SQLiteVecStore() as store, make_embedder(dimensions=store.cfg.dim) as emb:
-        results = query_fulltext(
-            text, store, emb,
-            top_k=top_k, item_type=item_type, year=year_range,
-            tag=tag, rerank=rerank, db_path=db_path,
-            context_chunks=ctx,
-        )
+    with SQLiteVecStore() as store:
+        if mode == "keyword" and not rerank:
+            results = query_fulltext(
+                text,
+                store,
+                None,
+                top_k=top_k,
+                item_type=item_type,
+                year=year_range,
+                tag=tag,
+                rerank=False,
+                db_path=db_path,
+                context_chunks=ctx,
+                mode=mode,
+            )
+        else:
+            with make_embedder(dimensions=store.cfg.dim) as emb:
+                results = query_fulltext(
+                    text,
+                    store,
+                    emb,
+                    top_k=top_k,
+                    item_type=item_type,
+                    year=year_range,
+                    tag=tag,
+                    rerank=rerank,
+                    db_path=db_path,
+                    context_chunks=ctx,
+                    mode=mode,
+                )
 
     if as_json:
         click.echo(json.dumps(results, ensure_ascii=False, indent=2))
@@ -89,8 +121,18 @@ def query(
         title = r.get("title") or "<no-title>"
         authors = _format_creators(r.get("creators") or [])
         yr = _extract_year(r.get("date"))
-        score = r.get("rerank_score") if rerank else r["distance"]
-        score_label = "rerank" if rerank else "dist"
+        score = (
+            r.get("rerank_score")
+            if rerank
+            else {
+                "vector": r.get("distance"),
+                "keyword": r.get("keyword_score"),
+                "hybrid": r.get("rrf_score"),
+            }[mode]
+        )
+        score_label = (
+            "rerank" if rerank else {"vector": "dist", "keyword": "bm25", "hybrid": "rrf"}[mode]
+        )
         chunk_idx = r.get("chunk_idx", "?")
         total = r.get("total_chunks", "?")
 
@@ -120,7 +162,9 @@ def sync(full: bool, db_path: Path | None) -> None:
     with make_embedder() as default_emb:
         default_dim = default_emb.cfg.dimensions
     selective_full_sync = False
-    with SQLiteVecStore(VectorStoreConfig(db_path=DEFAULT_DB_PATH, dim=default_dim)) as store:
+    with SQLiteVecStore(
+        VectorStoreConfig(db_path=DEFAULT_DB_PATH, dim=default_dim)
+    ) as store:
         selective_full_sync = full and store.has_item_scoped_chunks()
         if full and not selective_full_sync:
             object.__setattr__(store.cfg, "dim", default_dim)
@@ -204,9 +248,7 @@ def index_item(
     """Index one verified Markdown artifact without running a global sync."""
     with make_embedder() as default_emb:
         default_dim = default_emb.cfg.dimensions
-    with SQLiteVecStore(
-        VectorStoreConfig(db_path=DEFAULT_DB_PATH, dim=default_dim)
-    ) as store:
+    with SQLiteVecStore(VectorStoreConfig(db_path=DEFAULT_DB_PATH, dim=default_dim)) as store:
         with make_embedder(dimensions=store.cfg.dim) as emb:
             profile_id = f"{emb.cfg.model}:{emb.cfg.dimensions}"
             if embedding_profile_id is not None and embedding_profile_id != profile_id:

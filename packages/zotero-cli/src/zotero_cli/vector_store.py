@@ -11,6 +11,18 @@ from pathlib import Path
 import sqlite_vec
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "zotero-cli" / "vectors.sqlite"
+FTS_SCHEMA_SQL = """
+CREATE VIRTUAL TABLE fts_items
+USING fts5(
+    key UNINDEXED,
+    parent_key UNINDEXED,
+    title,
+    creators,
+    abstract,
+    chunk_text,
+    tokenize='trigram'
+)
+"""
 
 
 @dataclass(frozen=True)
@@ -24,6 +36,11 @@ class VectorStoreConfig:
 def _serialize_vec(vec: list[float]) -> bytes:
     """Pack a float32 vector for sqlite-vec."""
     return struct.pack(f"{len(vec)}f", *vec)
+
+
+def _normalize_ddl(sql: str) -> str:
+    """Normalize SQLite DDL for exact sidecar-schema reconciliation."""
+    return "".join(sql.lower().split())
 
 
 class SQLiteVecStore:
@@ -90,7 +107,49 @@ class SQLiteVecStore:
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_items_key ON items(key)")
+        fts_schema = cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='fts_items'"
+        ).fetchone()
+        rebuild_fts = fts_schema is None
+        if fts_schema is not None and _normalize_ddl(fts_schema[0]) != _normalize_ddl(FTS_SCHEMA_SQL):
+            cur.execute("DROP TABLE fts_items")
+            rebuild_fts = True
+        if rebuild_fts:
+            cur.execute(FTS_SCHEMA_SQL)
+        item_count = cur.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        fts_count = cur.execute("SELECT COUNT(*) FROM fts_items").fetchone()[0]
+        if rebuild_fts or item_count != fts_count:
+            cur.execute("DELETE FROM fts_items")
+            for rowid, key, metadata_json in cur.execute(
+                "SELECT rowid, key, metadata_json FROM items"
+            ).fetchall():
+                self._insert_fts_row(cur, rowid, key, json.loads(metadata_json))
         self._conn.commit()
+
+    @staticmethod
+    def _insert_fts_row(
+        cur: sqlite3.Cursor,
+        rowid: int,
+        key: str,
+        metadata: dict,
+    ) -> None:
+        creators = metadata.get("creators") or []
+        cur.execute(
+            """
+            INSERT INTO fts_items (
+                rowid, key, parent_key, title, creators, abstract, chunk_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rowid,
+                key,
+                key.split("#c", 1)[0],
+                metadata.get("title") or "",
+                " ".join(creators),
+                metadata.get("abstract") or "",
+                metadata.get("chunk_text") or "",
+            ),
+        )
 
     def upsert(
         self,
@@ -132,6 +191,8 @@ class SQLiteVecStore:
                 "INSERT INTO vec_items (rowid, embedding) VALUES (?, ?)",
                 (rowid, _serialize_vec(vec)),
             )
+            cur.execute("DELETE FROM fts_items WHERE rowid = ?", (rowid,))
+            self._insert_fts_row(cur, rowid, key, meta)
 
     def query(
         self,
@@ -184,6 +245,104 @@ class SQLiteVecStore:
             ).fetchall()
         return [(key, dist, json.loads(meta)) for key, dist, meta in rows]
 
+    def keyword_query(
+        self,
+        text: str,
+        top_k: int = 10,
+        *,
+        allowed_parent_keys: set[str] | None = None,
+        chunks_only: bool = False,
+    ) -> list[tuple[str, float, dict]]:
+        """Return literal FTS5 phrase matches ordered by BM25 relevance."""
+        literal = text.strip()
+        if not literal or (allowed_parent_keys is not None and not allowed_parent_keys):
+            return []
+        if len(literal) < 3:
+            return self._short_keyword_query(
+                literal,
+                top_k=top_k,
+                allowed_parent_keys=allowed_parent_keys,
+                chunks_only=chunks_only,
+            )
+        quoted_literal = '"' + literal.replace('"', '""') + '"'
+        match_expression = f"chunk_text : {quoted_literal}" if chunks_only else quoted_literal
+        predicates = ["fts_items MATCH ?"]
+        params: list[object] = [match_expression]
+        if chunks_only:
+            predicates.append("instr(i.key, '#c') > 0")
+        if allowed_parent_keys is not None:
+            predicates.append("fts_items.parent_key IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(sorted(allowed_parent_keys)))
+        params.append(top_k)
+        rows = self._conn.execute(
+            f"""
+            SELECT i.key,
+                   bm25(fts_items, 0.0, 0.0, 8.0, 4.0, 2.0, 1.0) AS score,
+                   i.metadata_json
+            FROM fts_items
+            JOIN items i ON i.rowid = fts_items.rowid
+            WHERE {" AND ".join(predicates)}
+            ORDER BY score
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [(key, score, json.loads(meta)) for key, score, meta in rows]
+
+    def _short_keyword_query(
+        self,
+        literal: str,
+        *,
+        top_k: int,
+        allowed_parent_keys: set[str] | None,
+        chunks_only: bool,
+    ) -> list[tuple[str, float, dict]]:
+        """Handle one- and two-character literals that trigram cannot tokenize."""
+        weighted_columns = (
+            (("chunk_text", 1.0),)
+            if chunks_only
+            else (
+                ("title", 8.0),
+                ("creators", 4.0),
+                ("abstract", 2.0),
+                ("chunk_text", 1.0),
+            )
+        )
+        score_parts = [
+            (
+                f"CASE WHEN instr(lower(coalesce(fts_items.{column}, '')), lower(?)) > 0 "
+                f"THEN {weight} ELSE 0 END"
+            )
+            for column, weight in weighted_columns
+        ]
+        match_parts = [
+            f"instr(lower(coalesce(fts_items.{column}, '')), lower(?)) > 0"
+            for column, _weight in weighted_columns
+        ]
+        predicates = [f"({' OR '.join(match_parts)})"]
+        params: list[object] = []
+        params.extend([literal] * (len(score_parts) + len(match_parts)))
+        if chunks_only:
+            predicates.append("instr(i.key, '#c') > 0")
+        if allowed_parent_keys is not None:
+            predicates.append("fts_items.parent_key IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(sorted(allowed_parent_keys)))
+        params.append(top_k)
+        rows = self._conn.execute(
+            f"""
+            SELECT i.key,
+                   -({" + ".join(score_parts)}) AS score,
+                   i.metadata_json
+            FROM fts_items
+            JOIN items i ON i.rowid = fts_items.rowid
+            WHERE {" AND ".join(predicates)}
+            ORDER BY score
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [(key, score, json.loads(meta)) for key, score, meta in rows]
+
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
 
@@ -216,6 +375,7 @@ class SQLiteVecStore:
             ).fetchall()
             for (rowid,) in rows:
                 cur.execute("DELETE FROM vec_items WHERE rowid = ?", (rowid,))
+                cur.execute("DELETE FROM fts_items WHERE rowid = ?", (rowid,))
             cur.execute(
                 "DELETE FROM items WHERE substr(key, 1, ?) = ?",
                 (len(prefix), prefix),
@@ -242,11 +402,18 @@ class SQLiteVecStore:
             and bool(metadata.get("embedding_profile_id"))
         )
 
-    def has_item_scoped_chunks(self) -> bool:
-        """Return whether the store contains pipeline-owned item index chunks."""
-        rows = self._conn.execute(
-            "SELECT metadata_json FROM items WHERE instr(key, '#c') > 0"
-        ).fetchall()
+    def has_item_scoped_chunks(self, parent_item_key: str | None = None) -> bool:
+        """Return whether the store, or one parent, has pipeline-owned chunks."""
+        if parent_item_key is None:
+            rows = self._conn.execute(
+                "SELECT metadata_json FROM items WHERE instr(key, '#c') > 0"
+            ).fetchall()
+        else:
+            prefix = f"{parent_item_key}#c"
+            rows = self._conn.execute(
+                "SELECT metadata_json FROM items WHERE substr(key, 1, ?) = ?",
+                (len(prefix), prefix),
+            ).fetchall()
         return any(self._is_item_scoped_metadata(json.loads(metadata)) for (metadata,) in rows)
 
     def clear_for_full_sync_preserving_item_scoped_chunks(self) -> None:
@@ -278,6 +445,7 @@ class SQLiteVecStore:
             cur = self._conn.cursor()
             for rowid in rowids:
                 cur.execute("DELETE FROM vec_items WHERE rowid = ?", (rowid,))
+                cur.execute("DELETE FROM fts_items WHERE rowid = ?", (rowid,))
                 cur.execute("DELETE FROM items WHERE rowid = ?", (rowid,))
 
     def drop(self, dim: int | None = None) -> None:
@@ -286,6 +454,7 @@ class SQLiteVecStore:
             object.__setattr__(self.cfg, "dim", dim)
         cur = self._conn.cursor()
         cur.execute("DROP TABLE IF EXISTS vec_items")
+        cur.execute("DROP TABLE IF EXISTS fts_items")
         cur.execute("DROP TABLE IF EXISTS items")
         self._conn.commit()
         self._init_schema()

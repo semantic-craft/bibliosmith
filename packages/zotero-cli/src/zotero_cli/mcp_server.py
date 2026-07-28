@@ -11,15 +11,42 @@ from typing import Any
 
 from . import zotero_db
 from .embed import make_embedder
-from .search import query as do_query
+from .search import SearchMode, query as do_query
 from .vector_store import SQLiteVecStore
 
 
-def _query_tool(text: str, top_k: int = 10, item_type: str | None = None,
-                tag: str | None = None, rerank: bool = False) -> str:
-    with SQLiteVecStore() as store, make_embedder(dimensions=store.cfg.dim) as emb:
-        results = do_query(text, store, emb, top_k=top_k,
-                           item_type=item_type, tag=tag, rerank=rerank)
+def _query_tool(
+    text: str,
+    top_k: int = 10,
+    item_type: str | None = None,
+    tag: str | None = None,
+    rerank: bool = False,
+    mode: SearchMode = "hybrid",
+) -> str:
+    with SQLiteVecStore() as store:
+        if mode == "keyword" and not rerank:
+            results = do_query(
+                text,
+                store,
+                None,
+                top_k=top_k,
+                item_type=item_type,
+                tag=tag,
+                rerank=False,
+                mode=mode,
+            )
+        else:
+            with make_embedder(dimensions=store.cfg.dim) as emb:
+                results = do_query(
+                    text,
+                    store,
+                    emb,
+                    top_k=top_k,
+                    item_type=item_type,
+                    tag=tag,
+                    rerank=rerank,
+                    mode=mode,
+                )
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 
@@ -69,11 +96,18 @@ def _build_server() -> Any:
     app = FastMCP("zotero-cli-agent")
 
     @app.tool()
-    def query(text: str, top_k: int = 10, item_type: str | None = None,
-              tag: str | None = None, rerank: bool = False) -> str:
-        """Semantic search (Jina v3 + sqlite-vec)."""
-        return _query_tool(text, top_k=top_k, item_type=item_type,
-                           tag=tag, rerank=rerank)
+    def query(
+        text: str,
+        top_k: int = 10,
+        item_type: str | None = None,
+        tag: str | None = None,
+        rerank: bool = False,
+        mode: SearchMode = "hybrid",
+    ) -> str:
+        """Vector, keyword, or hybrid search over the local Zotero index."""
+        return _query_tool(
+            text, top_k=top_k, item_type=item_type, tag=tag, rerank=rerank, mode=mode
+        )
 
     @app.tool()
     def get(key: str) -> str:
