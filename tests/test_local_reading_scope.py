@@ -16,29 +16,32 @@ REMOVED_WORKFLOW_PATHS = [
 
 
 def test_repository_does_not_ship_the_upstream_publishing_workflow() -> None:
-    present = [
-        relative
-        for relative in REMOVED_WORKFLOW_PATHS
-        if (REPO_ROOT / relative).exists()
-    ]
+    completed = subprocess.run(
+        ["git", "ls-files", "--", *REMOVED_WORKFLOW_PATHS],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    present = completed.stdout.splitlines()
 
     assert present == []
 
 
 def test_legacy_private_projects_remain_ignored() -> None:
-    completed = subprocess.run(
-        [
-            "git",
-            "check-ignore",
-            "--no-index",
-            "--quiet",
-            "books/private/legacy-project/source/original.pdf",
-        ],
-        cwd=REPO_ROOT,
-        check=False,
-    )
+    for relative in [
+        "books/private/legacy-project/source/original.pdf",
+        "books/zh-Hans/1_legacy-project/source/original.pdf",
+        "books/zh-Hans/12_legacy-project/source/original.pdf",
+        "books/zh-Hans/999_legacy-project/source/original.pdf",
+    ]:
+        completed = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--quiet", relative],
+            cwd=REPO_ROOT,
+            check=False,
+        )
 
-    assert completed.returncode == 0
+        assert completed.returncode == 0, relative
 
 
 def test_opencode_loads_only_the_local_reading_entrypoints() -> None:

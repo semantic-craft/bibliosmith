@@ -46,6 +46,7 @@ books/local/**
 # Legacy private projects remain ignored during migration. This protects local
 # source books without restoring the retired private-use workflow.
 books/private/**
+books/*/[0-9]*_*/**
 
 # Book-specific screenshot/debug captures must stay under the matching book project.
 /bibliosmith-*.png
