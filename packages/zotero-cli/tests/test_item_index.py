@@ -473,8 +473,10 @@ def test_sync_rebuilds_chunks_when_the_chunk_contract_changes(
 
 def test_python_and_launcher_use_the_same_chunk_contract_version() -> None:
     repo_root = Path(__file__).resolve().parents[3]
+    # After the book_pipeline split (#83), the wire constant lives in contract.rs.
     launcher_source = (
-        repo_root / "tools/bibliosmith-launcher/source/src-tauri/src/book_pipeline.rs"
+        repo_root
+        / "tools/bibliosmith-launcher/source/src-tauri/src/book_pipeline/contract.rs"
     ).read_text(encoding="utf-8")
 
     assert f'const CHUNK_CONTRACT_VERSION: &str = "{CHUNK_CONTRACT_VERSION}";' in launcher_source
