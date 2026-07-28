@@ -4,7 +4,7 @@
 
 `zsearch` is a single command that turns your local Zotero library into a queryable knowledge base your AI agents (Claude Code, ChatGPT, Codex, Cursor, anything that talks to a CLI or stdio MCP) can actually use:
 
-- **`zsearch query "fair use AI"`** — semantic top-K across **English + Chinese + 30+ languages** in one shot.
+- **`zsearch query "fair use AI"`** — hybrid BM25 + vector top-K across **English + Chinese + 30+ languages** in one shot.
 - **`zsearch get <KEY>` / `ls` / `tags` / `recent` / `grep` / `notes`** — fast read-only browsing of your `zotero.sqlite`.
 - **`zsearch add doi <DOI>` / `ingest arxiv|ssrn|cnki|westlaw`** — pull a paper from Crossref, arXiv, SSRN, CNKI, or Westlaw and POST it straight into your library.
 - **`zsearch parse <pdf>`** — `mineru`-quality PDF → Markdown (double-column / formulas / Chinese OCR) — better than the PyMuPDF most tools ship with.
@@ -108,8 +108,10 @@ zsearch info                 # show vector store path, dim, item count
 ## Search
 
 ```bash
-zsearch query "fair use AI"                       # top-10 multilingual semantic
+zsearch query "fair use AI"                       # top-10 hybrid BM25 + vector (default)
 zsearch query "法学方法论" -k 5                    # Chinese works just as well as English
+zsearch query "GDPR" --mode keyword               # local FTS5/BM25 only; no embedding call
+zsearch query "fair use AI" --mode vector          # preserve vector-only retrieval
 zsearch query "GDPR" --type book                  # filter by Zotero item type
 zsearch query "AI copyright" --year 2020..        # year range filter (Rust-style)
 zsearch query "privacy" --tag IP                  # tag filter
@@ -249,7 +251,7 @@ zotero_cli.zotero_db                        # SQL extraction (titles, abstracts,
         ↓
 zotero_cli.embed.make_embedder()            # Gemini (default) / Qwen text-embedding-v4 / Jina v3
         ↓
-zotero_cli.vector_store.SQLiteVecStore      # sqlite-vec single-file, we own the lifecycle
+zotero_cli.vector_store.SQLiteVecStore      # sqlite-vec + FTS5 single-file, one lifecycle
         ↓
 zsearch query / get / ls / ...              # CLI surface
 zsearch serve                               # optional stdio MCP wrapping the same calls

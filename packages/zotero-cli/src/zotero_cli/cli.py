@@ -23,7 +23,13 @@ from .agent_contract import (
 )
 from .embed import make_embedder
 from .root_env import load_root_dotenv
-from .search import query as do_query, query_chunks as do_query_chunks, sync as do_sync
+from .search import (
+    SEARCH_MODES,
+    SearchMode,
+    query as do_query,
+    query_chunks as do_query_chunks,
+    sync as do_sync,
+)
 from .vector_store import DEFAULT_DB_PATH, SQLiteVecStore, VectorStoreConfig
 
 console = Console()
@@ -99,28 +105,49 @@ def schema() -> dict:
 @click.option("--tag", default=None, help="Filter by tag")
 @click.option("--rerank", is_flag=True,
               help="Re-rank candidates with the backend's reranker for higher precision")
+@click.option("--mode", type=click.Choice(SEARCH_MODES), default="hybrid",
+              show_default=True, help="Retrieval mode")
 @click.option("--json", "as_json", is_flag=True, help="Emit raw JSON")
 def query(
     text: str, top_k: int, item_type: str | None, year: str | None,
-    tag: str | None, rerank: bool, as_json: bool,
+    tag: str | None, rerank: bool, mode: SearchMode, as_json: bool,
 ) -> None:
-    """Semantic search across the indexed Zotero library."""
+    """Search across the indexed Zotero library."""
     year_range = _parse_year(year)
-    with SQLiteVecStore() as store, make_embedder(dimensions=store.cfg.dim) as emb:
-        results = do_query(
-            text, store, emb,
-            top_k=top_k,
-            item_type=item_type,
-            year=year_range,
-            tag=tag,
-            rerank=rerank,
-        )
+    with SQLiteVecStore() as store:
+        if mode == "keyword" and not rerank:
+            results = do_query(
+                text,
+                store,
+                None,
+                top_k=top_k,
+                item_type=item_type,
+                year=year_range,
+                tag=tag,
+                rerank=False,
+                mode=mode,
+            )
+        else:
+            with make_embedder(dimensions=store.cfg.dim) as emb:
+                results = do_query(
+                    text,
+                    store,
+                    emb,
+                    top_k=top_k,
+                    item_type=item_type,
+                    year=year_range,
+                    tag=tag,
+                    rerank=rerank,
+                    mode=mode,
+                )
 
     if as_json:
         click.echo(json.dumps(results, ensure_ascii=False, indent=2))
         return
 
-    score_label = "rerank" if rerank else "dist"
+    score_label = (
+        "rerank" if rerank else {"vector": "dist", "keyword": "bm25", "hybrid": "rrf"}[mode]
+    )
     table = Table(title=f"Top-{top_k} for: {text}", show_lines=False)
     table.add_column("#", justify="right", style="dim")
     table.add_column(score_label, justify="right", style="cyan")
@@ -130,7 +157,15 @@ def query(
     table.add_column("authors", style="blue", no_wrap=False)
     table.add_column("title", style="white", no_wrap=False)
     for i, r in enumerate(results, 1):
-        score = r.get("rerank_score") if rerank else r["distance"]
+        score = (
+            r.get("rerank_score")
+            if rerank
+            else {
+                "vector": r.get("distance"),
+                "keyword": r.get("keyword_score"),
+                "hybrid": r.get("rrf_score"),
+            }[mode]
+        )
         table.add_row(
             str(i),
             f"{score:.3f}",
@@ -183,8 +218,10 @@ def sync(full: bool, db_path: Path | None) -> None:
     """Sync vector store from local zotero.sqlite."""
     with make_embedder() as default_emb:
         default_dim = default_emb.cfg.dimensions
+    selective_full_sync = False
     with SQLiteVecStore(VectorStoreConfig(db_path=DEFAULT_DB_PATH, dim=default_dim)) as store:
-        if full:
+        selective_full_sync = full and store.has_item_scoped_chunks()
+        if full and not selective_full_sync:
             object.__setattr__(store.cfg, "dim", default_dim)
         with make_embedder(dimensions=store.cfg.dim) as emb:
             active_dim = emb.cfg.dimensions
@@ -192,7 +229,7 @@ def sync(full: bool, db_path: Path | None) -> None:
                 raise click.ClickException(
                     f"embedding dim mismatch: index={store.cfg.dim}, embedder={active_dim}"
                 )
-            if full:
+            if full and not selective_full_sync:
                 store.drop(dim=active_dim)
 
     with SQLiteVecStore(VectorStoreConfig(db_path=DEFAULT_DB_PATH, dim=active_dim)) as store:
@@ -209,7 +246,13 @@ def sync(full: bool, db_path: Path | None) -> None:
                 def on_progress(seen: int, total: int) -> None:
                     prog.update(task, total=total, completed=seen)
 
-                stats = do_sync(store, emb, db_path=db_path, full=False, progress=on_progress)
+                stats = do_sync(
+                    store,
+                    emb,
+                    db_path=db_path,
+                    full=selective_full_sync,
+                    progress=on_progress,
+                )
 
     console.print(
         f"[green]✓[/green] sync done — total={stats['total']} "
