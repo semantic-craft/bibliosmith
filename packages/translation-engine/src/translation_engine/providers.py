@@ -30,8 +30,9 @@ class ProviderConfig:
     base_url: str
     model: str
     timeout_seconds: float
+    # How many translation units may be in flight against this service at once.
+    # Read by the engine when it fans units out; see engine._unit_concurrency.
     concurrency_limit: int
-    max_chunk_tokens: int
     key_env: str
 
 
@@ -175,7 +176,6 @@ class OpenAICompatibleProvider:
         self.model = config.model
         self.timeout_seconds = config.timeout_seconds
         self.concurrency_limit = config.concurrency_limit
-        self.max_chunk_tokens = config.max_chunk_tokens
         self.credential_pool = credential_pool
         self._http_client = http_client or httpx.Client(timeout=self.timeout_seconds)
         self._max_attempts = max_attempts
@@ -234,7 +234,6 @@ class GeminiProvider:
         self.model = config.model
         self.timeout_seconds = config.timeout_seconds
         self.concurrency_limit = config.concurrency_limit
-        self.max_chunk_tokens = config.max_chunk_tokens
         self.credential_pool = credential_pool
         self._http_client = http_client or httpx.Client(timeout=self.timeout_seconds)
         self._max_attempts = max_attempts
@@ -374,7 +373,6 @@ def _parse_provider_config(entry: dict[str, object]) -> ProviderConfig:
         "model",
         "timeout_seconds",
         "concurrency_limit",
-        "max_chunk_tokens",
         "key_env",
     }
     if set(entry) != required:
@@ -399,19 +397,12 @@ def _parse_provider_config(entry: dict[str, object]) -> ProviderConfig:
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ValueError("provider timeout must be positive")
     concurrency = entry["concurrency_limit"]
-    chunk_limit = entry["max_chunk_tokens"]
     if (
         isinstance(concurrency, bool)
         or not isinstance(concurrency, int)
         or concurrency < 1
     ):
         raise ValueError("provider concurrency limit must be positive")
-    if (
-        isinstance(chunk_limit, bool)
-        or not isinstance(chunk_limit, int)
-        or chunk_limit < 1
-    ):
-        raise ValueError("provider chunk limit must be positive")
     key_env = str(strings["key_env"])
     if re.fullmatch(r"[A-Z_][A-Z0-9_]*", key_env) is None:
         raise ValueError("provider key_env must name an environment variable")
@@ -423,7 +414,6 @@ def _parse_provider_config(entry: dict[str, object]) -> ProviderConfig:
         model=str(strings["model"]),
         timeout_seconds=float(timeout),
         concurrency_limit=concurrency,
-        max_chunk_tokens=chunk_limit,
         key_env=key_env,
     )
 

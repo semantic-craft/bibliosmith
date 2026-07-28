@@ -117,6 +117,31 @@ def find_glossary_violations(
     )
 
 
+def find_variant_spans(text: str, entry: GlossaryEntry) -> tuple[tuple[int, int], ...]:
+    """Where this entry's source variants sit in `text`, in document order.
+
+    Shares the matching rule with `_variant_frequency` -- substring for CJK, word
+    boundaries for Latin -- so locating a term can never disagree with having
+    counted it. A violation is only worth reporting if the reader can be shown
+    where it happened, and that means the same match, not a second opinion.
+    """
+    spans: set[tuple[int, int]] = set()
+    for variant in entry.variants:
+        if _CJK_PATTERN.search(variant):
+            start = text.find(variant)
+            while start != -1:
+                spans.add((start, start + len(variant)))
+                start = text.find(variant, start + len(variant))
+        else:
+            spans.update(
+                match.span()
+                for match in re.finditer(
+                    rf"\b{re.escape(variant)}\b", text, flags=re.IGNORECASE
+                )
+            )
+    return tuple(sorted(spans))
+
+
 def build_mandatory_glossary_block(
     source_text: str, task_manifest: Mapping[str, object]
 ) -> str:

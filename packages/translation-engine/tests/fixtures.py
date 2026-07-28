@@ -78,6 +78,37 @@ def build_run_fixture(
     return manifest_path
 
 
+def build_multi_unit_run_fixture(
+    project_root: Path,
+    *,
+    source_texts: list[str],
+    max_tokens: int,
+) -> Path:
+    """A run manifest over several chapters, for anything units do to each other.
+
+    `build_run_fixture` stays single-unit because most engine behaviour is
+    per-chapter; concurrency, dispatch, and report ordering are the exceptions.
+    """
+    units = _write_units(project_root, source_texts)
+    manifest_path = project_root / "translation-run.json"
+    _write_json(
+        manifest_path,
+        {
+            "schema": "translation-engine-run-v1",
+            "projectRoot": str(project_root),
+            "sourceMapPath": "metadata/source_map.json",
+            "sourceLanguage": "auto",
+            "targetLanguage": "zh-Hans",
+            "providerProfileId": "fake-provider-profile",
+            "providerConfigId": "fake-config-no-secrets",
+            "translationPolicyVersion": "translation-policy-v1",
+            "maxTokens": max_tokens,
+            "units": units,
+        },
+    )
+    return manifest_path
+
+
 def build_sample_fixture(
     project_root: Path,
     *,
@@ -87,9 +118,35 @@ def build_sample_fixture(
     text_cleanup: bool | None = None,
     custom_instructions: object | None = None,
 ) -> Path:
+    units = _write_units(project_root, source_texts)
+
+    manifest_path = project_root / "translation-sample.json"
+    manifest: dict[str, object] = {
+        "schema": "translation-engine-sample-v1",
+        "projectRoot": str(project_root),
+        "sourceMapPath": "metadata/source_map.json",
+        "sourceLanguage": "auto",
+        "targetLanguage": "zh-Hans",
+        "providerProfileId": "fake-provider-profile",
+        "providerConfigId": "fake-config-no-secrets",
+        "sampleCount": sample_count,
+        "characterBudget": character_budget,
+        "placeholderRetries": 1,
+        "units": units,
+    }
+    if text_cleanup is not None:
+        manifest["textCleanup"] = text_cleanup
+    if custom_instructions is not None:
+        manifest["customInstructions"] = custom_instructions
+    _write_json(manifest_path, manifest)
+    return manifest_path
+
+
+def _write_units(project_root: Path, source_texts: list[str]) -> list[dict[str, str]]:
+    """Write one chapter, task manifest, and source-map entry per source text."""
     glossary_text = "source,translation,category,note\n"
     glossary_path = project_root / "glossary" / "terms.csv"
-    glossary_path.parent.mkdir(parents=True)
+    glossary_path.parent.mkdir(parents=True, exist_ok=True)
     glossary_path.write_text(glossary_text, encoding="utf-8")
     glossary_sha256 = hashlib.sha256(glossary_text.encode()).hexdigest()
 
@@ -129,32 +186,12 @@ def build_sample_fixture(
         units.append({"taskManifestPath": task_relative})
 
     source_map_path = project_root / "metadata" / "source_map.json"
-    source_map_path.parent.mkdir(parents=True)
+    source_map_path.parent.mkdir(parents=True, exist_ok=True)
     _write_json(
         source_map_path,
         {"schema": "local-reading-source-map-v1", "chapters": chapters},
     )
-
-    manifest_path = project_root / "translation-sample.json"
-    manifest: dict[str, object] = {
-        "schema": "translation-engine-sample-v1",
-        "projectRoot": str(project_root),
-        "sourceMapPath": "metadata/source_map.json",
-        "sourceLanguage": "auto",
-        "targetLanguage": "zh-Hans",
-        "providerProfileId": "fake-provider-profile",
-        "providerConfigId": "fake-config-no-secrets",
-        "sampleCount": sample_count,
-        "characterBudget": character_budget,
-        "placeholderRetries": 1,
-        "units": units,
-    }
-    if text_cleanup is not None:
-        manifest["textCleanup"] = text_cleanup
-    if custom_instructions is not None:
-        manifest["customInstructions"] = custom_instructions
-    _write_json(manifest_path, manifest)
-    return manifest_path
+    return units
 
 
 def _write_json(path: Path, value: object) -> None:

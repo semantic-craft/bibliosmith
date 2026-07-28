@@ -74,6 +74,17 @@ uniformly, and ends each excerpt on a sentence boundary. It runs the normal
 placeholder validation and degradation path entirely in memory: it does not
 write checkpoints or anything under `chapters/translated/`.
 
+A book with two or fewer tasks therefore has no internal task to sample, and the
+command succeeds with an empty `samples` list without calling the provider. That
+is the defined outcome, not a failure: the excluded endpoints are where title,
+copyright, and trailing metadata live, and sampling them would preview the least
+representative pages in the book. A caller showing the report has to say so —
+an empty panel reads as a broken preview.
+
+The sample runs one translation pass. A full run with `secondPassEnabled` also
+runs the windowed reflection, so a preview is not byte-for-byte what that run
+will produce; a caller offering both has to say which it is showing.
+
 `source_map.json` and each task manifest must be outputs of the existing split
 and prepare stages. A retry supplies only failed or invalidated unit entries.
 The provider config ID must identify the non-secret settings represented by the
@@ -133,6 +144,23 @@ hash, provider profile/config IDs, and translation policy version. A mismatched
 key invalidates the cache. Successful atomic output removes the checkpoint;
 source-preserving degradation remains partial and reports the unit as failed.
 
+## Unit concurrency
+
+Units translate in parallel, up to the `concurrency_limit` their provider entry
+declares; a provider that declares none runs one unit at a time. Chunks within a
+unit stay strictly serial, because each chunk's prompt carries the last 25 words
+of the previous chunk's translation. Every unit reads and writes only paths
+derived from its own unit ID, so units never contend for a checkpoint or an
+output file. The report lists units in manifest order regardless of which
+finished first.
+
+A rate limit stops dispatch rather than the whole run. When a unit exhausts the
+provider's throttle budget, units that have not started are failed retryable
+without a request — attempting them would only churn the same throttle — but
+units already in flight are left to finish and report their own outcome. One of
+them may hold a credential that is still good, and killing it would discard a
+paid call along with the checkpoint prefix it was about to write.
+
 ## Optional source-text cleanup
 
 `textCleanup` is optional and defaults to `false`. When enabled, the target
@@ -159,6 +187,39 @@ and then longer variants.
 If a reviewer changes `glossary/terms.csv`, the old prepared task fails with
 `glossary_hash_mismatch`. Rerun the launcher's prepare stage before translation
 so its task manifests and approval gate bind the new glossary hash.
+
+What comes back is checked against what was demanded, and a term whose required
+translation is missing is reported on the unit as `glossaryViolations`:
+
+```json
+{
+  "source": "Zettelkasten",
+  "translation": "卡片盒",
+  "occurrences": [
+    {
+      "chunkIndex": 0,
+      "sourceExcerpt": "The Zettelkasten is a slip box.",
+      "translatedExcerpt": "笔记盒是一只卡片箱。"
+    }
+  ]
+}
+```
+
+`chunkIndex` is a zero-based index into the unit's chunks. The two excerpts are
+the same stretch of text on each side. A candidate is only accepted when it
+carries the chunk's protected placeholders once each and in order, so splitting
+source and output on those placeholders yields the same segments in the same
+order, and the *i*-th segment of the output is the model's rendering of the
+*i*-th segment of the source. A segment is bounded by whatever the protection
+pass replaced — usually a paragraph break or heading prefix, but inline atoms
+like code spans and link URLs bound one too, so an excerpt can be narrower than
+the paragraph it sits in. At most two segments are reported per term, each capped
+at 200 characters.
+
+This is evidence, never a gate. Chinese word formation can put a required form
+inside a longer compound, and a term can be legitimately absent where the source
+form was part of a larger name, so a violation never fails, degrades, or rewrites
+a chapter — the unit still completes.
 
 ## On-demand NER candidates
 
