@@ -744,7 +744,7 @@ impl RunnerCommandExecutor for ZoteroExtractIndexExecutor {
                 assert!(has_arg_pair(
                     &command.args,
                     "--chunk-contract-version",
-                    "zfulltext-chunk-v1"
+                    "zfulltext-chunk-v2"
                 ));
                 assert!(has_arg_pair(
                     &command.args,
@@ -764,7 +764,7 @@ impl RunnerCommandExecutor for ZoteroExtractIndexExecutor {
                         "sourceSha256": markdown_sha256,
                         "chunkCount": 1,
                         "indexContractVersion": "zfulltext-item-index-v1",
-                        "chunkContractVersion": "zfulltext-chunk-v1",
+                        "chunkContractVersion": "zfulltext-chunk-v2",
                         "embeddingProfileId": "fixture-embedding:3",
                         "completedAt": "2026-07-15T12:00:00Z",
                         "reused": false,
