@@ -14,6 +14,13 @@ from rich.table import Table
 
 from . import __version__
 from . import zotero_api, zotero_db
+from .agent_contract import (
+    AgentGroup,
+    command_surface_schema,
+    machine_output_requested,
+    not_found_error,
+    validation_error,
+)
 from .embed import make_embedder
 from .root_env import load_root_dotenv
 from .search import query as do_query, query_chunks as do_query_chunks, sync as do_sync
@@ -26,13 +33,16 @@ def _parse_year(spec: str | None) -> tuple[int | None, int | None] | None:
     """Parse '2020', '2020..', '..2024', '2020..2024' into (lo, hi)."""
     if not spec:
         return None
-    if ".." in spec:
-        lo_s, hi_s = spec.split("..", 1)
-        lo = int(lo_s) if lo_s else None
-        hi = int(hi_s) if hi_s else None
-        return (lo, hi)
-    y = int(spec)
-    return (y, y)
+    try:
+        if ".." in spec:
+            lo_s, hi_s = spec.split("..", 1)
+            lo = int(lo_s) if lo_s else None
+            hi = int(hi_s) if hi_s else None
+            return (lo, hi)
+        y = int(spec)
+        return (y, y)
+    except ValueError:
+        raise validation_error(f"invalid year filter: {spec!r}") from None
 
 
 def _truncate(s: str, n: int) -> str:
@@ -56,11 +66,27 @@ def _extract_year(date: str | None) -> str:
     return m.group(0) if m else ""
 
 
-@click.group()
+@click.group(cls=AgentGroup)
 @click.version_option(__version__)
 def main() -> None:
     """Zotero CLI with self-hosted semantic search."""
     load_root_dotenv()
+
+
+main.agent_entry_point = "zsearch"
+
+
+@main.command()
+def schema() -> dict:
+    """Emit the machine-readable zsearch and zfulltext command surface."""
+    from .zfulltext_cli import main as zfulltext_main
+
+    return command_surface_schema(
+        {
+            "zfulltext": zfulltext_main,
+            "zsearch": main,
+        }
+    )
 
 
 @main.command()
@@ -206,7 +232,10 @@ def info() -> None:
 def open_cmd(key: str) -> None:
     """Open an item in Zotero (uses zotero://select URL scheme)."""
     url = f"zotero://select/library/items/{key}"
-    subprocess.run(["open", url], check=False)
+    run_kwargs: dict = {"check": False}
+    if machine_output_requested():
+        run_kwargs.update(capture_output=True, text=True)
+    subprocess.run(["open", url], **run_kwargs)
     console.print(f"[green]→[/green] opened {url}")
 
 
@@ -222,7 +251,10 @@ def get(key: str, as_json: bool) -> None:
     """Fetch a single item's metadata by Zotero key."""
     item = zotero_db.get_item(key)
     if item is None:
-        raise click.ClickException(f"item not found: {key}")
+        raise not_found_error(
+            f"item not found: {key}",
+            hint="Run a search or listing command to discover a valid Zotero key.",
+        )
     if as_json:
         from dataclasses import asdict
         d = asdict(item)
@@ -388,9 +420,12 @@ def parse(pdf: Path, output: Path | None, method: str) -> None:
     out_dir = output or pdf.with_suffix(".markdown.d")
     out_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"[cyan]parsing[/cyan] {pdf} → {out_dir}")
+    run_kwargs: dict = {"check": False}
+    if machine_output_requested():
+        run_kwargs.update(capture_output=True, text=True)
     result = subprocess.run(
         ["mineru", "-p", str(pdf), "-o", str(out_dir), "-m", method],
-        check=False,
+        **run_kwargs,
     )
     if result.returncode != 0:
         raise click.ClickException(f"mineru exited {result.returncode}")
@@ -515,11 +550,11 @@ def add_file(path: Path, parent_key: str | None) -> None:
 def edit(key: str, fields: tuple[str, ...]) -> None:
     """Update fields on an existing item."""
     if not fields:
-        raise click.ClickException("supply at least one -f NAME=VALUE")
+        raise validation_error("supply at least one -f NAME=VALUE")
     payload: dict[str, str] = {}
     for spec in fields:
         if "=" not in spec:
-            raise click.ClickException(f"bad -f spec: {spec!r} (need NAME=VALUE)")
+            raise validation_error(f"bad -f spec: {spec!r} (need NAME=VALUE)")
         name, value = spec.split("=", 1)
         payload[name.strip()] = value
     result = zotero_api.update_item(key, payload)
@@ -592,7 +627,7 @@ def note_add(parent_key: str | None, body: str | None) -> None:
     if body is None:
         body = click.get_text_stream("stdin").read()
     if not body.strip():
-        raise click.ClickException("empty note body")
+        raise validation_error("empty note body")
     result = zotero_api.create_note(parent_key, body)
     _print_add_result(result)
 
@@ -662,9 +697,12 @@ def enrich(key: str, do_apply: bool) -> None:
     """Enrich an item via Crossref / Semantic Scholar lookup by title."""
     item = zotero_db.get_item(key)
     if item is None:
-        raise click.ClickException(f"item not found: {key}")
+        raise not_found_error(
+            f"item not found: {key}",
+            hint="Run a search or listing command to discover a valid Zotero key.",
+        )
     if not item.title:
-        raise click.ClickException("item has no title to query")
+        raise validation_error("item has no title to query")
 
     proposed: dict[str, str] = {}
     msg: dict | None = None

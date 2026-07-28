@@ -10,6 +10,8 @@ from urllib.parse import urlencode
 
 import httpx
 
+from .agent_contract import auth_missing_error
+
 ZOTERO_API_BASE = "https://api.zotero.org"
 
 
@@ -20,9 +22,9 @@ def _config() -> tuple[str, str, str]:
     if library_type == "user":
         library_type = "users"
     if not api_key:
-        raise RuntimeError("ZOTERO_API_KEY not set in environment")
+        raise auth_missing_error("ZOTERO_API_KEY not set in environment")
     if not library_id:
-        raise RuntimeError("ZOTERO_LIBRARY_ID not set in environment")
+        raise auth_missing_error("ZOTERO_LIBRARY_ID not set in environment")
     return api_key, library_id, library_type
 
 

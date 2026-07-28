@@ -20,8 +20,8 @@
 |---|---|---|
 | **Context cost** | Pay-per-use. The agent loads only the output of the command it asked for — no tool schemas sit in the context window when unused. | Standardized. The agent sees the full tool catalog up front, which is great for discovery but costs context tokens whether you use the tools or not. |
 | **Composability** | Native Unix pipes — `zsearch query "..." --json \| jq ...`, scriptable in `bash` / `make` / CI. | One-shot tool calls only; no piping between MCP tools. |
-| **Verification** | Exit codes + stderr — agent self-corrects on failure without a human in the loop. | JSON tool results — the model has to interpret outcomes itself. |
-| **Discovery** | Agent reads `--help` once and is good. | Listed automatically by any MCP client (Claude Desktop, IDEs, multi-tool harnesses). |
+| **Verification** | Typed exit codes plus a stable JSON error envelope tell the agent whether to retry or fix its input. | JSON tool results — the model has to interpret outcomes itself. |
+| **Discovery** | `zsearch schema` returns both CLI trees, their parameters, output contracts, and read/write safety markers. | Listed automatically by any MCP client (Claude Desktop, IDEs, multi-tool harnesses). |
 | **Best fit** | Claude Code, Codex, Cursor terminal, autonomous agents, CI/CD pipelines. | Claude Desktop, IDE chat panels, agent harnesses that orchestrate many MCP tools at once. |
 
 This mirrors Firecrawl's positioning ([Why CLIs Are Better for AI Coding Agents](https://www.firecrawl.dev/blog/why-clis-are-better-for-agents)): **CLIs are the more token-efficient default; MCP is the right choice when your client only speaks MCP, or when you want a uniform tool-discovery surface across many services.** Most valid agent workflows use both. We ship both so you don't have to choose up front.
@@ -189,11 +189,31 @@ zsearch enrich <KEY> --apply                      # PATCH the item with new fiel
 
 ### Option 1 — pipe to anything
 
-Every command takes `--json` or prints clean tables. Any agent that can call a shell can use `zsearch`. No schema you have to import, no broker process to keep alive.
+`zsearch` and `zfulltext` automatically emit a stable envelope when stdout is
+not a TTY. Interactive terminals keep the existing Rich tables. Set
+`ZSEARCH_FORMAT=json` or `ZSEARCH_FORMAT=table` to override detection for both
+entry points; an explicit `--json` still requests the envelope on commands that
+already expose that flag.
 
 ```bash
-zsearch query "fair use AI" --json | jq '.[0].key' | xargs zsearch get
+zsearch query "fair use AI" | jq -r '.data[0].key' | xargs zsearch get
+zsearch schema | jq '.data.commands[] | select(.safety == "write")'
 ```
+
+Successful machine output has the shape
+`{"ok":true,"data":...,"meta":{"schema_version":"zotero-cli-agent-v1","cli_version":"..."}}`.
+Failures use `{"ok":false,"error":{"code":...,"message":...,"retryable":...,"hint":...},"meta":...}`.
+Stable exit classes are: `1` runtime, `2` authentication, `3` validation,
+`4` not found, `5` retryable network failure, and `6` version conflict.
+
+Four commands retain their pre-existing protocol instead of the envelope:
+`zsearch collection-snapshot` and `zfulltext profile` / `index` keep their bare
+launcher-facing JSON, while `zsearch serve` keeps stdio MCP framing. Their
+`output_contract` values are visible in `zsearch schema`.
+
+Agent skills should discover parameters through `zsearch schema`, inspect
+`error.retryable` before retrying, and force `ZSEARCH_FORMAT=table` only when
+they intentionally need human-formatted output.
 
 ### Option 2 — stdio MCP server
 
