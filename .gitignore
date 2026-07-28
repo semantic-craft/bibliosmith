@@ -43,6 +43,10 @@ books/local/**
 !books/local/
 !books/local/.gitignore
 
+# Legacy private projects remain ignored during migration. This protects local
+# source books without restoring the retired private-use workflow.
+books/private/**
+
 # Book-specific screenshot/debug captures must stay under the matching book project.
 /bibliosmith-*.png
 # >>> dev-link (Matt Pocock skills — machine-local symlinks, do not commit) >>>

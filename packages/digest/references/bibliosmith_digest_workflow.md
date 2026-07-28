@@ -1,10 +1,10 @@
 # BiblioSmith Digest Workflow
 
-BiblioSmith Digest 是 `output/book.epub` 之后的可选后处理模块，不是翻译主流程的一部分。它的边界是：
+BiblioSmith Digest 是 `output/reading/book.epub` 之后的可选后处理模块，不是翻译主流程的一部分。它的边界是：
 
 1. 输入已经生成的标准 EPUB。
 2. 读取 EPUB 的 OPF、spine、nav 和 XHTML 正文。
-3. 生成 `output/digest/` 中的 Digest XHTML、章节拓扑、知识脉络图、agent 输入包和状态文件。
+3. 生成 `output/reading/digest/` 中的 Digest XHTML、章节拓扑、知识脉络图、agent 输入包和状态文件。
 4. 生成 `qa/digest/` 中的报告和审校清单。
 5. 只有当书籍工程配置允许时，才把 Digest 作为一个新增章节合并进新的标准 EPUB。
 
@@ -18,9 +18,9 @@ BiblioSmith Digest 是 `output/book.epub` 之后的可选后处理模块，不�
 
 ## 输出边界
 
-- 旁路输出：`output/digest/`
+- 旁路输出：`output/reading/digest/`
 - QA 输出：`qa/digest/`
-- 合并输出：默认 `output/book_digest.epub`
+- 合并输出：默认 `output/reading/book_digest.epub`
 - 不输出专用阅读器格式。
 - 不把具体书籍内容写入 `packages/digest/`。
 

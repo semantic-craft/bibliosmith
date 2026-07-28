@@ -6,7 +6,7 @@ This is the builder the launcher runner uses: ``prepare_bilingual_builder`` in
 ``scripts/`` directory and runs it with ``--book-root``. It pairs paragraphs
 positionally from ``metadata/source_map.json`` and ``chapters/final/``, falls
 back to whole-chapter blocks when the counts differ, and writes
-``output/book_bilingual.epub`` — the path the runner then registers.
+``output/reading/book_bilingual.epub`` — the path the runner then registers.
 
 The launcher owns this builder alongside the single-language builder; see
 ``docs/bilingual-epub-builder.md`` for its input and output contract.
@@ -185,13 +185,20 @@ def build_book(project_root: Path) -> Path:
     target_language = normalized_language(
         book_metadata.get("language") or source_manifest.get("target_language"), "zh-Hans"
     )
+    source_file_name = source_manifest.get("source_file_name")
+    source_title = (
+        Path(source_file_name).stem
+        if isinstance(source_file_name, str) and source_file_name.strip()
+        else re.sub(r"^\d+_", "", project_root.name).replace("_", " ").strip()
+    )
     title = (
         book_metadata.get("title")
         or book_metadata.get("title_zh")
         or book_metadata.get("title_zh_hans")
-        or "Untitled Book"
+        or source_title
+        or project_root.name
     )
-    creator = book_metadata.get("author") or book_metadata.get("creator") or "Unknown"
+    creator = book_metadata.get("author") or book_metadata.get("creator") or ""
     identifier = book_metadata.get("identifier") or f"urn:uuid:{uuid.uuid4()}"
 
     final_dir = project_root / "chapters" / "final"
@@ -298,6 +305,9 @@ h1,h2,h3{line-height:1.3;text-indent:0}
             f"<dc:language>{html.escape(target_language)}</dc:language>",
         ]
     )
+    creator_element = (
+        f"<dc:creator>{html.escape(creator)}</dc:creator>" if creator else ""
+    )
     write_text(
         epub_root / "package.opf",
         f'''<?xml version="1.0" encoding="utf-8"?>
@@ -305,7 +315,7 @@ h1,h2,h3{line-height:1.3;text-indent:0}
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">
     <dc:identifier id="bookid">{html.escape(identifier)}</dc:identifier>
     <dc:title>{html.escape(title)}</dc:title>
-    <dc:creator>{html.escape(creator)}</dc:creator>
+    {creator_element}
     {metadata_languages}
     <meta property="dcterms:modified">{modified}</meta>
   </metadata>
@@ -319,7 +329,7 @@ h1,h2,h3{line-height:1.3;text-indent:0}
 ''',
     )
 
-    output_path = project_root / "output" / "book_bilingual.epub"
+    output_path = project_root / "output" / "reading" / "book_bilingual.epub"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.unlink(missing_ok=True)
     with zipfile.ZipFile(output_path, "w") as archive:

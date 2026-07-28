@@ -18,11 +18,11 @@
     },
     "source_epub": {
       "type": "string",
-      "default": "output/book.epub"
+      "default": "output/reading/book.epub"
     },
     "output_epub": {
       "type": "string",
-      "default": "output/book_digest.epub"
+      "default": "output/reading/book_digest.epub"
     },
     "title": {
       "type": "string",

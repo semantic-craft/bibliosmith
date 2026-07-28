@@ -1321,7 +1321,7 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                     .collect::<Vec<_>>();
                 final_paths.sort();
                 assert!(!final_paths.is_empty());
-                let html_dir = command.output_dir.join("output/epub_work/EPUB");
+                let html_dir = command.output_dir.join("output/reading/html");
                 fs::create_dir_all(&html_dir).unwrap();
                 for path in final_paths {
                     let unit_id = path.file_stem().unwrap().to_string_lossy();
@@ -1331,9 +1331,13 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                     )
                     .unwrap();
                 }
-                fs::write(command.output_dir.join("output/book.epub"), "canned epub").unwrap();
+                fs::write(
+                    command.output_dir.join("output/reading/book.epub"),
+                    "canned epub",
+                )
+                .unwrap();
                 Ok(RunnerCommandResult {
-                    stdout: "wrote output/book.epub".into(),
+                    stdout: "wrote output/reading/book.epub".into(),
                     stderr: String::new(),
                     log_summary: vec!["Reading builder fixture completed".into()],
                 })
@@ -1383,13 +1387,15 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                     "paragraph"
                 };
                 fs::write(
-                    command.output_dir.join("output/book_bilingual.epub"),
+                    command
+                        .output_dir
+                        .join("output/reading/book_bilingual.epub"),
                     "canned bilingual epub",
                 )
                 .unwrap();
                 Ok(RunnerCommandResult {
                     stdout: format!(
-                        "chapter_001: alignment={alignment} source_paragraphs={source_count} target_paragraphs={target_count}\nwrote output/book_bilingual.epub"
+                        "chapter_001: alignment={alignment} source_paragraphs={source_count} target_paragraphs={target_count}\nwrote output/reading/book_bilingual.epub"
                     ),
                     stderr: String::new(),
                     log_summary: vec!["Bilingual builder fixture completed".into()],
@@ -1464,24 +1470,28 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                 .unwrap();
                 assert_eq!(config["enabled"], true);
                 assert_eq!(config["merge_into_epub"], true);
-                assert_eq!(config["source_epub"], "output/book.epub");
-                assert_eq!(config["output_epub"], "output/book_digest.epub");
+                assert_eq!(config["source_epub"], "output/reading/book.epub");
+                assert_eq!(config["output_epub"], "output/reading/book_digest.epub");
                 assert_eq!(config["title"], "Digest Fixture Title");
                 assert_eq!(config["language"], "zh-CN");
-                fs::create_dir_all(command.output_dir.join("output/digest")).unwrap();
+                fs::create_dir_all(command.output_dir.join("output/reading/digest")).unwrap();
                 fs::create_dir_all(command.output_dir.join("qa/digest")).unwrap();
                 fs::write(
-                    command.output_dir.join("output/book_digest.epub"),
+                    command.output_dir.join("output/reading/book_digest.epub"),
                     "canned digest epub",
                 )
                 .unwrap();
                 fs::write(
-                    command.output_dir.join("output/digest/digest.xhtml"),
+                    command
+                        .output_dir
+                        .join("output/reading/digest/digest.xhtml"),
                     "<html><body>Digest</body></html>\n",
                 )
                 .unwrap();
                 fs::write(
-                    command.output_dir.join("output/digest/knowledge_map.svg"),
+                    command
+                        .output_dir
+                        .join("output/reading/digest/knowledge_map.svg"),
                     "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n",
                 )
                 .unwrap();
@@ -1497,8 +1507,8 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                     serde_json::to_string_pretty(&serde_json::json!({
                         "status": "PASS",
                         "merged": true,
-                        "source_epub": "output/book.epub",
-                        "output_epub": "output/book_digest.epub",
+                        "source_epub": "output/reading/book.epub",
+                        "output_epub": "output/reading/book_digest.epub",
                     }))
                     .unwrap()
                         + "\n",
@@ -10126,7 +10136,9 @@ fn fake_pipeline_promotes_builds_validates_and_completes() {
 
     assert_eq!(completed.status, STATUS_COMPLETED);
     assert_eq!(completed.output_formats, default_output_formats());
-    assert!(!project_root.join("output/book_bilingual.epub").exists());
+    assert!(!project_root
+        .join("output/reading/book_bilingual.epub")
+        .exists());
     assert_eq!(
         child_stage_status(&completed, "validate_reading"),
         STATUS_COMPLETED
@@ -10201,7 +10213,9 @@ fn fake_pipeline_builds_and_validates_bilingual_epub_when_selected() {
         child_stage_status(&built, "build_reading"),
         STATUS_COMPLETED
     );
-    assert!(project_root.join("output/book_bilingual.epub").is_file());
+    assert!(project_root
+        .join("output/reading/book_bilingual.epub")
+        .is_file());
     assert!(built.children[0].artifacts.iter().any(|artifact| {
         artifact.kind == "reading_bilingual_epub"
             && artifact.producer_stage.as_deref() == Some("build_reading")
@@ -10350,8 +10364,8 @@ fn fake_pipeline_builds_digest_when_book_intent_is_enabled() {
     .unwrap();
     assert_eq!(report["status"], "PASS");
     assert_eq!(report["merged"], true);
-    assert_eq!(report["source_epub"], "output/book.epub");
-    assert_eq!(report["output_epub"], "output/book_digest.epub");
+    assert_eq!(report["source_epub"], "output/reading/book.epub");
+    assert_eq!(report["output_epub"], "output/reading/book_digest.epub");
     let epubcheck_report: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(project_root.join("output/digest_epubcheck.json")).unwrap(),
     )

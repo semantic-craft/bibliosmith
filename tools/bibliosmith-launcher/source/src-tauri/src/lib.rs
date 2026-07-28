@@ -4157,47 +4157,50 @@ fn display_path(path: &Path) -> String {
 
 fn project_document_candidates(kind: &str, locale: &str) -> Vec<PathBuf> {
     let locale = locale.to_ascii_lowercase();
+    let is_japanese = locale.starts_with("ja");
     let is_traditional =
         locale.starts_with("zh-tw") || locale.starts_with("zh-hk") || locale.starts_with("zh-hant");
-    let is_simplified = locale.starts_with("zh");
+    let is_simplified = locale.starts_with("zh") && !is_traditional;
 
     match kind {
         "howto" => {
-            let mut candidates = Vec::new();
-            if is_traditional || is_simplified {
-                candidates.push(
-                    PathBuf::from("docs")
-                        .join("guides")
-                        .join("how-to-use-local-reading.zh-CN.md"),
-                );
+            let guides = PathBuf::from("docs").join("guides");
+            let primary = if is_japanese {
+                guides.join("how-to-use-local-reading.ja.md")
+            } else if is_traditional {
+                guides.join("how-to-use-local-reading.zh-TW.md")
+            } else if is_simplified {
+                guides.join("how-to-use-local-reading.zh-CN.md")
             } else {
-                candidates.push(
-                    PathBuf::from("docs")
-                        .join("guides")
-                        .join("how-to-use-local-reading.en.md"),
-                );
+                guides.join("how-to-use-local-reading.en.md")
+            };
+            let mut candidates = vec![primary];
+            for fallback in [
+                guides.join("how-to-use-local-reading.zh-CN.md"),
+                guides.join("how-to-use-local-reading.en.md"),
+            ] {
+                if !candidates.contains(&fallback) {
+                    candidates.push(fallback);
+                }
             }
-            candidates.push(
-                PathBuf::from("docs")
-                    .join("guides")
-                    .join("how-to-use-local-reading.zh-CN.md"),
-            );
-            candidates.push(
-                PathBuf::from("docs")
-                    .join("guides")
-                    .join("how-to-use-local-reading.en.md"),
-            );
             candidates
         }
         _ => {
-            let mut candidates = Vec::new();
-            if is_traditional || is_simplified {
-                candidates.push(PathBuf::from("README.zh-CN.md"));
+            let primary = if is_japanese {
+                PathBuf::from("readme").join("README.ja.md")
+            } else if is_traditional {
+                PathBuf::from("readme").join("README.zh-TW.md")
+            } else if is_simplified {
+                PathBuf::from("README.zh-CN.md")
             } else {
-                candidates.push(PathBuf::from("README.md"));
+                PathBuf::from("README.md")
+            };
+            let mut candidates = vec![primary];
+            for fallback in [PathBuf::from("README.zh-CN.md"), PathBuf::from("README.md")] {
+                if !candidates.contains(&fallback) {
+                    candidates.push(fallback);
+                }
             }
-            candidates.push(PathBuf::from("README.zh-CN.md"));
-            candidates.push(PathBuf::from("README.md"));
             candidates
         }
     }
@@ -5048,13 +5051,23 @@ mod tests {
         );
         assert_eq!(
             project_document_candidates("readme", "zh-TW")[0],
-            PathBuf::from("README.zh-CN.md")
+            PathBuf::from("readme").join("README.zh-TW.md")
+        );
+        assert_eq!(
+            project_document_candidates("readme", "ja")[0],
+            PathBuf::from("readme").join("README.ja.md")
         );
         assert_eq!(
             project_document_candidates("howto", "ja")[0],
             PathBuf::from("docs")
                 .join("guides")
-                .join("how-to-use-local-reading.en.md")
+                .join("how-to-use-local-reading.ja.md")
+        );
+        assert_eq!(
+            project_document_candidates("howto", "zh-TW")[0],
+            PathBuf::from("docs")
+                .join("guides")
+                .join("how-to-use-local-reading.zh-TW.md")
         );
     }
 

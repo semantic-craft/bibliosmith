@@ -7,6 +7,15 @@
 5. 依次完成翻译、QA、定稿、EPUB 构建和校验。
 6. 从书籍工程的 `output/reading/` 打开所需产物。
 
+主要产物位于：
+
+- Markdown：`output/reading/book.md`
+- HTML：`output/reading/html/`
+- EPUB：`output/reading/book.epub`
+- 双语 EPUB：`output/reading/book_bilingual.epub`
+- Digest EPUB：`output/reading/book_digest.epub`
+- Digest 附属文件：`output/reading/digest/`
+
 如需速读版，在 Launcher 中明确勾选 BiblioSmith Digest。手动运行时先在书籍工程根目录
 写入 `digest.config.json`，再执行：
 

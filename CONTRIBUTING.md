@@ -37,15 +37,12 @@ tag before the DMG is built.
 
 | Suite | Command | Expected |
 |---|---|---|
-| Launcher Rust | `cd tools/bibliosmith-launcher/source/src-tauri && cargo test` | 223 passed |
-| Translation engine | `uv run --package translation-engine pytest packages/translation-engine/tests` | 81 passed, 6 subtests passed |
-| OCR | `uv run --package ocr pytest packages/ocr/tests` | 18 passed, 6 subtests passed |
-| Zotero CLI | `uv run --package zotero-cli-agent --extra dev --extra mcp pytest packages/zotero-cli/tests` | 62 passed |
-| Repository suites | `uv run --package digest pytest tests tools/git tools/bibliosmith-launcher/source/scripts/tests` | 99 passed, 19 subtests passed |
-| Launcher frontend | `cd tools/bibliosmith-launcher/source && npx tsc --noEmit && npm test && npm run test:startup-contract` | no output / 143 passed / `startup contract ok` |
-
-Counts measured 2026-07-27. They drift upward whenever a branch adds tests, so
-treat a higher number as normal and only a failure as a regression.
+| Launcher Rust | `cd tools/bibliosmith-launcher/source/src-tauri && cargo test` | pass |
+| Translation engine | `uv run --package translation-engine pytest packages/translation-engine/tests` | pass |
+| OCR | `uv run --package ocr pytest packages/ocr/tests` | pass |
+| Zotero CLI | `uv run --package zotero-cli-agent --extra dev --extra mcp pytest packages/zotero-cli/tests` | pass |
+| Repository suites | `uv run --package digest pytest tests tools/git tools/bibliosmith-launcher/source/scripts/tests` | pass |
+| Launcher frontend | `cd tools/bibliosmith-launcher/source && npm run version:check && npm ci && npx tsc --noEmit && npm run lint && npm test && npm run test:startup-contract` | pass |
 
 The Repository suites row covers three directories, not one. `tests/` is the
 obvious part; `tools/git` holds the commit-message validator that the
@@ -111,10 +108,8 @@ whatever ran last. If you need the console scripts rather than the tests, run
 ## Where the tests live
 
 Three places, and two of them are easy to miss. Most suites sit under
-`packages/<name>/tests/`, but the repository-root `tests/` directory holds
-fourteen more files covering the EPUB builders, the translation coverage gate,
-the proper-noun and note policy, the language-pair templates, the public-privacy
-guard, and `packages/digest` — which has no `tests/` directory of its own. Two
+`packages/<name>/tests/`, while the repository-root `tests/` directory covers
+Digest, EPUB builders, local-reading scope, privacy, and local-path gates. Two
 further suites sit under `tools/`: `tools/git` and
 `tools/bibliosmith-launcher/source/scripts/tests`. A search restricted to
 `packages/*/tests` finds none of them.

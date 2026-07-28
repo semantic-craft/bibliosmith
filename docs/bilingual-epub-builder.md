@@ -10,7 +10,7 @@ tools/bibliosmith-launcher/source/scripts/build_bilingual_epub.py
 
 `prepare_bilingual_builder` copies it into a local book project's `scripts/`
 directory. The `build_reading` stage runs it with `--book-root` and registers
-`output/book_bilingual.epub` as the `reading_bilingual_epub` artifact.
+`output/reading/book_bilingual.epub` as the `reading_bilingual_epub` artifact.
 
 ## Contract
 
@@ -19,7 +19,7 @@ directory. The `build_reading` stage runs it with `--book-root` and registers
 - Equal paragraph counts produce paragraph-level source/target pairs.
 - A count mismatch falls back to a whole-chapter pair and reports
   `alignment=chapter-fallback`.
-- The output is `output/book_bilingual.epub`.
+- The output is `output/reading/book_bilingual.epub`.
 - The work directory is `output/bilingual_epub_work`.
 
 ## Integrity checks

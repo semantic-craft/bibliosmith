@@ -41,8 +41,8 @@ class BiblioSmithDigestTest(unittest.TestCase):
             self.assertEqual(result["status"], "PASS")
             self.assertEqual(result["auto_decision"], "generated")
             self.assertFalse(result["merged"])
-            self.assertTrue((root / "output" / "digest" / "digest.xhtml").exists())
-            self.assertFalse((root / "output" / "book_digest.epub").exists())
+            self.assertTrue((root / "output" / "reading" / "digest" / "digest.xhtml").exists())
+            self.assertFalse((root / "output" / "reading" / "book_digest.epub").exists())
 
     def test_missing_config_auto_skips_short_stories_and_natural_science(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,7 +53,7 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             self.assertEqual(result["status"], "SKIPPED")
             self.assertEqual(result["reason"], "auto_policy_excluded")
-            self.assertFalse((root / "output" / "digest").exists())
+            self.assertFalse((root / "output" / "reading" / "digest").exists())
 
     def test_disabled_config_leaves_epub_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -67,7 +67,7 @@ class BiblioSmithDigestTest(unittest.TestCase):
             self.assertEqual(result["status"], "SKIPPED")
             self.assertEqual(result["reason"], "disabled")
             self.assertEqual(sha256(epub), before)
-            self.assertFalse((root / "output" / "digest").exists())
+            self.assertFalse((root / "output" / "reading" / "digest").exists())
 
     def test_enabled_config_can_generate_sidecar_without_merging(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -79,25 +79,36 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             self.assertEqual(result["status"], "PASS")
             self.assertEqual(result["merged"], False)
-            digest_xhtml = root / "output" / "digest" / "digest.xhtml"
+            digest_xhtml = root / "output" / "reading" / "digest" / "digest.xhtml"
             report = json.loads((root / "qa" / "digest" / "digest_report.json").read_text("utf-8"))
             self.assertTrue(digest_xhtml.exists())
             digest_text = digest_xhtml.read_text("utf-8")
             self.assertIn("全书导读", digest_text)
             self.assertIn("<svg", digest_text)
             self.assertIn("第一章", digest_text)
-            state = json.loads((root / "output" / "digest" / "digest_state.json").read_text("utf-8"))
+            state = json.loads(
+                (root / "output" / "reading" / "digest" / "digest_state.json").read_text("utf-8")
+            )
             self.assertEqual(state["topology"]["nodes"][0]["title"], "第一章")
             self.assertEqual(state["topology"]["edges"], [])
             self.assertIn("knowledge_graph", state)
             self.assertIn("agent_packet_manifest", state)
-            self.assertTrue((root / "output" / "digest" / "knowledge_map.svg").exists())
-            self.assertTrue((root / "output" / "digest" / "agent_packets" / "000_digest_generation.md").exists())
+            self.assertTrue((root / "output" / "reading" / "digest" / "knowledge_map.svg").exists())
+            self.assertTrue(
+                (
+                    root
+                    / "output"
+                    / "reading"
+                    / "digest"
+                    / "agent_packets"
+                    / "000_digest_generation.md"
+                ).exists()
+            )
             self.assertTrue((root / "qa" / "digest" / "digest_review_checklist.md").exists())
             self.assertIn("章节拓扑", digest_text)
             self.assertIn("知识脉络图", digest_text)
             self.assertEqual(report["status"], "PASS")
-            self.assertFalse((root / "output" / "book_digest.epub").exists())
+            self.assertFalse((root / "output" / "reading" / "book_digest.epub").exists())
 
     def test_enabled_config_can_merge_digest_as_epub_chapter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -107,7 +118,7 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             result = run_digest(root)
 
-            merged = root / "output" / "book_digest.epub"
+            merged = root / "output" / "reading" / "book_digest.epub"
             self.assertEqual(result["status"], "PASS")
             self.assertEqual(result["merged"], True)
             self.assertTrue(merged.exists())
@@ -121,7 +132,9 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             run_digest(root)
 
-            digest_text = (root / "output" / "digest" / "digest.xhtml").read_text("utf-8")
+            digest_text = (
+                root / "output" / "reading" / "digest" / "digest.xhtml"
+            ).read_text("utf-8")
             self.assertIn('xml:lang="en"', digest_text)
             self.assertIn('lang="en"', digest_text)
 
@@ -134,8 +147,8 @@ class BiblioSmithDigestTest(unittest.TestCase):
                 {
                     "enabled": True,
                     "merge_into_epub": True,
-                    "source_epub": "output/book.epub",
-                    "output_epub": "output/book.epub",
+                    "source_epub": "output/reading/book.epub",
+                    "output_epub": "output/reading/book.epub",
                 },
             )
 
@@ -165,7 +178,9 @@ class BiblioSmithDigestTest(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn('"status": "PASS"', completed.stdout)
-            self.assertTrue((root / "output" / "digest" / "digest.xhtml").exists())
+            self.assertTrue(
+                (root / "output" / "reading" / "digest" / "digest.xhtml").exists()
+            )
 
     def assert_epub_contains_digest(self, epub):
         with zipfile.ZipFile(epub) as archive:
@@ -314,7 +329,7 @@ def sha256(path):
 
 
 def create_minimal_epub(root, title="测试书", chapters=None):
-    output = root / "output"
+    output = root / "output" / "reading"
     output.mkdir(parents=True)
     epub = output / "book.epub"
     chapters = chapters or [("第一章", "这是第一章的内容。它说明了故事的起点和主要问题。")]

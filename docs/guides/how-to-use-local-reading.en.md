@@ -7,6 +7,15 @@
 5. Continue through translation, QA, promotion, EPUB build, and validation.
 6. Open the requested artifacts under the book project's `output/reading/` directory.
 
+The primary outputs are:
+
+- Markdown: `output/reading/book.md`
+- HTML: `output/reading/html/`
+- EPUB: `output/reading/book.epub`
+- Bilingual EPUB: `output/reading/book_bilingual.epub`
+- Digest EPUB: `output/reading/book_digest.epub`
+- Digest companion files: `output/reading/digest/`
+
 For a compact reading edition, explicitly enable BiblioSmith Digest in the
 Launcher. A manual run uses a book-local `digest.config.json` and:
 

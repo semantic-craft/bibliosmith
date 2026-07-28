@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 
@@ -22,6 +23,22 @@ def test_repository_does_not_ship_the_upstream_publishing_workflow() -> None:
     ]
 
     assert present == []
+
+
+def test_legacy_private_projects_remain_ignored() -> None:
+    completed = subprocess.run(
+        [
+            "git",
+            "check-ignore",
+            "--no-index",
+            "--quiet",
+            "books/private/legacy-project/source/original.pdf",
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+    )
+
+    assert completed.returncode == 0
 
 
 def test_opencode_loads_only_the_local_reading_entrypoints() -> None:

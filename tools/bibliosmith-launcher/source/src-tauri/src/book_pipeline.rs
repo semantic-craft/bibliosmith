@@ -12627,14 +12627,14 @@ fn run_build_reading_stage(
         fs::remove_file(&markdown_path).map_err(|err| err.to_string())?;
     }
 
-    let standard_epub_path = project_root.join("output").join("book.epub");
+    let standard_epub_path = reading_dir.join("book.epub");
+    let html_dir = reading_dir.join("html");
     if wants_html || wants_epub {
         let script_path = prepare_reading_builder(&project_root)?;
         input_hashes.insert("buildScriptSha256".into(), sha256_file(&script_path)?);
         command_results.push(executor.execute(&build_reading_command(child, &script_path)?)?);
 
         if wants_html {
-            let html_dir = project_root.join("output").join("epub_work").join("EPUB");
             let mut html_paths = fs::read_dir(&html_dir)
                 .map_err(|err| {
                     format!(
@@ -12664,6 +12664,8 @@ fn run_build_reading_stage(
                     "build_reading",
                 )?);
             }
+        } else if html_dir.is_dir() {
+            fs::remove_dir_all(&html_dir).map_err(|err| err.to_string())?;
         }
         if wants_epub {
             artifacts.push(required_stage_artifact(
@@ -12678,13 +12680,16 @@ fn run_build_reading_stage(
         if standard_epub_path.is_file() {
             fs::remove_file(&standard_epub_path).map_err(|err| err.to_string())?;
         }
+        if html_dir.is_dir() {
+            fs::remove_dir_all(&html_dir).map_err(|err| err.to_string())?;
+        }
         let work_dir = project_root.join("output").join("epub_work");
         if work_dir.is_dir() {
             fs::remove_dir_all(work_dir).map_err(|err| err.to_string())?;
         }
     }
 
-    let bilingual_epub_path = project_root.join("output").join("book_bilingual.epub");
+    let bilingual_epub_path = reading_dir.join("book_bilingual.epub");
     if wants_bilingual {
         let source_map = child
             .artifacts
@@ -13280,11 +13285,12 @@ fn run_build_digest_stage(
         validated_stage_artifact(child, "reading_epub", "build_reading")?;
     let (_, epubcheck_report_sha256) =
         validated_stage_artifact(child, "epubcheck_report", "validate_reading")?;
-    let expected_source_epub = project_root.join("output").join("book.epub");
-    let output_epub = project_root.join("output").join("book_digest.epub");
+    let reading_dir = project_root.join("output").join("reading");
+    let expected_source_epub = reading_dir.join("book.epub");
+    let output_epub = reading_dir.join("book_digest.epub");
     if source_epub != expected_source_epub {
         return Err(format!(
-            "Digest source EPUB must be output/book.epub, found {}",
+            "Digest source EPUB must be output/reading/book.epub, found {}",
             display_path(&source_epub)
         ));
     }
@@ -13309,8 +13315,11 @@ fn run_build_digest_stage(
     for (key, value) in [
         ("enabled", serde_json::json!(true)),
         ("merge_into_epub", serde_json::json!(true)),
-        ("source_epub", serde_json::json!("output/book.epub")),
-        ("output_epub", serde_json::json!("output/book_digest.epub")),
+        ("source_epub", serde_json::json!("output/reading/book.epub")),
+        (
+            "output_epub",
+            serde_json::json!("output/reading/book_digest.epub"),
+        ),
         ("title", serde_json::json!(title)),
         ("language", serde_json::json!(language)),
     ] {
@@ -13321,8 +13330,8 @@ fn run_build_digest_stage(
 
     let outputs = [
         output_epub.clone(),
-        project_root.join("output/digest/digest.xhtml"),
-        project_root.join("output/digest/knowledge_map.svg"),
+        project_root.join("output/reading/digest/digest.xhtml"),
+        project_root.join("output/reading/digest/knowledge_map.svg"),
         project_root.join("qa/digest/digest_review_checklist.md"),
         project_root.join("qa/digest/digest_report.json"),
     ];
@@ -13344,11 +13353,11 @@ fn run_build_digest_stage(
         || report
             .get("source_epub")
             .and_then(serde_json::Value::as_str)
-            != Some("output/book.epub")
+            != Some("output/reading/book.epub")
         || report
             .get("output_epub")
             .and_then(serde_json::Value::as_str)
-            != Some("output/book_digest.epub")
+            != Some("output/reading/book_digest.epub")
     {
         return Err("Digest report does not confirm the requested EPUB merge.".into());
     }

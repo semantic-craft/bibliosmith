@@ -8,8 +8,10 @@ const root = path.resolve(__dirname, '..');
 const finalDir = path.join(root, 'chapters', 'final');
 const frontmatterDir = path.join(root, 'frontmatter');
 const outDir = path.join(root, 'output');
+const readingDir = path.join(outDir, 'reading');
 const workDir = path.join(outDir, 'epub_work');
-const epubPath = path.join(outDir, 'book.epub');
+const htmlDir = path.join(readingDir, 'html');
+const epubPath = path.join(readingDir, 'book.epub');
 
 function readText(file) {
   return fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
@@ -37,6 +39,11 @@ function parseYaml(file) {
     out[match[1]] = match[2].replace(/^["']|["']$/g, '').trim();
   }
   return out;
+}
+
+function readJson(file) {
+  if (!fs.existsSync(file)) return {};
+  return JSON.parse(readText(file));
 }
 
 function escapeHtml(text) {
@@ -181,10 +188,10 @@ function markdownToBody(file, imageMap) {
   return out.join('\n');
 }
 
-function xhtml(title, body) {
+function xhtml(title, body, language) {
   return `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh-CN" lang="zh-CN">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeHtml(language)}" lang="${escapeHtml(language)}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -256,15 +263,27 @@ function main() {
   }
 
   const metadata = parseYaml(path.join(root, 'metadata', 'book.yaml'));
-  const title = metadata.title || metadata['title_zh'] || metadata['title_zh_hans'] || 'Untitled Book';
-  const creator = metadata.author || metadata.creator || 'Unknown';
-  const contributor = metadata.contributor || 'BiblioSmith 书坊';
-  const publisher = metadata.publisher || 'BiblioSmith 书坊';
-  const source = metadata.source_url || metadata.source || metadata.source_text_url || '';
+  const sourceManifest = readJson(path.join(root, 'metadata', 'source_manifest.json'));
+  const sourceFileName = typeof sourceManifest.source_file_name === 'string'
+    ? sourceManifest.source_file_name.trim()
+    : '';
+  const projectTitle = path.basename(root).replace(/^\d+_/, '').replace(/_/g, ' ').trim();
+  const title = metadata.title || metadata['title_zh'] || metadata['title_zh_hans']
+    || (sourceFileName ? path.parse(sourceFileName).name : projectTitle) || path.basename(root);
+  const creator = metadata.author || metadata.creator || '';
+  const contributor = metadata.contributor || '';
+  const publisher = metadata.publisher || '';
+  const source = metadata.source_url || metadata.source || metadata.source_text_url || sourceFileName;
   const description = metadata.description || metadata.subtitle || '';
   const rights = metadata.rights || '';
   const date = metadata.date || '';
-  const language = metadata.language || 'zh-CN';
+  const manifestLanguage = typeof sourceManifest.target_language === 'string'
+    ? sourceManifest.target_language.trim()
+    : '';
+  const requestedLanguage = metadata.language || manifestLanguage;
+  const language = requestedLanguage && !['auto', 'unknown'].includes(requestedLanguage.toLowerCase())
+    ? requestedLanguage
+    : 'und';
   const id = metadata.identifier || `urn:uuid:${randomUUID()}`;
   const imageMap = new Map();
 
@@ -289,7 +308,7 @@ function main() {
     const href = `${slug(file)}.xhtml`;
     const firstHeading = (readText(file).match(/^#\s+(.+)$/m) || [null, path.basename(file, '.md')])[1];
     const body = markdownToBody(file, imageMap);
-    writeText(path.join(workDir, 'EPUB', href), xhtml(firstHeading, body));
+    writeText(path.join(workDir, 'EPUB', href), xhtml(firstHeading, body, language));
     manifestItems.push(`<item id="${idref}" href="${href}" media-type="application/xhtml+xml" />`);
     spine.push(`<itemref idref="${idref}" />`);
     navItems.push(`<li><a href="${href}">${escapeHtml(firstHeading)}</a></li>`);
@@ -308,7 +327,7 @@ function main() {
 
   writeText(path.join(workDir, 'EPUB', 'nav.xhtml'), `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh-CN" lang="zh-CN">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${escapeHtml(language)}" lang="${escapeHtml(language)}">
 <head><meta charset="utf-8" /><title>目录</title><link rel="stylesheet" type="text/css" href="styles/book.css" /></head>
 <body>
 <nav epub:type="toc" id="toc"><h1>目录</h1><ol>${navItems.join('\n')}</ol></nav>
@@ -327,9 +346,9 @@ ${bookInfoHref ? `<li><a epub:type="frontmatter" href="${bookInfoHref}">书籍�
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">
     <dc:identifier id="bookid">${escapeHtml(id)}</dc:identifier>
     <dc:title>${escapeHtml(title)}</dc:title>
-    <dc:creator>${escapeHtml(creator)}</dc:creator>
-    <dc:contributor>${escapeHtml(contributor)}</dc:contributor>
-    <dc:publisher>${escapeHtml(publisher)}</dc:publisher>
+    ${creator ? `<dc:creator>${escapeHtml(creator)}</dc:creator>` : ''}
+    ${contributor ? `<dc:contributor>${escapeHtml(contributor)}</dc:contributor>` : ''}
+    ${publisher ? `<dc:publisher>${escapeHtml(publisher)}</dc:publisher>` : ''}
     <dc:language>${escapeHtml(language)}</dc:language>
     ${date ? `<dc:date>${escapeHtml(date)}</dc:date>` : ''}
     ${source ? `<dc:source>${escapeHtml(source)}</dc:source>` : ''}
@@ -346,7 +365,9 @@ ${bookInfoHref ? `<li><a epub:type="frontmatter" href="${bookInfoHref}">书籍�
 </package>
 `);
 
-  fs.mkdirSync(outDir, { recursive: true });
+  fs.mkdirSync(readingDir, { recursive: true });
+  fs.rmSync(htmlDir, { recursive: true, force: true });
+  fs.cpSync(path.join(workDir, 'EPUB'), htmlDir, { recursive: true });
   zipEpub();
   console.log(`wrote ${path.relative(root, epubPath)}`);
 }

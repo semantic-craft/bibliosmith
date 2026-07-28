@@ -140,7 +140,7 @@ Extract source/original.epub to source/source.md, split chapters, translate to C
 4. Build a glossary and style profile.
 5. Translate into `chapters/translated/`.
 6. Review and promote clean text to `chapters/final/`.
-7. Build `output/reading/book.html` and `output/reading/book.epub`.
+7. Build semantic HTML under `output/reading/html/` and EPUB files under `output/reading/`.
 8. Run EPUBCheck or a practical reader check.
 
 For long academic books, keep one book per project and one major translation run per thread.

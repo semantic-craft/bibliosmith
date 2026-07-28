@@ -1,11 +1,11 @@
 # BiblioSmith Digest QA 清单
 
-本清单用于审校每本书生成的 `qa/digest/digest_review_checklist.md` 和 `output/digest/` 产物。
+本清单用于审校每本书生成的 `qa/digest/digest_review_checklist.md` 和 `output/reading/digest/` 产物。
 
 ## 结构
 
 - [ ] Digest 是 post-EPUB optional step，不接管原翻译主流程。
-- [ ] 具体书籍内容只写入该书工程下的 `output/digest/` 和 `qa/digest/`。
+- [ ] 具体书籍内容只写入该书工程下的 `output/reading/digest/` 和 `qa/digest/`。
 - [ ] 若合并 EPUB，新增章节已进入 OPF manifest、spine、nav。
 - [ ] 输出仍是标准 EPUB，不要求阅读器支持专用格式。
 

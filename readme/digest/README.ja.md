@@ -28,8 +28,8 @@ BiblioSmith Digest は、BiblioSmith 翻訳公開システムの任意の EPUB �
 {
   "enabled": true,
   "merge_into_epub": true,
-  "source_epub": "output/book.epub",
-  "output_epub": "output/book_digest.epub",
+  "source_epub": "output/reading/book.epub",
+  "output_epub": "output/reading/book_digest.epub",
   "title": "読書ガイド",
   "language": "ja",
   "max_section_chars": 240
@@ -44,10 +44,10 @@ python -m digest.bibliosmith_digest --book-root books/{target}/{number}_{目标�
 
 ## 境界
 
-- 入力はすでに生成済みの標準 EPUB で、既定は `output/book.epub` です。
+- 入力はすでに生成済みの標準 EPUB で、既定は `output/reading/book.epub` です。
 - 各書籍は自分の `digest.config.json` で有効化と EPUB への統合を制御します。
-- サイドカーモードは `output/digest/digest.xhtml`、`output/digest/digest_state.json`、`qa/digest/digest_report.json` を書きます。
-- 統合モードは新しい標準 EPUB を出力し、既定は `output/book_digest.epub` です。
+- サイドカーモードは `output/reading/digest/digest.xhtml`、`output/reading/digest/digest_state.json`、`qa/digest/digest_report.json` を書きます。
+- 統合モードは新しい標準 EPUB を出力し、既定は `output/reading/book_digest.epub` です。
 - 統合時は読者に見える章を一つ追加し、OPF manifest、spine、nav を更新します。
 - 既存の本文、表紙、書籍情報ページ、frontmatter、翻訳 QA 記録は書き換えません。
 - `digest_state.json` には軽量なトポロジー node と読書順 edge を保存し、後続レビューや可視化拡張に使えます。
@@ -63,4 +63,3 @@ Digest 章を EPUB に統合する場合、公開前に書籍プロジェクト�
 ## ライセンス
 
 [DIGEST_LICENSE.ja.md](../../license/DIGEST_LICENSE.ja.md) を参照してください。
-
