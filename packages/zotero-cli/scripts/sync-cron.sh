@@ -35,10 +35,15 @@ run_sync() {
   fi
 
   cd "$REPO_DIR" || { echo "REPO_DIR $REPO_DIR not found"; return 2; }
-  # shellcheck disable=SC1091
-  source .venv/bin/activate
 
-  zsearch sync
+  # Resolve zsearch through the workspace, not through PATH. Activating the
+  # repository .venv and calling a bare `zsearch` silently falls back to
+  # whatever `uv tool install` left in ~/.local/bin whenever the .venv has no
+  # workspace console script — which is how a pre-merge snapshot kept serving
+  # this job. `uv run --package` either runs this repository's zsearch or fails.
+  command -v uv >/dev/null 2>&1 || { echo "uv not found on PATH"; return 3; }
+
+  uv run --package zotero-cli-agent zsearch sync
 }
 
 # --- main ----------------------------------------------------------------
