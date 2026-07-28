@@ -5,9 +5,13 @@
 # rewrite — unlike pre-push, where the bad object already exists locally.
 #
 #   1. Hard-refuses any real .env file, even when staged with `git add -f`.
-#   2. Scans the staged diff with gitleaks, using this repo's .gitleaks.toml
-#      (secrets + the personal-info / system-info rules defined there).
+#   2. Scans the staged tree twice with gitleaks:
+#        - .gitleaks.toml          (default secret rules)
+#        - .gitleaks-personal.toml (home paths + private IPs; no useDefault)
 set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
 
 staged=$(git diff --cached --name-only --diff-filter=ACMR)
 
@@ -23,17 +27,23 @@ fi
 # 2. Secret + personal-info scan of what is actually staged.
 #    The staged tree is materialised as real files rather than piping the diff
 #    to `gitleaks stdin`: stdin mode has no file paths, so the path allowlists
-#    in .gitleaks.toml are ignored there and the config file would match its
-#    own rules, making itself impossible to commit.
+#    in the configs are ignored there and a config file would match its own
+#    rules, making itself impossible to commit.
 if command -v gitleaks >/dev/null 2>&1; then
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   git checkout-index -a -f --prefix="$tmp/"
-  if ! gitleaks dir "$tmp" --no-banner --redact >/tmp/gitleaks-precommit.log 2>&1; then
-    echo "pre-commit: gitleaks flagged the staged tree — commit aborted." >&2
-    sed -n '1,40p' /tmp/gitleaks-precommit.log >&2
-    exit 1
-  fi
+  # Copy configs into the staged tree so path allowlists that name them still
+  # apply, and so gitleaks can resolve relative config paths if needed.
+  cp .gitleaks.toml .gitleaks-personal.toml "$tmp/"
+  for cfg in .gitleaks.toml .gitleaks-personal.toml; do
+    if ! gitleaks dir "$tmp" --config "$tmp/$cfg" --no-banner --redact \
+      >/tmp/gitleaks-precommit.log 2>&1; then
+      echo "pre-commit: gitleaks ($cfg) flagged the staged tree — commit aborted." >&2
+      sed -n '1,40p' /tmp/gitleaks-precommit.log >&2
+      exit 1
+    fi
+  done
   rm -rf "$tmp"; trap - EXIT
 fi
 

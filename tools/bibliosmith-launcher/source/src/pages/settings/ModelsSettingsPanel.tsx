@@ -30,7 +30,13 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
   };
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    void getModelCatalog().then((next) => {
+      if (!cancelled) setCatalog(next);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const configuredBy = useMemo(() => {

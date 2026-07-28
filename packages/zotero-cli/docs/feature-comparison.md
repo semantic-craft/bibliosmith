@@ -41,7 +41,8 @@ Audit date: 2026-04-30. Sources: upstream `54yyyu/zotero-mcp` `tools/*.py` and Z
 | get_collections / get_collection_items | `zsearch ls` / `zsearch ls <coll>` | sqlite |
 | get_tags | `zsearch tags` | sqlite |
 | get_recent | `zsearch recent --since <n>` | sqlite + dateModified |
-| search_items / search_by_tag | `zsearch grep <q> --tag T` | sqlite FTS5 |
+| search_items | `zsearch grep <q>` | sqlite LIKE over title, abstract, and creators |
+| search_by_tag | `zsearch query <q> --tag T` | sqlite key allow-list + sqlite-vec |
 | search_by_citation_key | `zsearch find @<citekey>` | Better-BibTeX json-rpc on `:23119` |
 | advanced_search | `zsearch find --type book --year 2020..` | sqlite WHERE composer |
 | **semantic_search** | `zsearch query <q>` | **Gemini Embedding 001 + sqlite-vec** (default; Jina/HF optional) |

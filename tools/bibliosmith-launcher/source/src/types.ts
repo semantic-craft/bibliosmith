@@ -9,10 +9,6 @@ export type LauncherState = {
   dirty: boolean;
   proxyConfigured: boolean;
   platform: string;
-  opencodeInstallRoot: string;
-  opencodeInstalledVersion?: string | null;
-  opencodeClientPath?: string | null;
-  opencodeAvailable: boolean;
 };
 
 export type CommitInfo = {
@@ -31,42 +27,6 @@ export type BiblioSmithUpdateInfo = {
   aheadCount: number;
   hasUpdate: boolean;
   commits: CommitInfo[];
-};
-
-export type OpenCodeUpdateInfo = {
-  installedVersion?: string | null;
-  latestVersion: string;
-  hasUpdate: boolean;
-  assetName: string;
-  assetSize: number;
-  assetUrl: string;
-  installRoot: string;
-  clientPath?: string | null;
-  clientAvailable: boolean;
-  installerPath?: string | null;
-  installerDownloaded: boolean;
-  partialDownloadedBytes: number;
-};
-
-export type OpenCodeLocalStatus = {
-  installedVersion?: string | null;
-  installRoot: string;
-  clientPath?: string | null;
-  clientAvailable: boolean;
-};
-
-export type LauncherUpdateInfo = {
-  installedVersion: string;
-  latestVersion: string;
-  hasUpdate: boolean;
-  releaseNotes?: string | null;
-  assetName: string;
-  assetSize: number;
-  assetUrl: string;
-  installRoot: string;
-  installerPath?: string | null;
-  installerDownloaded: boolean;
-  partialDownloadedBytes: number;
 };
 
 export type ActionResult = {
@@ -151,8 +111,6 @@ export type RuntimeStatus = {
 
 export type LauncherSettings = {
   autoStart: boolean;
-  checkLauncherOnLaunch: boolean;
-  checkOpenCodeOnLaunch: boolean;
   saveLogsToLocal: boolean;
 };
 
@@ -169,7 +127,6 @@ export type BookPipelineSource = {
   path?: string | null;
   selector?: string | null;
   runnerBehavior?: "succeed" | "fail_once" | "always_fail" | null;
-  translationStrategy?: "reflection" | string | null;
   adapterCommand?: string | null;
   fakeZoteroItems?: FakeZoteroItem[] | null;
 };
@@ -312,7 +269,25 @@ export type BookPipelineChildJob = {
   lastError?: string | null;
   localProjectRoot?: string | null;
   customInstructions?: BookPipelineCustomInstructions | null;
+  readerEvidence?: BookPipelineReaderEvidence[];
+  removedAt?: string | null;
 };
+
+/// A person opened the built book in a real reader and said what happened. The
+/// backend fills `stale` by comparing the digest against the artifact as built,
+/// so evidence taken against an older build is shown, not silently trusted.
+export type BookPipelineReaderEvidence = {
+  reader: string;
+  readerVersion: string;
+  artifactKind: string;
+  artifactSha256: string;
+  conclusion: string;
+  recordedAt: string;
+  stale?: boolean;
+};
+
+export const READER_EVIDENCE_ARTIFACT_KINDS = ["reading_epub", "reading_bilingual_epub"] as const;
+export const READER_EVIDENCE_CONCLUSIONS = ["passed", "failed"] as const;
 
 export type BookPipelineNavigationTarget = {
   targetId: string;

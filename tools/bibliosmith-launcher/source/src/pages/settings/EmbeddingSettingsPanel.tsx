@@ -25,7 +25,13 @@ export function EmbeddingSettingsPanel({ locale }: { locale: string }) {
   };
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    void getEmbeddingStatus().then((next) => {
+      if (!cancelled) setStatus(next);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const configured = status?.configured ?? false;

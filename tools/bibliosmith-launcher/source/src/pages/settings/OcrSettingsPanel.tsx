@@ -165,7 +165,13 @@ export function OcrSettingsPanel({ locale }: { locale: string }) {
   };
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    void getOcrCredentialsStatus().then((next) => {
+      if (!cancelled) setStatus(next);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (

@@ -332,6 +332,31 @@ describe("flattenBookUnits", () => {
     ]);
   });
 
+  // A dropped book cannot leave the job — its collection membership is frozen —
+  // so the shelf is where it stops existing.
+  it("leaves a dropped book off the shelf without touching its siblings", () => {
+    const children = [
+      childJob({ id: "child-1", source: { kind: "zotero_attachment", title: "First" }, status: "completed", removedAt: "2026-07-27T00:00:00Z" }),
+      childJob({ id: "child-2", source: { kind: "zotero_attachment", title: "Second" }, status: "completed" }),
+      childJob({ id: "child-3", source: { kind: "zotero_attachment", title: "Third" }, status: "running" }),
+    ];
+    const units = flattenBookUnits([job({ id: "job-1", kind: "collection", children })]);
+    expect(units.map((unit) => unit.title)).toEqual(["Second", "Third"]);
+  });
+
+  // Down to one live book, the row is the job again — same as a job that only
+  // ever had one — so the drawer's next/prev and delete keep working.
+  it("keys the last remaining book of a batch on the job", () => {
+    const children = [
+      childJob({ id: "child-1", status: "completed", removedAt: "2026-07-27T00:00:00Z" }),
+      childJob({ id: "child-2", source: { kind: "zotero_attachment", title: "Only" }, status: "completed" }),
+    ];
+    const units = flattenBookUnits([job({ id: "job-1", kind: "collection", children })]);
+    expect(units).toHaveLength(1);
+    expect(units[0].key).toBe("job-1");
+    expect(units[0].child?.id).toBe("child-2");
+  });
+
   it("gives a single job one row keyed on the job, taking the child's status", () => {
     const child = childJob({ id: "child-1", status: "running" });
     const units = flattenBookUnits([job({ id: "job-1", children: [child], status: "pending" })]);

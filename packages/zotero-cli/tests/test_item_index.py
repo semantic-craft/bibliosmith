@@ -11,7 +11,12 @@ import pytest
 
 from zotero_cli.embed import EmbedConfig
 import zotero_cli.search as search_module
-from zotero_cli.search import index_markdown_item, query_fulltext, sync
+from zotero_cli.search import (
+    CHUNK_CONTRACT_VERSION,
+    index_markdown_item,
+    query_fulltext,
+    sync,
+)
 from zotero_cli.vector_store import SQLiteVecStore, VectorStoreConfig
 from zotero_cli.zotero_db import ZoteroItem
 from zotero_cli.zfulltext_cli import main as zfulltext
@@ -42,6 +47,15 @@ class ContextFixtureEmbedder(FixtureEmbedder):
         return [[1.0, 0.0, 0.0] if "first-needle" in text else [0.0, 1.0, 0.0] for text in texts]
 
 
+class MiddleNeedleEmbedder(FixtureEmbedder):
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(texts)
+        return [
+            [1.0, 0.0, 0.0] if "middle-of-book-needle" in text else [0.0, 1.0, 0.0]
+            for text in texts
+        ]
+
+
 class WrongDimensionEmbedder(FixtureEmbedder):
     def embed(self, texts: list[str]) -> list[list[float]]:
         self.calls.append(texts)
@@ -64,7 +78,7 @@ def test_item_index_makes_markdown_immediately_queryable(tmp_path: Path) -> None
             parent_item_key="PARENT123",
             markdown_path=markdown,
             expected_sha256=sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
             metadata={"title": "Fixture", "creators": [], "tags": []},
         )
@@ -82,13 +96,45 @@ def test_item_index_makes_markdown_immediately_queryable(tmp_path: Path) -> None
         "sourceSha256": sha256,
         "chunkCount": 1,
         "indexContractVersion": "zfulltext-item-index-v1",
-        "chunkContractVersion": "zfulltext-chunk-v1",
+        "chunkContractVersion": "zfulltext-chunk-v2",
         "embeddingProfileId": "fixture-embedding:3",
         "reused": False,
     }
     assert evidence["completedAt"].endswith("Z")
     assert results[0]["key"] == "PARENT123"
     assert "immediate-index-needle" in results[0]["chunk_text"]
+
+
+def test_item_index_keeps_the_searchable_middle_of_a_long_book(tmp_path: Path) -> None:
+    markdown = tmp_path / "long-book.md"
+    sections = [f"section-{index} " + ("x" * 3800) for index in range(25)]
+    sections[12] += " middle-of-book-needle"
+    markdown.write_text("\n\n".join(sections), encoding="utf-8")
+    sha256 = hashlib.sha256(markdown.read_bytes()).hexdigest()
+    embedder = MiddleNeedleEmbedder()
+
+    with SQLiteVecStore(VectorStoreConfig(db_path=tmp_path / "vectors.sqlite", dim=3)) as store:
+        evidence = index_markdown_item(
+            store,
+            embedder,
+            parent_item_key="LONGBOOK",
+            markdown_path=markdown,
+            expected_sha256=sha256,
+            chunk_contract_version="zfulltext-chunk-v2",
+            embedding_profile_id="fixture-embedding:3",
+        )
+        results = query_fulltext(
+            "middle-of-book-needle",
+            store,
+            embedder,
+            top_k=1,
+            db_path=tmp_path / "missing-zotero.sqlite",
+            context_chunks=0,
+        )
+
+    assert evidence["chunkCount"] > 20
+    assert results[0]["key"] == "LONGBOOK"
+    assert "middle-of-book-needle" in results[0]["chunk_text"]
 
 
 def test_item_index_reuses_identical_contract_without_reembedding(tmp_path: Path) -> None:
@@ -104,7 +150,7 @@ def test_item_index_reuses_identical_contract_without_reembedding(tmp_path: Path
             parent_item_key="PARENT123",
             markdown_path=markdown,
             expected_sha256=sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
         )
         calls_after_first = len(embedder.calls)
@@ -114,7 +160,7 @@ def test_item_index_reuses_identical_contract_without_reembedding(tmp_path: Path
             parent_item_key="PARENT123",
             markdown_path=markdown,
             expected_sha256=sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
         )
 
@@ -136,7 +182,7 @@ def test_item_index_replaces_old_chunks_when_markdown_hash_changes(tmp_path: Pat
             parent_item_key="PARENT123",
             markdown_path=markdown,
             expected_sha256=old_sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
         )
         markdown.write_text("# Fixture\n\nnew-index-needle\n", encoding="utf-8")
@@ -147,7 +193,7 @@ def test_item_index_replaces_old_chunks_when_markdown_hash_changes(tmp_path: Pat
             parent_item_key="PARENT123",
             markdown_path=markdown,
             expected_sha256=new_sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
         )
         stored = store.item_chunk_metadatas("PARENT123")
@@ -171,7 +217,7 @@ def test_item_index_keeps_previous_chunks_when_replacement_write_fails(tmp_path:
             parent_item_key="PARENT123",
             markdown_path=markdown,
             expected_sha256=old_sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
         )
         markdown.write_text("# Fixture\n\nfailed-new-index\n", encoding="utf-8")
@@ -184,7 +230,7 @@ def test_item_index_keeps_previous_chunks_when_replacement_write_fails(tmp_path:
                 parent_item_key="PARENT123",
                 markdown_path=markdown,
                 expected_sha256=new_sha256,
-                chunk_contract_version="zfulltext-chunk-v1",
+                chunk_contract_version="zfulltext-chunk-v2",
                 embedding_profile_id="fixture-embedding:2",
             )
 
@@ -239,6 +285,73 @@ def test_zfulltext_profile_reports_active_non_secret_identity(
     assert json.loads(result.output) == {"embeddingProfileId": "fixture-embedding:3"}
 
 
+def test_zfulltext_index_keeps_its_bare_json_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zotero_cli.zfulltext_cli as zfulltext_cli
+
+    class FakeIndexStore:
+        def __init__(self, _cfg) -> None:
+            self.cfg = SimpleNamespace(dim=3)
+
+        def __enter__(self) -> "FakeIndexStore":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    markdown = tmp_path / "artifact.md"
+    markdown.write_text("# Fixture\n", encoding="utf-8")
+    evidence = {
+        "parentItemKey": "PARENT123",
+        "sourceSha256": "a" * 64,
+        "chunkCount": 1,
+        "indexContractVersion": "zfulltext-item-index-v1",
+        "chunkContractVersion": "zfulltext-chunk-v1",
+        "embeddingProfileId": "fixture-embedding:3",
+        "completedAt": "2026-07-27T00:00:00Z",
+        "reused": False,
+    }
+    monkeypatch.setattr(zfulltext_cli, "SQLiteVecStore", FakeIndexStore)
+    monkeypatch.setattr(
+        zfulltext_cli, "make_embedder", lambda **_kwargs: FixtureEmbedder()
+    )
+    monkeypatch.setattr(
+        zfulltext_cli,
+        "index_markdown_item",
+        lambda *_args, **_kwargs: evidence,
+    )
+
+    result = CliRunner().invoke(
+        zfulltext_cli.main,
+        [
+            "index",
+            "--parent-item-key",
+            "PARENT123",
+            "--markdown",
+            str(markdown),
+            "--sha256",
+            "a" * 64,
+            "--chunk-contract-version",
+            "zfulltext-chunk-v1",
+            "--embedding-profile-id",
+            "fixture-embedding:3",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == json.dumps(
+        evidence, ensure_ascii=False, separators=(",", ":")
+    ) + "\n"
+
+
+def test_zfulltext_index_keeps_clicks_existing_usage_exit_code() -> None:
+    result = CliRunner().invoke(zfulltext, ["index"])
+
+    assert result.exit_code == 2
+    assert "Missing option '--parent-item-key'" in result.output
+
+
 def test_zfulltext_index_rejects_a_profile_that_is_not_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -271,7 +384,7 @@ def test_zfulltext_index_rejects_a_profile_that_is_not_active(
             "--sha256",
             sha256,
             "--chunk-contract-version",
-            "zfulltext-chunk-v1",
+            "zfulltext-chunk-v2",
             "--embedding-profile-id",
             "different-profile:3",
         ],
@@ -297,7 +410,7 @@ def test_item_index_query_returns_context_from_the_local_index(tmp_path: Path) -
             parent_item_key="PARENT123",
             markdown_path=markdown,
             expected_sha256=sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
         )
         results = query_fulltext(
@@ -343,7 +456,7 @@ def test_sync_replaces_changed_fulltext_when_parent_date_is_unchanged(
             parent_item_key=item.key,
             markdown_path=markdown,
             expected_sha256=old_sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
         )
         store.upsert(
@@ -357,8 +470,8 @@ def test_sync_replaces_changed_fulltext_when_parent_date_is_unchanged(
         monkeypatch.setattr(search_module, "iter_items", lambda _db_path: [item])
         monkeypatch.setattr(
             search_module,
-            "resolve_fulltext_artifact",
-            lambda _key, _db_path: (new_text, new_sha256),
+            "resolve_fulltext_artifacts",
+            lambda _keys, _db_path: {item.key: (new_text, new_sha256)},
         )
 
         stats = sync(store, embedder, db_path=tmp_path / "zotero.sqlite")
@@ -369,6 +482,72 @@ def test_sync_replaces_changed_fulltext_when_parent_date_is_unchanged(
     assert [chunk["source_sha256"] for chunk in stored] == [new_sha256]
     assert "new-sync-needle" in stored[0]["chunk_text"]
     assert "old-sync-needle" not in stored[0]["chunk_text"]
+
+
+def test_sync_rebuilds_chunks_when_the_chunk_contract_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    markdown = tmp_path / "artifact.md"
+    text = "# Fixture\n\nstable-text-under-a-new-chunk-contract"
+    markdown.write_text(text, encoding="utf-8")
+    sha256 = hashlib.sha256(markdown.read_bytes()).hexdigest()
+    embedder = FixtureEmbedder()
+    item = ZoteroItem(
+        key="PARENT123",
+        item_type="book",
+        title="Fixture",
+        abstract=None,
+        date="2026",
+        doi=None,
+        url=None,
+        venue=None,
+        publisher=None,
+        creators=(),
+        tags=(),
+        date_modified="unchanged-parent-date",
+    )
+
+    with SQLiteVecStore(VectorStoreConfig(db_path=tmp_path / "vectors.sqlite", dim=3)) as store:
+        index_markdown_item(
+            store,
+            embedder,
+            parent_item_key=item.key,
+            markdown_path=markdown,
+            expected_sha256=sha256,
+            chunk_contract_version="zfulltext-chunk-v1",
+            embedding_profile_id="fixture-embedding:3",
+        )
+        store.upsert(
+            keys=[item.key],
+            vectors=[[1.0, 0.0, 0.0]],
+            metadatas=[{"title": item.title}],
+            date_modified=[item.date_modified],
+        )
+        monkeypatch.setattr(search_module, "iter_items", lambda _db_path: [item])
+        # sync now resolves attachments in bulk (#70); patch the plural entrypoint.
+        monkeypatch.setattr(
+            search_module,
+            "resolve_fulltext_artifacts",
+            lambda _keys, _db_path: {item.key: (text, sha256)},
+        )
+
+        stats = sync(store, embedder, db_path=tmp_path / "zotero.sqlite")
+        stored = store.item_chunk_metadatas(item.key)
+
+    assert CHUNK_CONTRACT_VERSION == "zfulltext-chunk-v2"
+    assert stats["chunks"] == 1
+    assert [chunk["chunk_contract_version"] for chunk in stored] == [CHUNK_CONTRACT_VERSION]
+
+
+def test_python_and_launcher_use_the_same_chunk_contract_version() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    # After the book_pipeline split (#83), the wire constant lives in contract.rs.
+    launcher_source = (
+        repo_root
+        / "tools/bibliosmith-launcher/source/src-tauri/src/book_pipeline/contract.rs"
+    ).read_text(encoding="utf-8")
+
+    assert f'const CHUNK_CONTRACT_VERSION: &str = "{CHUNK_CONTRACT_VERSION}";' in launcher_source
 
 
 def test_full_sync_preserves_item_scoped_chunks_before_zotero_storage_catches_up(
@@ -403,11 +582,15 @@ def test_full_sync_preserves_item_scoped_chunks_before_zotero_storage_catches_up
             parent_item_key=item.key,
             markdown_path=markdown,
             expected_sha256=sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
         )
         monkeypatch.setattr(search_module, "iter_items", lambda _db_path: [item])
-        monkeypatch.setattr(search_module, "resolve_fulltext_artifact", lambda _key, _db_path: None)
+        monkeypatch.setattr(
+            search_module,
+            "resolve_fulltext_artifacts",
+            lambda _keys, _db_path: {},
+        )
 
         sync(store, embedder, db_path=tmp_path / "zotero.sqlite", full=True)
         stored = store.item_chunk_metadatas(item.key)
@@ -472,7 +655,7 @@ def test_sync_reuses_crlf_item_index_with_raw_artifact_sha256(
             parent_item_key=item.key,
             markdown_path=markdown,
             expected_sha256=raw_sha256,
-            chunk_contract_version="zfulltext-chunk-v1",
+            chunk_contract_version="zfulltext-chunk-v2",
             embedding_profile_id="fixture-embedding:3",
         )
         store.upsert(

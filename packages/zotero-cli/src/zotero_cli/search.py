@@ -6,16 +6,23 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from .embed import EmbedderProtocol
-from .fulltext import chunk_text, resolve_fulltext, resolve_fulltext_artifact
+from .fulltext import (
+    chunk_text,
+    resolve_fulltext,
+    resolve_fulltext_artifacts,
+)
 from .vector_store import SQLiteVecStore
-from .zotero_db import ZoteroItem, iter_items
+from .zotero_db import ZoteroItem, filtered_item_keys, iter_items
 
 
 ITEM_INDEX_CONTRACT_VERSION = "zfulltext-item-index-v1"
-CHUNK_CONTRACT_VERSION = "zfulltext-chunk-v1"
+CHUNK_CONTRACT_VERSION = "zfulltext-chunk-v2"
+SearchMode = Literal["vector", "keyword", "hybrid"]
+SEARCH_MODES: tuple[SearchMode, ...] = ("vector", "keyword", "hybrid")
+RRF_K = 60
 
 
 def _to_metadata(item: ZoteroItem, *, chunk_idx: int | None = None) -> dict:
@@ -88,8 +95,15 @@ def sync(
     # dateModified value because a Markdown attachment can arrive later.
     chunk_count = 0
     embedding_profile_id = f"{embedder.cfg.model}:{embedder.cfg.dimensions}"
+    fulltext_artifacts = resolve_fulltext_artifacts(
+        [item.key for item in items],
+        db_path,
+    )
     for it in items:
-        resolved = resolve_fulltext_artifact(it.key, db_path)
+        if full and store.has_item_scoped_chunks(it.key):
+            store.remove_sync_managed_item_chunks(it.key)
+            continue
+        resolved = fulltext_artifacts.get(it.key)
         if resolved is None:
             store.remove_sync_managed_item_chunks(it.key)
             continue
@@ -289,10 +303,55 @@ def _parent_key(key: str) -> str:
     return key.split("#")[0]
 
 
+def _validate_search_mode(
+    mode: SearchMode,
+    embedder: EmbedderProtocol | None,
+) -> None:
+    if mode not in SEARCH_MODES:
+        raise ValueError(f"unsupported search mode: {mode}")
+    if mode in {"vector", "hybrid"} and embedder is None:
+        raise ValueError(f"{mode} search requires an embedding provider")
+
+
+def _fuse_parent_results(
+    vector_results: list[dict],
+    keyword_results: list[dict],
+) -> list[dict]:
+    """Fuse parent-level rankings, preferring an exact hit when RRF ties."""
+    fused: dict[str, dict] = {}
+    ranked_channels = (("vector", vector_results), ("keyword", keyword_results))
+    for channel, ranked in ranked_channels:
+        for rank, entry in enumerate(ranked, 1):
+            parent_key = entry["key"]
+            if parent_key not in fused:
+                fused[parent_key] = {**entry, "rrf_score": 0.0}
+            else:
+                previous = fused[parent_key]
+                if channel == "keyword":
+                    fused[parent_key] = {
+                        **entry,
+                        "rrf_score": previous["rrf_score"],
+                    }
+                    if "distance" in previous:
+                        fused[parent_key]["distance"] = previous["distance"]
+                elif "distance" in entry:
+                    fused[parent_key]["distance"] = entry["distance"]
+            fused[parent_key]["rrf_score"] += 1.0 / (RRF_K + rank)
+
+    return sorted(
+        fused.values(),
+        key=lambda result: (
+            result["rrf_score"],
+            "keyword_score" in result,
+        ),
+        reverse=True,
+    )
+
+
 def query(
     text: str,
     store: SQLiteVecStore,
-    embedder: EmbedderProtocol,
+    embedder: EmbedderProtocol | None,
     *,
     top_k: int = 10,
     item_type: str | None = None,
@@ -300,34 +359,88 @@ def query(
     tag: str | None = None,
     rerank: bool = False,
     candidate_pool: int = 50,
+    db_path: Path | None = None,
+    mode: SearchMode = "hybrid",
 ) -> list[dict]:
-    """Top-K semantic search. Supports metadata filters and optional reranking.
+    """Top-K vector, keyword, or hybrid search.
 
     Results are deduplicated by parent item key — if both a metadata vector
     and a fulltext chunk match, the best distance wins.
     """
-    qv = embedder.embed_query(text)
-    can_rerank = rerank and hasattr(embedder, "rerank")
-    pool = max(top_k * 3, candidate_pool) if (can_rerank or item_type or year or tag) else top_k
-    raw = store.query(qv, top_k=pool)
+    filters_active = item_type is not None or year is not None or tag is not None
+    allowed_parent_keys = (
+        filtered_item_keys(
+            db_path,
+            item_type=item_type,
+            year=year,
+            tag=tag,
+        )
+        if filters_active
+        else None
+    )
+    if allowed_parent_keys is not None and not allowed_parent_keys:
+        return []
+
+    _validate_search_mode(mode, embedder)
+
+    can_rerank = rerank and embedder is not None and hasattr(embedder, "rerank")
+    vector_raw: list[tuple[str, float, dict]] = []
+    if mode in {"vector", "hybrid"}:
+        assert embedder is not None
+        qv = embedder.embed_query(text)
+        pool = (
+            max(top_k * 3, candidate_pool)
+            if (mode == "hybrid" or can_rerank or item_type or year or tag)
+            else top_k
+        )
+        vector_raw = store.query(
+            qv,
+            top_k=pool,
+            allowed_parent_keys=allowed_parent_keys,
+        )
 
     # Deduplicate by parent key — keep best distance per item
-    seen: dict[str, dict] = {}
-    for key, dist, meta in raw:
+    vector_seen: dict[str, dict] = {}
+    for key, dist, meta in vector_raw:
         if not _matches_filters(meta, item_type=item_type, year=year, tag=tag):
             continue
         pk = _parent_key(key)
         entry = {"key": pk, "distance": dist, **meta}
-        if pk not in seen or dist < seen[pk]["distance"]:
-            seen[pk] = entry
-    enriched = sorted(seen.values(), key=lambda r: r["distance"])
+        if pk not in vector_seen or dist < vector_seen[pk]["distance"]:
+            vector_seen[pk] = entry
+
+    if mode == "vector":
+        enriched = sorted(vector_seen.values(), key=lambda r: r["distance"])
+    else:
+        keyword_raw = store.keyword_query(
+            text,
+            top_k=max(top_k * 3, candidate_pool),
+            allowed_parent_keys=allowed_parent_keys,
+        )
+        keyword_seen: dict[str, dict] = {}
+        for key, score, meta in keyword_raw:
+            if not _matches_filters(meta, item_type=item_type, year=year, tag=tag):
+                continue
+            pk = _parent_key(key)
+            if pk not in keyword_seen:
+                keyword_seen[pk] = {"key": pk, "keyword_score": score, **meta}
+
+        if mode == "keyword":
+            enriched = list(keyword_seen.values())
+        else:
+            enriched = _fuse_parent_results(
+                list(vector_seen.values()),
+                list(keyword_seen.values()),
+            )
 
     if can_rerank and enriched:
+        assert embedder is not None
         docs = [
-            f"{r.get('title') or ''} :: {(r.get('abstract') or '')[:500]}"
+            f"{r.get('title') or ''} :: {(r.get('chunk_text') or r.get('abstract') or '')[:500]}"
             for r in enriched
         ]
-        ranked = embedder.rerank(text, docs, top_k=top_k)  # type: ignore[attr-defined]
+        rerank_fn = getattr(embedder, "rerank")
+        ranked = rerank_fn(text, docs, top_k=top_k)
         return [{**enriched[i], "rerank_score": s} for i, s in ranked]
 
     return enriched[:top_k]
@@ -336,7 +449,7 @@ def query(
 def query_fulltext(
     text: str,
     store: SQLiteVecStore,
-    embedder: EmbedderProtocol,
+    embedder: EmbedderProtocol | None,
     *,
     top_k: int = 10,
     item_type: str | None = None,
@@ -346,20 +459,44 @@ def query_fulltext(
     candidate_pool: int = 200,
     db_path: Path | None = None,
     context_chunks: int = 2,
+    mode: SearchMode = "hybrid",
 ) -> list[dict]:
-    """Semantic search restricted to fulltext chunks, returning matched text.
+    """Vector, keyword, or hybrid search over fulltext chunks.
 
     Each result includes ``chunk_text`` (the matched chunk) and optionally
     surrounding chunks via ``context_before`` / ``context_after``.
     """
-    qv = embedder.embed_query(text)
-    can_rerank = rerank and hasattr(embedder, "rerank")
+    filters_active = item_type is not None or year is not None or tag is not None
+    allowed_parent_keys = (
+        filtered_item_keys(
+            db_path,
+            item_type=item_type,
+            year=year,
+            tag=tag,
+        )
+        if filters_active
+        else None
+    )
+    if allowed_parent_keys is not None and not allowed_parent_keys:
+        return []
+
+    _validate_search_mode(mode, embedder)
+
+    can_rerank = rerank and embedder is not None and hasattr(embedder, "rerank")
     pool = max(top_k * 5, candidate_pool)
-    raw = store.query(qv, top_k=pool)
+    vector_raw: list[tuple[str, float, dict]] = []
+    if mode in {"vector", "hybrid"}:
+        assert embedder is not None
+        qv = embedder.embed_query(text)
+        vector_raw = store.query(
+            qv,
+            top_k=pool,
+            allowed_parent_keys=allowed_parent_keys,
+        )
 
     # Only keep chunk vectors (key contains #c)
     chunk_hits: list[dict] = []
-    for key, dist, meta in raw:
+    for key, dist, meta in vector_raw:
         if "#c" not in key:
             continue
         if not _matches_filters(meta, item_type=item_type, year=year, tag=tag):
@@ -367,16 +504,47 @@ def query_fulltext(
         chunk_hits.append({"raw_key": key, "distance": dist, **meta})
 
     # Deduplicate: keep best chunk per parent item
-    seen: dict[str, dict] = {}
+    vector_seen: dict[str, dict] = {}
     for hit in chunk_hits:
         pk = _parent_key(hit["raw_key"])
-        if pk not in seen or hit["distance"] < seen[pk]["distance"]:
-            seen[pk] = {**hit, "key": pk}
-    enriched = sorted(seen.values(), key=lambda r: r["distance"])
+        if pk not in vector_seen or hit["distance"] < vector_seen[pk]["distance"]:
+            vector_seen[pk] = {**hit, "key": pk}
+
+    if mode == "vector":
+        enriched = sorted(vector_seen.values(), key=lambda r: r["distance"])
+    else:
+        keyword_raw = store.keyword_query(
+            text,
+            top_k=pool,
+            allowed_parent_keys=allowed_parent_keys,
+            chunks_only=True,
+        )
+        keyword_seen: dict[str, dict] = {}
+        for key, score, meta in keyword_raw:
+            if not _matches_filters(meta, item_type=item_type, year=year, tag=tag):
+                continue
+            pk = _parent_key(key)
+            if pk not in keyword_seen:
+                keyword_seen[pk] = {
+                    "raw_key": key,
+                    "key": pk,
+                    "keyword_score": score,
+                    **meta,
+                }
+
+        if mode == "keyword":
+            enriched = list(keyword_seen.values())
+        else:
+            enriched = _fuse_parent_results(
+                list(vector_seen.values()),
+                list(keyword_seen.values()),
+            )
 
     if can_rerank and enriched:
-        docs = [r.get("title", "") for r in enriched]
-        ranked = embedder.rerank(text, docs, top_k=top_k)  # type: ignore[attr-defined]
+        assert embedder is not None
+        docs = [f"{r.get('title') or ''} :: {r.get('chunk_text') or ''}" for r in enriched]
+        rerank_fn = getattr(embedder, "rerank")
+        ranked = rerank_fn(text, docs, top_k=top_k)
         enriched = [{**enriched[i], "rerank_score": s} for i, s in ranked]
     else:
         enriched = enriched[:top_k]

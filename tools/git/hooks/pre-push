@@ -8,12 +8,16 @@
 # about secrets.
 #
 #   1. Refuses to push any ref that does not descend from the clean root.
-#   2. Scans every commit reachable from the pushed ref with gitleaks, so a
-#      secret added and later deleted still blocks the push.
+#   2. Secrets: gitleaks git over the pushed tip's reachable history.
+#   3. Personal-info: gitleaks dir over a materialised tip tree (not full
+#      history — older commits already contain real home paths; see #77).
 #
 # Applies to every remote: after the repo consolidation `origin` IS the public
 # repository, so guarding a single remote name is no longer safe.
 set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
 
 CLEAN_ROOT=35401efd408ef12d2ebb9a1d06e5272b85529791
 zero=0000000000000000000000000000000000000000
@@ -32,10 +36,23 @@ while read -r local_ref local_sha _remote_ref _remote_sha; do
   if command -v gitleaks >/dev/null 2>&1; then
     if ! gitleaks git . --config .gitleaks.toml --log-opts="$local_sha" \
       --no-banner --redact >/tmp/gitleaks-prepush.log 2>&1; then
-      echo "pre-push: gitleaks flagged reachable history — aborting." >&2
+      echo "pre-push: gitleaks (secrets) flagged reachable history — aborting." >&2
       sed -n '1,40p' /tmp/gitleaks-prepush.log >&2
       exit 1
     fi
+
+    # Personal-info: only the tip tree about to become public.
+    tip=$(mktemp -d)
+    trap 'rm -rf "$tip"' RETURN
+    git archive "$local_sha" | tar -x -C "$tip"
+    cp .gitleaks-personal.toml "$tip/"
+    if ! gitleaks dir "$tip" --config "$tip/.gitleaks-personal.toml" \
+      --no-banner --redact >/tmp/gitleaks-prepush.log 2>&1; then
+      echo "pre-push: gitleaks (personal-info) flagged tip tree of $local_ref — aborting." >&2
+      sed -n '1,40p' /tmp/gitleaks-prepush.log >&2
+      exit 1
+    fi
+    rm -rf "$tip"; trap - RETURN
   fi
 done
 

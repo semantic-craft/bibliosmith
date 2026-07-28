@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readBookPipelineArtifactExcerpt } from "../api";
 import { BookDrawer, type BookDrawerProps } from "./BookDrawer";
 import { pipelineCopy } from "./copy";
 import type { BookUnit } from "./model";
@@ -19,8 +20,8 @@ vi.mock("../api", () => ({
 
 const copy = pipelineCopy("en");
 
-function renderDrawer(unit: BookUnit, over: Partial<BookDrawerProps> = {}) {
-  const props: BookDrawerProps = {
+function drawerProps(unit: BookUnit, over: Partial<BookDrawerProps> = {}): BookDrawerProps {
+  return {
     copy,
     units: [unit],
     unit,
@@ -36,10 +37,15 @@ function renderDrawer(unit: BookUnit, over: Partial<BookDrawerProps> = {}) {
     onSaveCustomInstructions: vi.fn(),
     onApproveGate: vi.fn(),
     onRouteOverride: vi.fn(),
+    onRecordReaderEvidence: vi.fn(),
     onOpenOutput: vi.fn(),
     onHandoff: vi.fn(),
     ...over,
   };
+}
+
+function renderDrawer(unit: BookUnit, over: Partial<BookDrawerProps> = {}) {
+  const props = drawerProps(unit, over);
   const result = render(<BookDrawer {...props} />);
   const card = result.container.querySelector(".pl-gatecard");
   return { ...result, props, card };
@@ -269,19 +275,18 @@ describe("BookDrawer gate card", () => {
     expect(props.onRouteOverride).toHaveBeenCalledWith("job-1", "child-1", "DIRTY", "mineru");
   });
 
-  // Delete removes the whole job, and a collection queues many books under one.
-  // The confirmation used to say "this book" while taking the entire batch.
-  it("says how many books a batch delete actually removes", async () => {
+  // Deleting used to remove the whole job, taking every other book in the batch
+  // with it. It now drops just the book the user pointed at.
+  it("drops only the book it was opened on", async () => {
     const user = userEvent.setup();
     const batch = bookUnit({ status: "completed" });
     batch.job.children = [batch.child!, { ...batch.child!, id: "child-2" }, { ...batch.child!, id: "child-3" }];
 
-    const { container } = renderDrawer(batch);
+    const { container, props } = renderDrawer(batch);
     await user.click(within(container).getByRole("button", { name: copy.deleteBook }));
+    await user.click(screen.getByRole("button", { name: copy.deleteBookConfirm }));
 
-    expect(screen.getByText(copy.deleteBookBatchConfirmHint(3))).toBeTruthy();
-    expect(screen.getByRole("button", { name: copy.deleteBookBatchConfirm(3) })).toBeTruthy();
-    expect(screen.queryByText(copy.deleteBookConfirmHint)).toBeNull();
+    expect(props.onDelete).toHaveBeenCalledWith("job-1", "child-1");
   });
 
   // A single-book job keeps the original wording, which was already accurate.
@@ -292,6 +297,79 @@ describe("BookDrawer gate card", () => {
 
     expect(screen.getByText(copy.deleteBookConfirmHint)).toBeTruthy();
     expect(screen.getByRole("button", { name: copy.deleteBookConfirm })).toBeTruthy();
+  });
+
+  // The confirmation used to be cleared by an effect watching unit.key. It is
+  // now local state that dies with the drawer, so the workbench keys the drawer
+  // on the selected book; this pins that composition down.
+  it("drops a pending delete confirmation when the drawer moves to another book", async () => {
+    const user = userEvent.setup();
+    const first = bookUnit({ status: "completed" });
+    const second = bookUnit({ status: "completed", jobOver: { id: "job-2" } });
+    const props = drawerProps(first, { units: [first, second] });
+
+    const { container, rerender } = render(<BookDrawer key={first.key} {...props} />);
+    await user.click(within(container).getByRole("button", { name: copy.deleteBook }));
+    expect(screen.getByText(copy.deleteBookConfirmHint)).toBeTruthy();
+
+    rerender(<BookDrawer key={second.key} {...props} unit={second} />);
+
+    expect(screen.queryByText(copy.deleteBookConfirmHint)).toBeNull();
+  });
+
+  // The record command, its wrapper and its types all shipped; nothing called
+  // them, so the one thing this feature asks a human for could not be given.
+  it("records reader verification against the built EPUB", async () => {
+    const user = userEvent.setup();
+    const built = bookUnit({
+      status: "completed",
+      stages: [stage("validate_reading", "completed")],
+      childOver: {
+        artifacts: [artifact("reading_epub", { artifactId: "art-epub", sha256: "abcd1234" })],
+        readerEvidence: [
+          {
+            reader: "Calibre",
+            readerVersion: "8.4",
+            artifactKind: "reading_epub",
+            artifactSha256: "0000",
+            conclusion: "passed",
+            recordedAt: "2026-07-26T00:00:00Z",
+            stale: true,
+          },
+        ],
+      },
+    });
+    const { container, props } = renderDrawer(built);
+    await user.click(within(container).getByRole("tab", { name: copy.tabArtifacts }));
+
+    // An existing record is shown, and one taken against an older build says so.
+    const row = screen.getByText(/Calibre 8\.4/).closest(".pl-evi-row");
+    expect(row).toBeTruthy();
+    expect(row!.textContent).toContain(copy.readerEvidenceStale);
+
+    await user.type(screen.getByLabelText(copy.readerEvidenceName), "Apple Books");
+    await user.type(screen.getByLabelText(copy.readerEvidenceVersion), "7.2");
+    await user.click(screen.getByRole("button", { name: copy.readerEvidenceRecord }));
+
+    expect(props.onRecordReaderEvidence).toHaveBeenCalledWith(
+      "job-1",
+      "child-1",
+      "reading_epub",
+      "Apple Books",
+      "7.2",
+      "passed",
+    );
+  });
+
+  // Nothing to open means nothing to verify; the form must not invite a record
+  // that the backend would only reject.
+  it("cannot record reader verification before an EPUB is built", async () => {
+    const user = userEvent.setup();
+    const { container } = renderDrawer(bookUnit({ status: "running" }));
+    await user.click(within(container).getByRole("tab", { name: copy.tabArtifacts }));
+
+    expect(screen.getByText(copy.readerEvidenceNeedsBuild)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: copy.readerEvidenceRecord })).toBeNull();
   });
 
   it("reports the gate's approval to the caller with the focused child", async () => {
@@ -315,6 +393,52 @@ describe("BookDrawer gate card", () => {
  * to reach any of them from the UI, so a user reporting a problem had only
  * screenshots.
  */
+// The excerpt used to be blanked by an effect that ran a render after the
+// artifact changed, so one frame showed the previous book's text. It now
+// carries the artifact id it was read for and is filtered during render.
+describe("BookDrawer gate sample preview", () => {
+  function unitWithSample(artifactId: string, jobId: string) {
+    return gateUnit({
+      jobOver: { id: jobId },
+      childOver: { artifacts: [artifact("chapter_source", { artifactId })] },
+    });
+  }
+
+  it("shows the excerpt it read for the current artifact", async () => {
+    vi.mocked(readBookPipelineArtifactExcerpt).mockResolvedValue({
+      artifactId: "art-1",
+      kind: "chapter_source",
+      excerpt: "First chapter opening line",
+      truncated: false,
+    });
+
+    renderDrawer(unitWithSample("art-1", "job-1"));
+
+    expect(await screen.findByText(/First chapter opening line/)).toBeTruthy();
+  });
+
+  it("does not show one book's excerpt while the next book's is still loading", async () => {
+    vi.mocked(readBookPipelineArtifactExcerpt).mockResolvedValue({
+      artifactId: "art-1",
+      kind: "chapter_source",
+      excerpt: "First chapter opening line",
+      truncated: false,
+    });
+    const first = unitWithSample("art-1", "job-1");
+    const second = unitWithSample("art-2", "job-2");
+    const props = drawerProps(first, { units: [first, second] });
+
+    const { rerender } = render(<BookDrawer {...props} />);
+    await screen.findByText(/First chapter opening line/);
+
+    // A read that never settles: the previous excerpt must not stand in for it.
+    vi.mocked(readBookPipelineArtifactExcerpt).mockReturnValue(new Promise(() => {}));
+    rerender(<BookDrawer {...props} unit={second} />);
+
+    expect(screen.queryByText(/First chapter opening line/)).toBeNull();
+  });
+});
+
 describe("BookDrawer diagnostic export", () => {
   const section = () => screen.getByLabelText(copy.diagnosticTitle);
   const profileSelect = () => screen.getByLabelText(copy.diagnosticProfile) as HTMLSelectElement;

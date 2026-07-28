@@ -15,25 +15,62 @@ from .zotero_db import DEFAULT_DB_PATH
 ZOTERO_STORAGE = Path.home() / "Zotero" / "storage"
 CHUNK_SIZE = 4000  # characters per chunk (~2000 CJK chars)
 CHUNK_OVERLAP = 300
-MAX_CHUNKS_PER_ITEM = 20
 
 
-def _get_attachment_keys(parent_key: str, db_path: Path) -> list[str]:
-    """Return attachment keys (= storage dir names) for a parent item."""
+def _get_attachment_keys_by_parent(db_path: Path) -> dict[str, list[str]]:
+    """Return all parent-to-storage-attachment keys in one read transaction."""
     uri = f"file:{db_path}?mode=ro&immutable=1"
     with sqlite3.connect(uri, uri=True) as conn:
         rows = conn.execute(
             """
-            SELECT i.key
+            SELECT parent.key, i.key
             FROM itemAttachments ia
             JOIN items i ON i.itemID = ia.itemID
             JOIN items parent ON parent.itemID = ia.parentItemID
-            WHERE parent.key = ?
-              AND ia.path LIKE 'storage:%'
-            """,
-            (parent_key,),
+            WHERE ia.path LIKE 'storage:%'
+            ORDER BY ia.parentItemID, ia.itemID
+            """
         ).fetchall()
-    return [r[0] for r in rows]
+    by_parent: dict[str, list[str]] = {}
+    for parent_key, attachment_key in rows:
+        by_parent.setdefault(parent_key, []).append(attachment_key)
+    return by_parent
+
+
+def _resolve_attachment_keys(attachment_keys: list[str]) -> tuple[str, str] | None:
+    for attachment_key in attachment_keys:
+        storage_dir = ZOTERO_STORAGE / attachment_key
+        if not storage_dir.is_dir():
+            continue
+        md_files = list(storage_dir.glob("*.md"))
+        if md_files:
+            # Pick the largest .md file (most likely the full content)
+            md_file = max(md_files, key=lambda file: file.stat().st_size)
+            try:
+                raw = md_file.read_bytes()
+                text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+                return text, hashlib.sha256(raw).hexdigest()
+            except (OSError, UnicodeDecodeError):
+                continue
+    return None
+
+
+def resolve_fulltext_artifacts(
+    parent_keys: list[str], db_path: Path | None = None
+) -> dict[str, tuple[str, str]]:
+    """Resolve Markdown artifacts for many parents with one SQLite connection."""
+    requested = set(parent_keys)
+    if not requested:
+        return {}
+    attachment_keys = _get_attachment_keys_by_parent(db_path or DEFAULT_DB_PATH)
+    resolved: dict[str, tuple[str, str]] = {}
+    for parent_key, keys in attachment_keys.items():
+        if parent_key not in requested:
+            continue
+        artifact = _resolve_attachment_keys(keys)
+        if artifact is not None:
+            resolved[parent_key] = artifact
+    return resolved
 
 
 def resolve_fulltext_artifact(
@@ -48,24 +85,7 @@ def resolve_fulltext_artifact(
     Returns:
         ``(text, sha256)`` if an .md file is found, else None.
     """
-    db_path = db_path or DEFAULT_DB_PATH
-    att_keys = _get_attachment_keys(parent_key, db_path)
-
-    for att_key in att_keys:
-        storage_dir = ZOTERO_STORAGE / att_key
-        if not storage_dir.is_dir():
-            continue
-        md_files = list(storage_dir.glob("*.md"))
-        if md_files:
-            # Pick the largest .md file (most likely the full content)
-            md_file = max(md_files, key=lambda f: f.stat().st_size)
-            try:
-                raw = md_file.read_bytes()
-                text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-                return text, hashlib.sha256(raw).hexdigest()
-            except (OSError, UnicodeDecodeError):
-                continue
-    return None
+    return resolve_fulltext_artifacts([parent_key], db_path).get(parent_key)
 
 
 def resolve_fulltext(parent_key: str, db_path: Path | None = None) -> str | None:
@@ -78,13 +98,8 @@ def chunk_text(
     text: str,
     chunk_size: int = CHUNK_SIZE,
     overlap: int = CHUNK_OVERLAP,
-    max_chunks: int = MAX_CHUNKS_PER_ITEM,
 ) -> list[str]:
-    """Split text into overlapping chunks by paragraph boundaries.
-
-    If total chunks exceed max_chunks, keep front half + back half to cover
-    introduction and conclusion of a document.
-    """
+    """Split all text into overlapping chunks by paragraph boundaries."""
     paragraphs = text.split("\n\n")
     chunks: list[str] = []
     current = ""
@@ -116,10 +131,5 @@ def chunk_text(
             prev_tail = chunks[i - 1][-overlap:]
             overlapped.append(prev_tail + chunks[i])
         chunks = overlapped
-
-    # Cap: keep front + back to cover intro and conclusion
-    if len(chunks) > max_chunks:
-        half = max_chunks // 2
-        chunks = chunks[:half] + chunks[-half:]
 
     return chunks

@@ -1,9 +1,5 @@
 use chrono::Local;
-use futures_util::StreamExt;
-use reqwest::{
-    header::{HeaderMap, RANGE, RETRY_AFTER},
-    StatusCode,
-};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "windows")]
@@ -24,29 +20,16 @@ use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WindowEvent,
 };
-use tokio::{
-    fs::{File, OpenOptions},
-    io::AsyncWriteExt,
-};
 
 mod book_pipeline;
 mod embedding_settings;
 mod model_settings;
 mod ocr_settings;
 
-const OPENCODE_REPO_API: &str = "https://api.github.com/repos/anomalyco/opencode/releases/latest";
-const OPENCODE_REPO_LATEST_RELEASE_URL: &str =
-    "https://github.com/anomalyco/opencode/releases/latest";
-const OPENCODE_REPO_RELEASE_DOWNLOAD_BASE: &str =
-    "https://github.com/anomalyco/opencode/releases/download";
-const GITHUB_RELEASE_CACHE_TTL_SECONDS: u64 = 10 * 60;
-const GITHUB_RATE_LIMIT_COOLDOWN_BUFFER_SECONDS: u64 = 30;
-const GITHUB_SECONDARY_RATE_LIMIT_MIN_COOLDOWN_SECONDS: u64 = 60;
 const BIBLIOSMITH_HOME_ENV: &str = "BIBLIOSMITH_HOME";
 const BIBLIOSMITH_PYTHON_ENV: &str = "BIBLIOSMITH_PYTHON";
 const BIBLIOSMITH_JAVA_ENV: &str = "BIBLIOSMITH_JAVA";
 const BIBLIOSMITH_PROGRESS_EVENT: &str = "bibliosmith-project-progress";
-const OPENCODE_DOWNLOAD_EVENT: &str = "opencode-download-progress";
 const NODE_MODULES_PROGRESS_EVENT: &str = "node-modules-install-progress";
 const RUNTIME_PROGRESS_EVENT: &str = "runtime-install-progress";
 const TRAY_SHOW_ID: &str = "tray_show";
@@ -92,7 +75,6 @@ const RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS: u64 = 180;
 const RUNTIME_PROBE_TIMEOUT_SECONDS: u64 = 6;
 static BIBLIOSMITH_UPDATE_RUNNING: AtomicBool = AtomicBool::new(false);
 static BIBLIOSMITH_UPDATE_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
-static OPENCODE_DOWNLOAD_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 static NODE_MODULES_INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
 static NODE_MODULES_INSTALL_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 static NODE_MODULES_INSTALL_REMOVE_PARTIAL: AtomicBool = AtomicBool::new(false);
@@ -107,20 +89,6 @@ fn launcher_log_path() -> Result<PathBuf, String> {
         .join("launcher")
         .join("logs")
         .join("bibliosmith-launcher.log"))
-}
-
-fn launcher_cache_dir() -> Result<PathBuf, String> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::config_local_dir)
-        .ok_or_else(|| "无法定位用户本地数据目录。".to_string())?;
-    Ok(base.join("BiblioSmith").join("launcher").join("cache"))
-}
-
-fn now_unix_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 fn append_launcher_log(level: &str, message: impl AsRef<str>) {
@@ -369,10 +337,6 @@ struct LauncherState {
     dirty: bool,
     proxy_configured: bool,
     platform: String,
-    opencode_install_root: String,
-    opencode_installed_version: Option<String>,
-    opencode_client_path: Option<String>,
-    opencode_available: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -385,45 +349,6 @@ struct CommitInfo {
     full_message: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct OpenCodeReleaseCache {
-    fetched_at_unix: u64,
-    latest_version: String,
-    asset: GithubAsset,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct GithubApiCooldownState {
-    opencode_release_until: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum GithubApiCooldownKind {
-    OpenCodeRelease,
-}
-
-impl GithubApiCooldownKind {
-    fn label(self) -> &'static str {
-        match self {
-            GithubApiCooldownKind::OpenCodeRelease => "opencode-release",
-        }
-    }
-
-    fn get(self, state: &GithubApiCooldownState) -> Option<u64> {
-        match self {
-            GithubApiCooldownKind::OpenCodeRelease => state.opencode_release_until,
-        }
-    }
-
-    fn set(self, state: &mut GithubApiCooldownState, until: Option<u64>) {
-        match self {
-            GithubApiCooldownKind::OpenCodeRelease => state.opencode_release_until = until,
-        }
-    }
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BiblioSmithUpdateInfo {
@@ -434,48 +359,6 @@ struct BiblioSmithUpdateInfo {
     ahead_count: u32,
     has_update: bool,
     commits: Vec<CommitInfo>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenCodeUpdateInfo {
-    installed_version: Option<String>,
-    latest_version: String,
-    has_update: bool,
-    asset_name: String,
-    asset_size: u64,
-    asset_url: String,
-    install_root: String,
-    client_path: Option<String>,
-    client_available: bool,
-    installer_path: Option<String>,
-    installer_downloaded: bool,
-    partial_downloaded_bytes: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenCodeLocalStatus {
-    installed_version: Option<String>,
-    install_root: String,
-    client_path: Option<String>,
-    client_available: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LauncherUpdateInfo {
-    installed_version: String,
-    latest_version: String,
-    has_update: bool,
-    release_notes: Option<String>,
-    asset_name: String,
-    asset_size: u64,
-    asset_url: String,
-    install_root: String,
-    installer_path: Option<String>,
-    installer_downloaded: bool,
-    partial_downloaded_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -670,32 +553,6 @@ struct RuntimePackage {
     urls: &'static [&'static str],
 }
 
-#[derive(Debug, Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-    assets: Vec<GithubAsset>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct GithubAsset {
-    name: String,
-    browser_download_url: String,
-    size: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenCodeInstallState {
-    tool: String,
-    installed_at: String,
-    install_root: String,
-    installer: String,
-    platform: String,
-    version: String,
-    source: String,
-    repository_root: String,
-}
-
 #[tauri::command]
 async fn get_launcher_state() -> Result<LauncherState, String> {
     run_blocking(collect_launcher_state).await
@@ -739,12 +596,6 @@ fn collect_launcher_state() -> Result<LauncherState, String> {
             .unwrap_or(false);
     let proxy_configured = is_proxy_configured();
     let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
-    let install_root = opencode_install_root()?;
-    let client_path = detected_opencode_client(&install_root);
-    let installed_version = client_path
-        .as_deref()
-        .and_then(|_| read_opencode_state(&install_root).map(|state| state.version));
-    let opencode_available = client_path.is_some();
 
     Ok(LauncherState {
         repo_root: display_path(&repo_root),
@@ -757,10 +608,6 @@ fn collect_launcher_state() -> Result<LauncherState, String> {
         dirty,
         proxy_configured,
         platform,
-        opencode_install_root: display_path(&install_root),
-        opencode_installed_version: installed_version,
-        opencode_client_path: client_path.map(|path| display_path(&path)),
-        opencode_available,
     })
 }
 
@@ -1351,24 +1198,6 @@ fn read_project_document_path(
 }
 
 #[tauri::command]
-fn check_launcher_updates() -> Result<LauncherUpdateInfo, String> {
-    let installed_version = launcher_current_version();
-    Ok(LauncherUpdateInfo {
-        installed_version: installed_version.clone(),
-        latest_version: installed_version,
-        has_update: false,
-        release_notes: None,
-        asset_name: String::new(),
-        asset_size: 0,
-        asset_url: String::new(),
-        install_root: String::new(),
-        installer_path: None,
-        installer_downloaded: false,
-        partial_downloaded_bytes: 0,
-    })
-}
-
-#[tauri::command]
 fn minimize_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
@@ -1397,117 +1226,6 @@ fn close_main_window_to_tray(app: tauri::AppHandle) -> Result<(), String> {
         .get_webview_window("main")
         .ok_or_else(|| "无法定位 BiblioSmith Launcher 主窗口。".to_string())?;
     window.hide().map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-async fn check_opencode_updates() -> Result<OpenCodeUpdateInfo, String> {
-    let install_root = opencode_install_root()?;
-    let client_path = detected_opencode_client(&install_root);
-    let installed_version = client_path
-        .as_deref()
-        .and_then(|_| read_opencode_state(&install_root).map(|state| state.version));
-    let (latest_version, asset) = fetch_opencode_release_asset().await?;
-    let downloads_dir = install_root.join("downloads");
-    let installer_path = downloads_dir.join(&asset.name);
-    let installer_downloaded = asset.size > 0 && file_size(&installer_path) >= asset.size;
-    let partial_downloaded_bytes = partial_download_path(&installer_path)
-        .ok()
-        .map(|path| file_size(&path))
-        .unwrap_or(0);
-
-    Ok(OpenCodeUpdateInfo {
-        installed_version: installed_version.clone(),
-        latest_version: latest_version.clone(),
-        has_update: client_path.is_some()
-            && installed_version
-                .as_deref()
-                .map(|installed| is_remote_version_newer(&latest_version, installed))
-                .unwrap_or(false),
-        asset_name: asset.name.clone(),
-        asset_size: asset.size,
-        asset_url: asset.browser_download_url.clone(),
-        install_root: display_path(&install_root),
-        client_path: client_path.as_ref().map(|path| display_path(path)),
-        client_available: client_path.is_some(),
-        installer_path: installer_downloaded.then(|| display_path(&installer_path)),
-        installer_downloaded,
-        partial_downloaded_bytes,
-    })
-}
-
-#[tauri::command]
-fn check_opencode_local_status() -> Result<OpenCodeLocalStatus, String> {
-    let install_root = opencode_install_root()?;
-    let client_path = detected_opencode_client(&install_root);
-    let installed_version = client_path
-        .as_deref()
-        .and_then(|_| read_opencode_state(&install_root).map(|state| state.version));
-
-    Ok(OpenCodeLocalStatus {
-        installed_version,
-        install_root: display_path(&install_root),
-        client_path: client_path.as_ref().map(|path| display_path(path)),
-        client_available: client_path.is_some(),
-    })
-}
-
-#[tauri::command]
-async fn download_and_open_opencode(app: tauri::AppHandle) -> Result<ActionResult, String> {
-    OPENCODE_DOWNLOAD_CANCEL_REQUESTED.store(false, Ordering::Release);
-    let repo_root = configured_or_default_repo_root()?;
-    let install_root = opencode_install_root()?;
-    let (latest_version, asset) = fetch_opencode_release_asset().await?;
-
-    let downloads_dir = install_root.join("downloads");
-    fs::create_dir_all(&downloads_dir).map_err(|err| err.to_string())?;
-    let destination = downloads_dir.join(&asset.name);
-    download_file(
-        &app,
-        OPENCODE_DOWNLOAD_EVENT,
-        "OpenCode",
-        &asset.browser_download_url,
-        &destination,
-        asset.size,
-        Some(&OPENCODE_DOWNLOAD_CANCEL_REQUESTED),
-    )
-    .await?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&destination)
-            .map_err(|err| err.to_string())?
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&destination, permissions).map_err(|err| err.to_string())?;
-    }
-
-    write_opencode_state(
-        &install_root,
-        &destination,
-        &latest_version,
-        &asset.browser_download_url,
-        &repo_root,
-    )?;
-    open::that(&destination).map_err(|err| format!("无法打开 OpenCode 安装包：{err}"))?;
-
-    Ok(ActionResult {
-        ok: true,
-        message: "OpenCode Desktop 安装包已打开，请按安装窗口提示继续。".into(),
-        repo_root: None,
-        requires_download: None,
-    })
-}
-
-#[tauri::command]
-fn cancel_opencode_download() -> Result<ActionResult, String> {
-    OPENCODE_DOWNLOAD_CANCEL_REQUESTED.store(true, Ordering::Release);
-    Ok(ActionResult {
-        ok: true,
-        message: "正在停止 OpenCode 下载。已下载部分会保留，下次可继续。".into(),
-        repo_root: None,
-        requires_download: None,
-    })
 }
 
 #[tauri::command]
@@ -1550,150 +1268,6 @@ fn open_books_folder() -> Result<ActionResult, String> {
         repo_root: None,
         requires_download: None,
     })
-}
-
-#[tauri::command]
-fn launch_opencode_client() -> Result<ActionResult, String> {
-    let install_root = opencode_install_root()?;
-    let repo_root = configured_or_default_repo_root()?;
-    if !repo_root.is_dir() {
-        return Err(format!(
-            "BiblioSmith 项目目录不可用，无法作为 OpenCode 工作目录启动：{}。请先在设置页选择有效目录。",
-            display_path(&repo_root)
-        ));
-    }
-    let working_dir = repo_root.canonicalize().unwrap_or(repo_root);
-    if let Some(candidate) = detected_opencode_client(&install_root) {
-        launch_opencode_candidate(&candidate, &working_dir)?;
-        return Ok(ActionResult {
-            ok: true,
-            message: format!(
-                "已启动 OpenCode：{}；工作目录：{}",
-                display_path(&candidate),
-                display_path(&working_dir)
-            ),
-            repo_root: None,
-            requires_download: None,
-        });
-    }
-    if is_opencode_process_running() {
-        return Ok(ActionResult {
-            ok: true,
-            message: "OpenCode 已在运行，但未找到可重新打开 BiblioSmith 工作目录的客户端入口。"
-                .into(),
-            repo_root: None,
-            requires_download: None,
-        });
-    }
-
-    Err("没有找到已安装的 OpenCode Desktop。请先点击“检查更新/更新 OpenCode”安装官方客户端；如果已经安装，请从系统应用菜单启动一次。".into())
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Debug, PartialEq, Eq)]
-struct OpenCodeLaunchSpec {
-    program: PathBuf,
-    args: Vec<String>,
-    working_dir: PathBuf,
-}
-
-#[cfg(target_os = "windows")]
-fn windows_opencode_launch_spec(candidate: &Path, working_dir: &Path) -> OpenCodeLaunchSpec {
-    let is_shortcut = candidate
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"));
-    if is_shortcut {
-        return OpenCodeLaunchSpec {
-            program: PathBuf::from("cmd"),
-            args: vec![
-                "/D".into(),
-                "/C".into(),
-                "start".into(),
-                "".into(),
-                "/D".into(),
-                display_path(working_dir),
-                display_path(candidate),
-                display_path(working_dir),
-            ],
-            working_dir: working_dir.to_path_buf(),
-        };
-    }
-    OpenCodeLaunchSpec {
-        program: candidate.to_path_buf(),
-        args: vec![display_path(working_dir)],
-        working_dir: working_dir.to_path_buf(),
-    }
-}
-
-fn launch_opencode_candidate(candidate: &Path, working_dir: &Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let spec = windows_opencode_launch_spec(candidate, working_dir);
-        let mut command = Command::new(&spec.program);
-        command
-            .args(&spec.args)
-            .current_dir(&spec.working_dir)
-            .env(BIBLIOSMITH_HOME_ENV, display_path(working_dir))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        apply_runtime_env(&mut command);
-        command.creation_flags(0x08000000);
-        command.spawn().map_err(|err| {
-            format!(
-                "无法启动 OpenCode：{err}。客户端：{}；工作目录：{}",
-                display_path(candidate),
-                display_path(working_dir)
-            )
-        })?;
-        return Ok(());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let is_app_bundle = candidate
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"));
-        let mut command = if is_app_bundle {
-            let mut command = Command::new("open");
-            command.args(["-a", &display_path(candidate), &display_path(working_dir)]);
-            command
-        } else {
-            let mut command = Command::new(candidate);
-            command.arg(working_dir);
-            command
-        };
-        command
-            .current_dir(working_dir)
-            .env(BIBLIOSMITH_HOME_ENV, display_path(working_dir))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        apply_runtime_env(&mut command);
-        command
-            .spawn()
-            .map_err(|err| format!("无法启动 OpenCode：{err}"))?;
-        Ok(())
-    }
-
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        let mut command = Command::new(candidate);
-        command
-            .arg(working_dir)
-            .current_dir(working_dir)
-            .env(BIBLIOSMITH_HOME_ENV, display_path(working_dir))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        apply_runtime_env(&mut command);
-        command
-            .spawn()
-            .map_err(|err| format!("无法启动 OpenCode：{err}"))?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -2534,14 +2108,46 @@ pub(crate) fn command_output_with_timeout(
     // `wait_with_output` only captures what was piped.
     command.stderr(Stdio::piped());
     let mut child = command.spawn()?;
+    // Drained on their own threads, not after the wait loop: a pipe holds ~64 KB
+    // before `write` blocks, and a child parked in that write never exits. Read
+    // only once it has exited and the loop below waits for something that cannot
+    // happen — the child waits for us, we wait for the child, and the timeout
+    // "expires" on a command that had already finished its work. The engine
+    // prints its whole run report to stdout in one go, so this is reachable by a
+    // book with enough chapters rather than by a misbehaving child.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
     let started_at = Instant::now();
     loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output();
+        if let Some(status) = child.try_wait()? {
+            return Ok(Output {
+                status,
+                stdout: stdout_reader.join().unwrap_or_default(),
+                stderr: stderr_reader.join().unwrap_or_default(),
+            });
         }
         if started_at.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
+            // Deliberately not joined. Killing the child does not kill any
+            // grandchild it left holding the write end, so a join here could
+            // block forever — turning the bound we just enforced back into the
+            // unbounded wait it exists to prevent. The output is discarded on
+            // this path anyway.
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("command timed out after {}s", timeout.as_secs()),
@@ -4726,166 +4332,6 @@ fn git_log(
     Ok(commits)
 }
 
-fn github_api_cooldown_path() -> Result<PathBuf, String> {
-    Ok(launcher_cache_dir()?.join("github-api-cooldown.json"))
-}
-
-fn opencode_release_cache_path() -> Result<PathBuf, String> {
-    Ok(launcher_cache_dir()?.join("opencode-release.json"))
-}
-
-fn read_opencode_release_cache() -> Option<OpenCodeReleaseCache> {
-    let path = opencode_release_cache_path().ok()?;
-    let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<OpenCodeReleaseCache>(&text).ok()
-}
-
-fn write_opencode_release_cache(latest_version: &str, asset: &GithubAsset) {
-    let Ok(path) = opencode_release_cache_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let cache = OpenCodeReleaseCache {
-        fetched_at_unix: now_unix_seconds(),
-        latest_version: latest_version.to_string(),
-        asset: asset.clone(),
-    };
-    if let Ok(text) = serde_json::to_string_pretty(&cache) {
-        let _ = fs::write(path, text);
-    }
-}
-
-fn cached_opencode_release_if_fresh(asset_name: &str) -> Option<(String, GithubAsset)> {
-    let cache = read_opencode_release_cache()?;
-    opencode_release_cache_is_fresh(&cache, asset_name, now_unix_seconds())
-        .then_some((cache.latest_version, cache.asset))
-}
-
-fn cached_opencode_release_any(asset_name: &str) -> Option<(String, GithubAsset)> {
-    let cache = read_opencode_release_cache()?;
-    opencode_release_cache_matches_asset(&cache, asset_name)
-        .then_some((cache.latest_version, cache.asset))
-}
-
-fn opencode_release_cache_is_fresh(
-    cache: &OpenCodeReleaseCache,
-    asset_name: &str,
-    now: u64,
-) -> bool {
-    opencode_release_cache_matches_asset(cache, asset_name)
-        && now.saturating_sub(cache.fetched_at_unix) <= GITHUB_RELEASE_CACHE_TTL_SECONDS
-}
-
-fn opencode_release_cache_matches_asset(cache: &OpenCodeReleaseCache, asset_name: &str) -> bool {
-    !cache.latest_version.trim().is_empty()
-        && cache.asset.name == asset_name
-        && !cache.asset.browser_download_url.trim().is_empty()
-}
-
-fn read_github_api_cooldown_state() -> GithubApiCooldownState {
-    let Ok(path) = github_api_cooldown_path() else {
-        return GithubApiCooldownState::default();
-    };
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<GithubApiCooldownState>(&text).ok())
-        .unwrap_or_default()
-}
-
-fn write_github_api_cooldown_state(state: &GithubApiCooldownState) {
-    let Ok(path) = github_api_cooldown_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(text) = serde_json::to_string_pretty(state) {
-        let _ = fs::write(path, text);
-    }
-}
-
-fn github_api_cooldown_active(kind: GithubApiCooldownKind) -> bool {
-    let state = read_github_api_cooldown_state();
-    kind.get(&state)
-        .is_some_and(|until| until > now_unix_seconds())
-}
-
-fn remember_github_api_cooldown(kind: GithubApiCooldownKind, until: u64) {
-    let mut state = read_github_api_cooldown_state();
-    kind.set(&mut state, Some(until));
-    write_github_api_cooldown_state(&state);
-    append_launcher_log(
-        "WARN",
-        format!(
-            "GitHub API cooldown active kind={} until_unix={until}",
-            kind.label()
-        ),
-    );
-}
-
-fn clear_github_api_cooldown(kind: GithubApiCooldownKind) {
-    let mut state = read_github_api_cooldown_state();
-    if kind.get(&state).is_some() {
-        kind.set(&mut state, None);
-        write_github_api_cooldown_state(&state);
-    }
-}
-
-fn remember_github_api_cooldown_from_failure(
-    kind: GithubApiCooldownKind,
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &str,
-) {
-    if !github_response_is_rate_limited(status, headers, body) {
-        return;
-    }
-    let until = github_rate_limit_cooldown_until(headers, now_unix_seconds())
-        .unwrap_or_else(|| now_unix_seconds() + GITHUB_SECONDARY_RATE_LIMIT_MIN_COOLDOWN_SECONDS);
-    remember_github_api_cooldown(kind, until);
-}
-
-fn github_response_is_rate_limited(status: StatusCode, headers: &HeaderMap, body: &str) -> bool {
-    if status != StatusCode::FORBIDDEN && status != StatusCode::TOO_MANY_REQUESTS {
-        return false;
-    }
-    let body = body.to_ascii_lowercase();
-    github_header_value(headers, "x-ratelimit-remaining").as_deref() == Some("0")
-        || headers.get(RETRY_AFTER).is_some()
-        || body.contains("rate limit")
-        || body.contains("secondary rate")
-        || body.contains("abuse detection")
-}
-
-fn github_rate_limit_cooldown_until(headers: &HeaderMap, now: u64) -> Option<u64> {
-    if let Some(reset) = github_header_value(headers, "x-ratelimit-reset")
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        if github_header_value(headers, "x-ratelimit-remaining").as_deref() == Some("0") {
-            return Some(reset + GITHUB_RATE_LIMIT_COOLDOWN_BUFFER_SECONDS);
-        }
-    }
-    if let Some(retry_after) = headers
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-    {
-        return Some(now + retry_after + GITHUB_RATE_LIMIT_COOLDOWN_BUFFER_SECONDS);
-    }
-    None
-}
-
-fn github_header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 fn commit_info_from_parts(
     hash: String,
     date: String,
@@ -5013,20 +4459,6 @@ fn cleanup_commit_summary(value: &str) -> String {
         .join(" ")
 }
 
-fn http_client() -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder().http1_only();
-    apply_reqwest_proxy(builder, None)?
-        .build()
-        .map_err(|err| format!("无法初始化 HTTP/1.1 网络客户端：{err}"))
-}
-
-fn http_client_auto() -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder();
-    apply_reqwest_proxy(builder, None)?
-        .build()
-        .map_err(|err| format!("无法初始化自动 HTTP 网络客户端：{err}"))
-}
-
 fn http_blocking_client() -> Result<reqwest::blocking::Client, String> {
     let mut builder = reqwest::blocking::Client::builder().http1_only();
     if let Some(proxy_url) = configured_proxy_url_best_effort() {
@@ -5135,572 +4567,8 @@ fn proxy_test_failure_result(message: String) -> ProxyTestResult {
     }
 }
 
-async fn fetch_opencode_release() -> Result<GithubRelease, String> {
-    fetch_github_release(
-        OPENCODE_REPO_API,
-        "OpenCode",
-        Some(GithubApiCooldownKind::OpenCodeRelease),
-    )
-    .await
-}
-
-async fn fetch_opencode_release_asset() -> Result<(String, GithubAsset), String> {
-    let asset_name = opencode_asset_name()?;
-    if let Some(cached) = cached_opencode_release_if_fresh(&asset_name) {
-        append_launcher_log(
-            "INFO",
-            "using cached OpenCode GitHub release because cache is fresh",
-        );
-        return Ok(cached);
-    }
-    if github_api_cooldown_active(GithubApiCooldownKind::OpenCodeRelease) {
-        if let Some(cached) = cached_opencode_release_any(&asset_name) {
-            append_launcher_log(
-                "WARN",
-                "using cached OpenCode GitHub release because GitHub API is in cooldown",
-            );
-            return Ok(cached);
-        }
-        return fetch_opencode_release_asset_from_public_page(&asset_name, None).await;
-    }
-    match fetch_opencode_release().await {
-        Ok(release) => {
-            let asset = release
-                .assets
-                .iter()
-                .find(|asset| asset.name == asset_name)
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "OpenCode release 中没有找到当前系统对应的 Desktop 安装包：{asset_name}"
-                    )
-                })?;
-            clear_github_api_cooldown(GithubApiCooldownKind::OpenCodeRelease);
-            write_opencode_release_cache(&release.tag_name, &asset);
-            Ok((release.tag_name, asset))
-        }
-        Err(api_error) if should_use_public_release_fallback(&api_error) => {
-            if let Some(cached) = cached_opencode_release_any(&asset_name) {
-                append_launcher_log(
-                    "WARN",
-                    format!("using cached OpenCode GitHub release after API failure: {api_error}"),
-                );
-                return Ok(cached);
-            }
-            append_launcher_log(
-                "WARN",
-                format!("OpenCode GitHub API unavailable, using public release page fallback: {api_error}"),
-            );
-            let tag = fetch_latest_release_tag_from_public_page(
-                OPENCODE_REPO_LATEST_RELEASE_URL,
-                "OpenCode",
-            )
-            .await
-            .map_err(|fallback_error| {
-                format!("{api_error}；已尝试通过 GitHub 公开 release 页面获取版本，也失败：{fallback_error}")
-            })?;
-            let asset = opencode_asset_from_tag(&tag, &asset_name);
-            write_opencode_release_cache(&tag, &asset);
-            Ok((tag, asset))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-async fn fetch_opencode_release_asset_from_public_page(
-    asset_name: &str,
-    api_error: Option<String>,
-) -> Result<(String, GithubAsset), String> {
-    if let Some(error) = &api_error {
-        append_launcher_log(
-            "WARN",
-            format!("OpenCode GitHub API unavailable, using public release page fallback: {error}"),
-        );
-    } else {
-        append_launcher_log(
-            "WARN",
-            "OpenCode GitHub API is in cooldown, using public release page fallback",
-        );
-    }
-    let tag =
-        fetch_latest_release_tag_from_public_page(OPENCODE_REPO_LATEST_RELEASE_URL, "OpenCode")
-            .await
-            .map_err(|fallback_error| {
-                if let Some(error) = api_error {
-                    format!("{error}; GitHub public release fallback also failed: {fallback_error}")
-                } else {
-                    fallback_error
-                }
-            })?;
-    let asset = opencode_asset_from_tag(&tag, asset_name);
-    write_opencode_release_cache(&tag, &asset);
-    Ok((tag, asset))
-}
-
-async fn fetch_github_release(
-    api_url: &str,
-    label: &str,
-    cooldown_kind: Option<GithubApiCooldownKind>,
-) -> Result<GithubRelease, String> {
-    let first_result =
-        fetch_github_release_with_client(http_client()?, api_url, label, "HTTP/1.1", cooldown_kind)
-            .await;
-    match first_result {
-        Ok(release) => Ok(release),
-        Err(error) if should_retry_with_auto_http(&error) => {
-            append_launcher_log(
-                "WARN",
-                format!("{label} release HTTP/1.1 failed, retrying with automatic HTTP transport: {error}"),
-            );
-            fetch_github_release_with_client(
-                http_client_auto()?,
-                api_url,
-                label,
-                "automatic HTTP",
-                cooldown_kind,
-            )
-            .await
-            .map_err(|retry_error| format!("{error}；automatic HTTP 重试也失败：{retry_error}"))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-async fn fetch_github_release_with_client(
-    client: reqwest::Client,
-    api_url: &str,
-    label: &str,
-    transport: &str,
-    cooldown_kind: Option<GithubApiCooldownKind>,
-) -> Result<GithubRelease, String> {
-    let response = client
-        .get(api_url)
-        .header("User-Agent", "BiblioSmith-Launcher")
-        .send()
-        .await
-        .map_err(|err| {
-            format!("无法访问 {label} release（{transport}）：{err}。请检查网络、VPN 或代理设置。")
-        })?;
-    if response.status() == StatusCode::NOT_FOUND {
-        return Err(format!(
-            "{label} release 不存在或尚未发布。请先在 GitHub 仓库创建 release，或暂时忽略此更新检查。"
-        ));
-    }
-    if !response.status().is_success() {
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = response.text().await.unwrap_or_default();
-        if let Some(kind) = cooldown_kind {
-            remember_github_api_cooldown_from_failure(kind, status, &headers, &body);
-        }
-        let summary = github_error_summary(&body);
-        return Err(format!(
-            "{label} release 请求失败（{transport}）：HTTP status {status}{summary} for url ({api_url})。请检查网络、VPN 或代理设置。"
-        ));
-    }
-    response
-        .json::<GithubRelease>()
-        .await
-        .map_err(|err| format!("无法解析 {label} release：{err}"))
-}
-
-async fn fetch_latest_release_tag_from_public_page(
-    url: &str,
-    label: &str,
-) -> Result<String, String> {
-    let response = http_client_auto()?
-        .get(url)
-        .header("User-Agent", "BiblioSmith-Launcher")
-        .send()
-        .await
-        .map_err(|err| format!("无法访问 {label} 公开 release 页面：{err}"))?;
-    let final_url = response.url().to_string();
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!(
-            "{label} 公开 release 页面请求失败：HTTP status {status} for url ({final_url})"
-        ));
-    }
-    latest_release_tag_from_url(&final_url)
-        .ok_or_else(|| format!("无法从 {label} 公开 release 页面解析最新版本：{final_url}"))
-}
-
-fn latest_release_tag_from_url(url: &str) -> Option<String> {
-    let marker = "/releases/tag/";
-    let (_, tag) = url.split_once(marker)?;
-    let tag = tag.split(['?', '#']).next()?.trim_matches('/');
-    if tag.is_empty() {
-        None
-    } else {
-        Some(tag.to_string())
-    }
-}
-
-fn opencode_asset_from_tag(tag: &str, asset_name: &str) -> GithubAsset {
-    GithubAsset {
-        name: asset_name.to_string(),
-        browser_download_url: github_release_download_url(
-            OPENCODE_REPO_RELEASE_DOWNLOAD_BASE,
-            tag,
-            asset_name,
-        ),
-        size: 0,
-    }
-}
-
-fn github_release_download_url(base: &str, tag: &str, asset_name: &str) -> String {
-    format!(
-        "{}/{}/{}",
-        base.trim_end_matches('/'),
-        tag.trim_matches('/'),
-        asset_name.trim_start_matches('/')
-    )
-}
-
-fn github_error_summary(body: &str) -> String {
-    let lower = body.to_ascii_lowercase();
-    if lower.contains("rate limit") {
-        " (GitHub API rate limit exceeded)".into()
-    } else {
-        String::new()
-    }
-}
-
-fn should_use_public_release_fallback(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("403") || lower.contains("rate limit")
-}
-
-fn should_retry_with_auto_http(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    !should_use_public_release_fallback(error)
-        && (lower.contains("http2")
-            || lower.contains("stream")
-            || lower.contains("connection")
-            || lower.contains("timed out")
-            || lower.contains("timeout")
-            || lower.contains("operation timed out"))
-}
-
 fn launcher_current_version() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
-}
-
-fn normalize_version(value: &str) -> String {
-    let lower = value.trim().to_ascii_lowercase();
-    let candidate = if let Some((_, version)) = lower.rsplit_once("-v") {
-        version
-    } else if let Some(index) = lower.find(|ch: char| ch.is_ascii_digit()) {
-        &lower[index..]
-    } else {
-        lower.trim_start_matches('v')
-    };
-    candidate.trim_start_matches('v').to_string()
-}
-
-fn is_remote_version_newer(remote: &str, installed: &str) -> bool {
-    let remote_normalized = normalize_version(remote);
-    let installed_normalized = normalize_version(installed);
-    if remote_normalized == installed_normalized {
-        return false;
-    }
-    match compare_version_parts(&remote_normalized, &installed_normalized) {
-        Some(ordering) => ordering > 0,
-        None => true,
-    }
-}
-
-fn compare_version_parts(remote: &str, installed: &str) -> Option<i8> {
-    let remote_parts = numeric_version_parts(remote)?;
-    let installed_parts = numeric_version_parts(installed)?;
-    let max_len = remote_parts.len().max(installed_parts.len());
-    for index in 0..max_len {
-        let left = *remote_parts.get(index).unwrap_or(&0);
-        let right = *installed_parts.get(index).unwrap_or(&0);
-        if left > right {
-            return Some(1);
-        }
-        if left < right {
-            return Some(-1);
-        }
-    }
-    Some(0)
-}
-
-fn numeric_version_parts(value: &str) -> Option<Vec<u64>> {
-    let cleaned = value
-        .trim()
-        .split(['-', '+'])
-        .next()
-        .unwrap_or_default()
-        .trim();
-    if cleaned.is_empty() {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for part in cleaned.split('.') {
-        if part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()) {
-            return None;
-        }
-        parts.push(part.parse::<u64>().ok()?);
-    }
-    Some(parts)
-}
-
-fn opencode_asset_name() -> Result<String, String> {
-    let arch = std::env::consts::ARCH;
-    let asset = match (std::env::consts::OS, arch) {
-        ("windows", "x86_64") => "opencode-desktop-win-x64.exe",
-        ("windows", "aarch64") => "opencode-desktop-win-arm64.exe",
-        ("macos", "x86_64") => "opencode-desktop-mac-x64.dmg",
-        ("macos", "aarch64") => "opencode-desktop-mac-arm64.dmg",
-        ("linux", "x86_64") => "opencode-desktop-linux-x86_64.AppImage",
-        ("linux", "aarch64") => "opencode-desktop-linux-arm64.AppImage",
-        _ => {
-            return Err(format!(
-                "当前系统暂不支持自动下载 OpenCode Desktop：{} {}",
-                std::env::consts::OS,
-                arch
-            ))
-        }
-    };
-    Ok(asset.into())
-}
-
-fn opencode_install_root() -> Result<PathBuf, String> {
-    let base = dirs::data_local_dir().ok_or_else(|| "无法定位用户本地数据目录。".to_string())?;
-    Ok(base
-        .join("BiblioSmith")
-        .join("tools")
-        .join("opencode-desktop"))
-}
-
-fn opencode_client_candidates(install_root: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(state) = read_opencode_state(install_root) {
-        let installer = PathBuf::from(state.installer);
-        if cfg!(target_os = "linux") {
-            push_candidate(&mut candidates, installer);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            let local_app_data = PathBuf::from(local_app_data);
-            for folder in [
-                "OpenCode",
-                "opencode",
-                "OpenCode Desktop",
-                "opencode-desktop",
-                "@opencode-aidesktop",
-            ] {
-                for executable in [
-                    "OpenCode.exe",
-                    "OpenCode Desktop.exe",
-                    "opencode.exe",
-                    "opencode-desktop.exe",
-                ] {
-                    push_candidate(
-                        &mut candidates,
-                        local_app_data
-                            .join("Programs")
-                            .join(folder)
-                            .join(executable),
-                    );
-                }
-            }
-            push_candidate(
-                &mut candidates,
-                local_app_data
-                    .join("Microsoft")
-                    .join("WindowsApps")
-                    .join("OpenCode.exe"),
-            );
-            push_candidate(
-                &mut candidates,
-                local_app_data
-                    .join("Microsoft")
-                    .join("WindowsApps")
-                    .join("opencode.exe"),
-            );
-            find_opencode_windows_apps(&local_app_data.join("Programs"), 3, &mut candidates);
-        }
-        if let Ok(program_files) = std::env::var("ProgramFiles") {
-            let program_files = PathBuf::from(program_files);
-            for folder in [
-                "OpenCode",
-                "opencode",
-                "OpenCode Desktop",
-                "opencode-desktop",
-            ] {
-                for executable in [
-                    "OpenCode.exe",
-                    "OpenCode Desktop.exe",
-                    "opencode.exe",
-                    "opencode-desktop.exe",
-                ] {
-                    push_candidate(&mut candidates, program_files.join(folder).join(executable));
-                }
-            }
-            find_opencode_windows_apps(&program_files, 2, &mut candidates);
-        }
-        if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
-            let program_files_x86 = PathBuf::from(program_files_x86);
-            for folder in [
-                "OpenCode",
-                "opencode",
-                "OpenCode Desktop",
-                "opencode-desktop",
-            ] {
-                for executable in [
-                    "OpenCode.exe",
-                    "OpenCode Desktop.exe",
-                    "opencode.exe",
-                    "opencode-desktop.exe",
-                ] {
-                    push_candidate(
-                        &mut candidates,
-                        program_files_x86.join(folder).join(executable),
-                    );
-                }
-            }
-            find_opencode_windows_apps(&program_files_x86, 2, &mut candidates);
-        }
-        if let Ok(app_data) = std::env::var("APPDATA") {
-            let start_menu = PathBuf::from(app_data)
-                .join("Microsoft")
-                .join("Windows")
-                .join("Start Menu")
-                .join("Programs");
-            find_opencode_windows_apps(&start_menu, 3, &mut candidates);
-        }
-        if let Ok(program_data) = std::env::var("ProgramData") {
-            let start_menu = PathBuf::from(program_data)
-                .join("Microsoft")
-                .join("Windows")
-                .join("Start Menu")
-                .join("Programs");
-            find_opencode_windows_apps(&start_menu, 3, &mut candidates);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        push_candidate(&mut candidates, PathBuf::from("/Applications/OpenCode.app"));
-        if let Some(home) = dirs::home_dir() {
-            push_candidate(
-                &mut candidates,
-                home.join("Applications").join("OpenCode.app"),
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        push_candidate(&mut candidates, PathBuf::from("/usr/bin/opencode-desktop"));
-        push_candidate(
-            &mut candidates,
-            PathBuf::from("/usr/local/bin/opencode-desktop"),
-        );
-        push_candidate(
-            &mut candidates,
-            install_root
-                .join("downloads")
-                .join("opencode-desktop-linux-x86_64.AppImage"),
-        );
-        push_candidate(
-            &mut candidates,
-            install_root
-                .join("downloads")
-                .join("opencode-desktop-linux-arm64.AppImage"),
-        );
-    }
-
-    candidates
-}
-
-fn push_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
-    if !candidates.iter().any(|candidate| candidate == &path) {
-        candidates.push(path);
-    }
-}
-
-fn detected_opencode_client(install_root: &Path) -> Option<PathBuf> {
-    opencode_client_candidates(install_root)
-        .into_iter()
-        .find(|candidate| candidate.exists())
-}
-
-#[cfg(target_os = "windows")]
-fn is_opencode_process_running() -> bool {
-    let output = Command::new("tasklist")
-        .args(["/FO", "CSV", "/NH"])
-        .creation_flags(0x08000000)
-        .output();
-    let Ok(output) = output else {
-        return false;
-    };
-    let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-    [
-        "opencode.exe",
-        "opencode desktop.exe",
-        "opencode-desktop.exe",
-    ]
-    .iter()
-    .any(|name| text.contains(name))
-}
-
-#[cfg(target_os = "macos")]
-fn is_opencode_process_running() -> bool {
-    Command::new("pgrep")
-        .args(["-f", "OpenCode"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn is_opencode_process_running() -> bool {
-    Command::new("pgrep")
-        .args(["-f", "opencode"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "windows")]
-fn find_opencode_windows_apps(base: &Path, depth: usize, candidates: &mut Vec<PathBuf>) {
-    if depth == 0 || candidates.len() > 80 || !base.is_dir() {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(base) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if candidates.len() > 80 {
-            return;
-        }
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_lowercase();
-        if path.is_file() {
-            let is_launcher = (name.ends_with(".exe") || name.ends_with(".lnk"))
-                && name.contains("opencode")
-                && (name.contains("desktop")
-                    || name == "opencode.exe"
-                    || name == "opencode.lnk"
-                    || name == "opencode desktop.lnk");
-            if is_launcher {
-                push_candidate(candidates, path);
-            }
-        } else if path.is_dir() && (depth > 2 || name.contains("opencode")) {
-            find_opencode_windows_apps(&path, depth - 1, candidates);
-        }
-    }
 }
 
 fn is_proxy_configured() -> bool {
@@ -5723,208 +4591,10 @@ fn is_proxy_configured() -> bool {
     })
 }
 
-fn read_opencode_state(install_root: &Path) -> Option<OpenCodeInstallState> {
-    let path = install_root.join("install-state.json");
-    let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-fn write_opencode_state(
-    install_root: &Path,
-    installer: &Path,
-    version: &str,
-    source: &str,
-    repo_root: &Path,
-) -> Result<(), String> {
-    fs::create_dir_all(install_root).map_err(|err| err.to_string())?;
-    let state = OpenCodeInstallState {
-        tool: "opencode-desktop".into(),
-        installed_at: chrono::Utc::now().to_rfc3339(),
-        install_root: install_root.display().to_string(),
-        installer: installer.display().to_string(),
-        platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-        version: version.into(),
-        source: source.into(),
-        repository_root: repo_root.display().to_string(),
-    };
-    let text = serde_json::to_string_pretty(&state).map_err(|err| err.to_string())?;
-    fs::write(install_root.join("install-state.json"), text).map_err(|err| err.to_string())
-}
-
-async fn download_file(
-    app: &tauri::AppHandle,
-    progress_event: &'static str,
-    label: &str,
-    url: &str,
-    destination: &Path,
-    total_bytes: u64,
-    cancel_flag: Option<&'static AtomicBool>,
-) -> Result<(), String> {
-    if total_bytes > 0 && file_size(destination) >= total_bytes {
-        append_launcher_log(
-            "INFO",
-            format!(
-                "{label} download skipped because destination already exists path={} size_bytes={}",
-                display_path(destination),
-                file_size(destination)
-            ),
-        );
-        emit_download_progress(app, progress_event, total_bytes, total_bytes);
-        return Ok(());
-    }
-    let part_destination = partial_download_path(destination)?;
-    let mut existing_bytes = fs::metadata(&part_destination)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    let client = http_client()?;
-    let mut request = client.get(url).header("User-Agent", "BiblioSmith-Launcher");
-    if existing_bytes > 0 {
-        request = request.header(RANGE, format!("bytes={existing_bytes}-"));
-    }
-
-    let response = request
-        .send()
-        .await
-        .map_err(|err| format!("下载 {label} 失败：{err}。请检查网络、VPN 或代理设置。"))?
-        .error_for_status()
-        .map_err(|err| format!("下载 {label} 失败：{err}。请检查网络、VPN 或代理设置。"))?;
-    let response_content_length = response.content_length().unwrap_or_default();
-
-    let can_resume = existing_bytes > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
-    if existing_bytes > 0 && !can_resume {
-        append_launcher_log(
-            "INFO",
-            format!(
-                "{label} download restarting because server did not resume path={} previous_partial_bytes={existing_bytes}",
-                display_path(&part_destination)
-            ),
-        );
-        existing_bytes = 0;
-    }
-
-    let mut file = if can_resume {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&part_destination)
-            .await
-            .map_err(|err| err.to_string())?
-    } else {
-        File::create(&part_destination)
-            .await
-            .map_err(|err| err.to_string())?
-    };
-    let progress_total = if total_bytes > 0 {
-        total_bytes
-    } else {
-        response_content_length + existing_bytes
-    };
-    append_launcher_log(
-        "INFO",
-        format!(
-            "{label} download started url={url} destination={} partial={} resume={} existing_bytes={} content_length={} progress_total={}",
-            display_path(destination),
-            display_path(&part_destination),
-            can_resume,
-            existing_bytes,
-            response_content_length,
-            progress_total
-        ),
-    );
-    let mut downloaded = existing_bytes;
-    let mut stream = response.bytes_stream();
-    emit_download_progress(app, progress_event, downloaded, progress_total);
-
-    while let Some(chunk) = stream.next().await {
-        if download_cancelled(cancel_flag) {
-            file.flush().await.map_err(|err| err.to_string())?;
-            append_launcher_log(
-                "WARN",
-                format!(
-                    "{label} download cancelled downloaded_bytes={} total_bytes={} partial={}",
-                    downloaded,
-                    progress_total,
-                    display_path(&part_destination)
-                ),
-            );
-            return Err(format!("{label} 下载已停止，已保留临时文件，下次可继续。"));
-        }
-        let chunk = chunk
-            .map_err(|err| format!("下载 {label} 失败：{err}。请检查网络、VPN 或代理设置。"))?;
-        file.write_all(&chunk)
-            .await
-            .map_err(|err| err.to_string())?;
-        downloaded += chunk.len() as u64;
-        emit_download_progress(app, progress_event, downloaded, progress_total);
-    }
-    file.flush().await.map_err(|err| err.to_string())?;
-    if progress_total > 0 && downloaded < progress_total {
-        append_launcher_log(
-            "WARN",
-            format!(
-                "{label} download incomplete downloaded_bytes={} total_bytes={} partial={}",
-                downloaded,
-                progress_total,
-                display_path(&part_destination)
-            ),
-        );
-        return Err(format!(
-            "{label} 下载未完成，已保留临时文件以便下次继续：{downloaded} / {progress_total} bytes"
-        ));
-    }
-    if destination.exists() {
-        fs::remove_file(destination).map_err(|err| err.to_string())?;
-    }
-    fs::rename(&part_destination, destination).map_err(|err| err.to_string())?;
-    append_launcher_log(
-        "INFO",
-        format!(
-            "{label} download completed destination={} downloaded_bytes={} total_bytes={}",
-            display_path(destination),
-            downloaded,
-            progress_total
-        ),
-    );
-    Ok(())
-}
-
-fn download_cancelled(cancel_flag: Option<&'static AtomicBool>) -> bool {
-    cancel_flag
-        .map(|flag| flag.load(Ordering::Acquire))
-        .unwrap_or(false)
-}
-
 fn file_size(path: &Path) -> u64 {
     fs::metadata(path)
         .map(|metadata| metadata.len())
         .unwrap_or(0)
-}
-
-fn partial_download_path(destination: &Path) -> Result<PathBuf, String> {
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "无法解析下载文件名。".to_string())?;
-    Ok(destination.with_file_name(format!("{file_name}.part")))
-}
-
-fn emit_download_progress(
-    app: &tauri::AppHandle,
-    progress_event: &str,
-    downloaded: u64,
-    total: u64,
-) {
-    let payload = DownloadProgress {
-        percent: download_percent(downloaded, total),
-        downloaded_bytes: downloaded,
-        total_bytes: total,
-        message: None,
-        state: None,
-    };
-    let _ = app.emit(progress_event, payload.clone());
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.emit(progress_event, payload);
-    }
 }
 
 fn download_percent(downloaded: u64, total: u64) -> f64 {
@@ -6062,15 +4732,9 @@ pub fn run() {
             update_bibliosmith,
             read_project_document,
             read_project_document_path,
-            check_launcher_updates,
             minimize_main_window,
             toggle_main_window_maximized,
             close_main_window_to_tray,
-            check_opencode_updates,
-            check_opencode_local_status,
-            download_and_open_opencode,
-            cancel_opencode_download,
-            launch_opencode_client,
             open_repo_folder,
             open_books_folder,
             book_pipeline::get_book_pipeline_state,
@@ -6321,49 +4985,6 @@ mod tests {
         ]));
     }
 
-    #[test]
-    fn github_rate_limit_cooldown_uses_reset_header() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
-        headers.insert("x-ratelimit-reset", "2000".parse().unwrap());
-
-        assert_eq!(
-            github_rate_limit_cooldown_until(&headers, 1_000),
-            Some(2_030)
-        );
-    }
-
-    #[test]
-    fn opencode_release_cache_is_remote_only_and_valid_for_ten_minutes() {
-        let cache = OpenCodeReleaseCache {
-            fetched_at_unix: 2_000,
-            latest_version: "v1.15.10".into(),
-            asset: GithubAsset {
-                name: "opencode-desktop-win-x64.exe".into(),
-                browser_download_url:
-                    "https://github.com/anomalyco/opencode/releases/download/v1.15.10/opencode-desktop-win-x64.exe"
-                        .into(),
-                size: 123,
-            },
-        };
-
-        assert!(opencode_release_cache_is_fresh(
-            &cache,
-            "opencode-desktop-win-x64.exe",
-            2_599
-        ));
-        assert!(!opencode_release_cache_is_fresh(
-            &cache,
-            "opencode-desktop-win-x64.exe",
-            2_601
-        ));
-        assert!(!opencode_release_cache_is_fresh(
-            &cache,
-            "opencode-desktop-aarch64.dmg",
-            2_100
-        ));
-    }
-
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_expand_archive_command_uses_environment_paths() {
@@ -6397,46 +5018,6 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn opencode_launch_uses_bibliosmith_directory_as_cwd_and_argument() {
-        let candidate = Path::new(r"C:\Users\minicat\AppData\Local\Programs\OpenCode\OpenCode.exe");
-        let working_dir = Path::new(r"D:\BiblioSmith");
-
-        let spec = windows_opencode_launch_spec(candidate, working_dir);
-
-        assert_eq!(spec.program, candidate);
-        assert_eq!(spec.working_dir, working_dir);
-        assert_eq!(spec.args, vec![r"D:\BiblioSmith".to_string()]);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn opencode_shortcut_launch_sets_start_directory() {
-        let candidate = Path::new(
-            r"C:\Users\minicat\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OpenCode.lnk",
-        );
-        let working_dir = Path::new(r"D:\BiblioSmith");
-
-        let spec = windows_opencode_launch_spec(candidate, working_dir);
-
-        assert_eq!(spec.program, PathBuf::from("cmd"));
-        assert_eq!(
-            spec.args,
-            vec![
-                "/D".to_string(),
-                "/C".to_string(),
-                "start".to_string(),
-                "".to_string(),
-                "/D".to_string(),
-                r"D:\BiblioSmith".to_string(),
-                candidate.display().to_string(),
-                r"D:\BiblioSmith".to_string(),
-            ]
-        );
-        assert_eq!(spec.working_dir, working_dir);
-    }
-
     #[test]
     fn archive_entry_paths_strip_github_root_and_reject_traversal() {
         assert_eq!(
@@ -6455,56 +5036,8 @@ mod tests {
     }
 
     #[test]
-    fn http_client_builds_with_http1_transport() {
-        assert!(http_client().is_ok());
-        assert!(http_client_auto().is_ok());
-    }
-
-    #[test]
-    fn public_release_fallback_extracts_tag_and_asset_url() {
-        assert_eq!(
-            latest_release_tag_from_url(
-                "https://github.com/anomalyco/opencode/releases/tag/v1.15.10"
-            ),
-            Some("v1.15.10".to_string())
-        );
-        assert_eq!(
-            latest_release_tag_from_url(
-                "https://github.com/anomalyco/opencode/releases/tag/v1.15.10?expanded=true"
-            ),
-            Some("v1.15.10".to_string())
-        );
-        assert_eq!(
-            github_release_download_url(
-                "https://github.com/anomalyco/opencode/releases/download",
-                "v1.15.10",
-                "opencode-desktop-win-x64.exe"
-            ),
-            "https://github.com/anomalyco/opencode/releases/download/v1.15.10/opencode-desktop-win-x64.exe"
-        );
-    }
-
-    #[test]
-    fn github_rate_limit_uses_public_release_fallback_not_http_retry() {
-        let error = "OpenCode release 请求失败：HTTP status 403 (GitHub API rate limit exceeded)";
-        assert!(should_use_public_release_fallback(error));
-        assert!(!should_retry_with_auto_http(error));
-        assert!(should_retry_with_auto_http("connection reset by peer"));
-    }
-
-    #[test]
     fn taskkill_args_target_entire_process_tree() {
         assert_eq!(taskkill_tree_args(1234), vec!["/PID", "1234", "/T", "/F"]);
-    }
-
-    #[test]
-    fn remote_version_check_only_updates_forward() {
-        assert!(is_remote_version_newer("v0.0.3", "v0.0.1"));
-        assert!(is_remote_version_newer("v1.10.0", "v1.9.9"));
-        assert!(is_remote_version_newer("v2026.05.23", "v2025.05.25"));
-        assert!(!is_remote_version_newer("v0.0.3", "v0.0.3"));
-        assert!(!is_remote_version_newer("v0.0.2", "v0.0.3"));
-        assert!(!is_remote_version_newer("v1.0.0", "v1.0.1"));
     }
 
     #[test]
@@ -6789,24 +5322,6 @@ EN:
         assert!(message.contains("本地多 3 个 commit"));
         assert!(message.contains("GitHub 多 64 个 commit"));
         assert!(message.contains("不会自动 merge/rebase"));
-    }
-
-    #[test]
-    fn launcher_release_tag_prefix_does_not_force_same_version_update() {
-        assert_eq!(normalize_version("bibliosmith-launcher-v1.3.4"), "1.3.4");
-        assert_eq!(normalize_version("bibliosmith-launcher-1.3.4"), "1.3.4");
-        assert!(!is_remote_version_newer(
-            "bibliosmith-launcher-v1.3.4",
-            "v1.3.4"
-        ));
-        assert!(is_remote_version_newer(
-            "bibliosmith-launcher-v1.3.5",
-            "v1.3.4"
-        ));
-        assert!(!is_remote_version_newer(
-            "bibliosmith-launcher-v1.3.3",
-            "v1.3.4"
-        ));
     }
 
     #[test]

@@ -20,7 +20,6 @@ import {
   DownloadProgress,
   EmbeddingConnectionResult,
   EmbeddingStatus,
-  LauncherUpdateInfo,
   LauncherState,
   BiblioSmithUpdateInfo,
   ModelCatalog,
@@ -29,8 +28,6 @@ import {
   OcrConnectionResult,
   OcrCredentialsStatus,
   NodeModulesStatus,
-  OpenCodeLocalStatus,
-  OpenCodeUpdateInfo,
   ProjectDocument,
   ProxyAutoDetectResult,
   ProxyTestResult,
@@ -59,10 +56,6 @@ function previewState(): LauncherState {
     dirty: false,
     proxyConfigured: false,
     platform: "preview",
-    opencodeInstallRoot: "BiblioSmith/tools/opencode-desktop",
-    opencodeInstalledVersion: "v1.2.3",
-    opencodeClientPath: "C:\\Users\\preview\\AppData\\Local\\Programs\\OpenCode\\OpenCode.exe",
-    opencodeAvailable: true,
   };
 }
 
@@ -907,10 +900,11 @@ BiblioSmith 用于处理用户已经拥有的本地 EPUB、PDF、论文和书稿
 `
       : `# How to use
 
-## 处理本地书籍
+## 开始使用
 
-- 在 Launcher 中选择本地 EPUB、PDF 或 Markdown。
+- 在 BiblioSmith Launcher 的流水线页选择本地 EPUB、PDF 或 Markdown 并新建任务。
 - 完成抽取、翻译、审校后，从 output/reading/ 打开产物。
+- 阅读 [README](./README.zh-CN.md)。
 `;
     return Promise.resolve<ProjectDocument>({
       kind,
@@ -929,25 +923,6 @@ export function readProjectDocumentPath(relativePath: string, locale: string) {
   return invoke<ProjectDocument>("read_project_document_path", { relativePath, locale });
 }
 
-export function checkLauncherUpdates() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<LauncherUpdateInfo>({
-      installedVersion: "v1.4.0",
-      latestVersion: "v1.4.0",
-      hasUpdate: false,
-      releaseNotes: null,
-      assetName: "",
-      assetSize: 0,
-      assetUrl: "",
-      installRoot: "",
-      installerPath: null,
-      installerDownloaded: false,
-      partialDownloadedBytes: 0,
-    });
-  }
-  return invoke<LauncherUpdateInfo>("check_launcher_updates");
-}
-
 export function minimizeMainWindow() {
   if (!isTauriRuntime()) return Promise.resolve();
   return invoke<void>("minimize_main_window");
@@ -961,59 +936,6 @@ export function toggleMainWindowMaximized() {
 export function closeMainWindowToTray() {
   if (!isTauriRuntime()) return Promise.resolve();
   return invoke<void>("close_main_window_to_tray");
-}
-
-export function checkOpenCodeUpdates() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<OpenCodeUpdateInfo>({
-      installedVersion: "v1.2.3",
-      latestVersion: "v1.2.3",
-      hasUpdate: false,
-      assetName: "opencode-desktop-win-x64.exe",
-      assetSize: 156000000,
-      assetUrl: "https://github.com/anomalyco/opencode/releases/latest",
-      installRoot: "BiblioSmith/tools/opencode-desktop",
-      clientPath: "C:\\Users\\preview\\AppData\\Local\\Programs\\OpenCode\\OpenCode.exe",
-      clientAvailable: true,
-      installerPath: "BiblioSmith/tools/opencode-desktop/downloads/opencode-desktop-win-x64.exe",
-      installerDownloaded: true,
-      partialDownloadedBytes: 0,
-    });
-  }
-  return invoke<OpenCodeUpdateInfo>("check_opencode_updates");
-}
-
-export function checkOpenCodeLocalStatus() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<OpenCodeLocalStatus>({
-      installedVersion: "v1.2.3",
-      installRoot: "BiblioSmith/tools/opencode-desktop",
-      clientPath: "C:\\Users\\preview\\AppData\\Local\\Programs\\OpenCode\\OpenCode.exe",
-      clientAvailable: true,
-    });
-  }
-  return invoke<OpenCodeLocalStatus>("check_opencode_local_status");
-}
-
-export function downloadAndOpenOpenCode() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("download_and_open_opencode");
-}
-
-export function cancelOpenCodeDownload() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("cancel_opencode_download");
-}
-
-export function launchOpenCodeClient() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("launch_opencode_client");
 }
 
 export function openRepoFolder() {
@@ -1176,13 +1098,6 @@ export function runBookPipelineJob(jobId: string) {
         { kind: "translation_project", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview", sha256: null, zoteroKey: null },
         { kind: "translation_source", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview/source/source.md", sha256: markdown.sha256, zoteroKey: null },
       );
-      if (job.source.translationStrategy === "reflection") {
-        job.artifacts.push(
-          { kind: "translation_draft", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview/chapters/translated/000_reflection_draft.md", sha256: "preview-sha256", zoteroKey: null },
-          { kind: "translation_reflection", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview/qa/reflection_strategy.md", sha256: "preview-sha256", zoteroKey: null },
-          { kind: "translation_revised", path: "/tmp/bibliosmith-preview/books/local/zh-Hans/001_preview/chapters/final/000_reflection_revised.md", sha256: "preview-sha256", zoteroKey: null },
-        );
-      }
     }
     job.updatedAt = bookPipelineNow();
     derivePreviewBookPipelineJob(job);
@@ -1204,7 +1119,7 @@ export function retryBookPipelineJob(jobId: string) {
   return invoke<BookPipelineJob>("retry_book_pipeline_job", { jobId });
 }
 
-export function deleteBookPipelineJob(jobId: string) {
+export function deleteBookPipelineJob(jobId: string, childId?: string | null) {
   if (!isTauriRuntime()) {
     previewBookPipelineJobs = previewBookPipelineJobs.filter((job) => job.id !== jobId);
     previewBookPipelineRevision += 1;
@@ -1216,6 +1131,7 @@ export function deleteBookPipelineJob(jobId: string) {
   }
   return invoke<BookPipelineState>("delete_book_pipeline_job", {
     jobId,
+    childId: childId ?? null,
     explicitApproval: true,
   });
 }
@@ -1269,6 +1185,25 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
     return Promise.resolve({ ...job });
   }
   return invoke<BookPipelineJob>("approve_book_pipeline_gate", { jobId, childId, stageId, explicitApproval: true });
+}
+
+/** Record that a person opened the built book in a real reader. */
+export async function recordBookPipelineReaderEvidence(
+  jobId: string,
+  childId: string,
+  artifactKind: string,
+  reader: string,
+  readerVersion: string,
+  conclusion: string,
+): Promise<BookPipelineJob> {
+  return invoke<BookPipelineJob>("record_book_pipeline_reader_evidence", {
+    jobId,
+    childId,
+    artifactKind,
+    reader,
+    readerVersion,
+    conclusion,
+  });
 }
 
 /** Re-route a book the pipeline held back, without deleting and re-queueing it. */
@@ -1454,12 +1389,6 @@ export function readBookPipelineTranslationSample(jobId: string, childId: string
   return invoke<BookPipelineTranslationSampleReport>("read_book_pipeline_translation_sample", { jobId, childId });
 }
 
-
-export function listenOpenCodeDownloadProgress(
-  callback: (payload: DownloadProgress) => void,
-) {
-  return listenDownloadProgress("opencode-download-progress", callback);
-}
 
 function listenDownloadProgress(
   eventName: string,

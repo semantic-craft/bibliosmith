@@ -4,7 +4,7 @@
 
 `zsearch` is a single command that turns your local Zotero library into a queryable knowledge base your AI agents (Claude Code, ChatGPT, Codex, Cursor, anything that talks to a CLI or stdio MCP) can actually use:
 
-- **`zsearch query "fair use AI"`** — semantic top-K across **English + Chinese + 30+ languages** in one shot.
+- **`zsearch query "fair use AI"`** — hybrid BM25 + vector top-K across **English + Chinese + 30+ languages** in one shot.
 - **`zsearch get <KEY>` / `ls` / `tags` / `recent` / `grep` / `notes`** — fast read-only browsing of your `zotero.sqlite`.
 - **`zsearch add doi <DOI>` / `ingest arxiv|ssrn|cnki|westlaw`** — pull a paper from Crossref, arXiv, SSRN, CNKI, or Westlaw and POST it straight into your library.
 - **`zsearch parse <pdf>`** — `mineru`-quality PDF → Markdown (double-column / formulas / Chinese OCR) — better than the PyMuPDF most tools ship with.
@@ -20,8 +20,8 @@
 |---|---|---|
 | **Context cost** | Pay-per-use. The agent loads only the output of the command it asked for — no tool schemas sit in the context window when unused. | Standardized. The agent sees the full tool catalog up front, which is great for discovery but costs context tokens whether you use the tools or not. |
 | **Composability** | Native Unix pipes — `zsearch query "..." --json \| jq ...`, scriptable in `bash` / `make` / CI. | One-shot tool calls only; no piping between MCP tools. |
-| **Verification** | Exit codes + stderr — agent self-corrects on failure without a human in the loop. | JSON tool results — the model has to interpret outcomes itself. |
-| **Discovery** | Agent reads `--help` once and is good. | Listed automatically by any MCP client (Claude Desktop, IDEs, multi-tool harnesses). |
+| **Verification** | Typed exit codes plus a stable JSON error envelope tell the agent whether to retry or fix its input. | JSON tool results — the model has to interpret outcomes itself. |
+| **Discovery** | `zsearch schema` returns both CLI trees, their parameters, output contracts, and read/write safety markers. | Listed automatically by any MCP client (Claude Desktop, IDEs, multi-tool harnesses). |
 | **Best fit** | Claude Code, Codex, Cursor terminal, autonomous agents, CI/CD pipelines. | Claude Desktop, IDE chat panels, agent harnesses that orchestrate many MCP tools at once. |
 
 This mirrors Firecrawl's positioning ([Why CLIs Are Better for AI Coding Agents](https://www.firecrawl.dev/blog/why-clis-are-better-for-agents)): **CLIs are the more token-efficient default; MCP is the right choice when your client only speaks MCP, or when you want a uniform tool-discovery surface across many services.** Most valid agent workflows use both. We ship both so you don't have to choose up front.
@@ -58,7 +58,7 @@ If you live in a terminal-native AI agent, paste the prompt below and let it do 
 >
 > 1. `git clone` the repo into the current directory (or `~/Projects/zotero-cli-agent` if I'm not already in a project folder).
 > 2. Create a `uv` venv and run `uv pip install -e ".[hf,mcp]"` so I get free local embeddings and the optional MCP server.
-> 3. Ask me for `ZOTERO_API_KEY` and `ZOTERO_LIBRARY_ID` (page: https://www.zotero.org/settings/keys). Default `ZOTERO_LIBRARY_TYPE=users` and `ZSEARCH_EMBEDDING_BACKEND=gemini` unless I say otherwise. In the books-translation monorepo, write them only to the **repository-root `.env`** after confirming it is gitignored; for a standalone install, export them in the process environment. Never write credentials into a global shell rc.
+> 3. Ask me for `ZOTERO_API_KEY` and `ZOTERO_LIBRARY_ID` (page: https://www.zotero.org/settings/keys). Default `ZOTERO_LIBRARY_TYPE=users` and `ZSEARCH_EMBEDDING_BACKEND=gemini` unless I say otherwise. In the bibliosmith monorepo, write them only to the **repository-root `.env`** after confirming it is gitignored; for a standalone install, export them in the process environment. Never write credentials into a global shell rc.
 > 4. Run `zsearch info` to confirm the install, then `zsearch sync` to build the vector index. Show me the output of both.
 > 5. If anything fails, paste the full error verbatim and stop — don't paper over it.
 
@@ -66,7 +66,7 @@ Works in any agent that can run shell commands and read files (Claude Code, Code
 
 ## Configure
 
-In a books-translation source checkout, `zsearch` and `zfulltext` load the repository-root `.env`; already exported variables take precedence. A standalone `uv tool install` has no monorepo root to discover and keeps the original behavior of reading only the process environment. No credential values belong in tracked files.
+In a bibliosmith source checkout, `zsearch` and `zfulltext` load the repository-root `.env`; already exported variables take precedence. A standalone `uv tool install` has no monorepo root to discover and keeps the original behavior of reading only the process environment. No credential values belong in tracked files.
 
 ```bash
 # required for write-side commands (add, edit, tag, coll, note, ingest --add):
@@ -93,7 +93,7 @@ The defaults assume your Zotero data lives at `~/Zotero/zotero.sqlite`; pass `--
 After merge, a user with real credentials can perform the HITL query required by issue #70. This contacts the configured embedding provider, so agents must not run it during offline verification:
 
 ```bash
-cd $HOME/Projects/books-translation
+cd $HOME/Projects/bibliosmith
 uv run --package zotero-cli-agent zsearch query "credential smoke test" -k 1
 ```
 
@@ -108,8 +108,10 @@ zsearch info                 # show vector store path, dim, item count
 ## Search
 
 ```bash
-zsearch query "fair use AI"                       # top-10 multilingual semantic
+zsearch query "fair use AI"                       # top-10 hybrid BM25 + vector (default)
 zsearch query "法学方法论" -k 5                    # Chinese works just as well as English
+zsearch query "GDPR" --mode keyword               # local FTS5/BM25 only; no embedding call
+zsearch query "fair use AI" --mode vector          # preserve vector-only retrieval
 zsearch query "GDPR" --type book                  # filter by Zotero item type
 zsearch query "AI copyright" --year 2020..        # year range filter (Rust-style)
 zsearch query "privacy" --tag IP                  # tag filter
@@ -125,7 +127,7 @@ zsearch ls                                        # list all collections
 zsearch ls <COLL_KEY>                             # list items in a collection
 zsearch tags -n 50                                # most-used tags
 zsearch recent -n 20                              # recently modified items
-zsearch grep "fair use"                           # literal substring search over title + abstract
+zsearch grep "fair use"                           # SQL substring search over title, abstract + creators
 zsearch notes <KEY>                               # notes attached to an item
 zsearch open <KEY>                                # launch the item in the Zotero desktop app
 ```
@@ -189,11 +191,31 @@ zsearch enrich <KEY> --apply                      # PATCH the item with new fiel
 
 ### Option 1 — pipe to anything
 
-Every command takes `--json` or prints clean tables. Any agent that can call a shell can use `zsearch`. No schema you have to import, no broker process to keep alive.
+`zsearch` and `zfulltext` automatically emit a stable envelope when stdout is
+not a TTY. Interactive terminals keep the existing Rich tables. Set
+`ZSEARCH_FORMAT=json` or `ZSEARCH_FORMAT=table` to override detection for both
+entry points; an explicit `--json` still requests the envelope on commands that
+already expose that flag.
 
 ```bash
-zsearch query "fair use AI" --json | jq '.[0].key' | xargs zsearch get
+zsearch query "fair use AI" | jq -r '.data[0].key' | xargs zsearch get
+zsearch schema | jq '.data.commands[] | select(.safety == "write")'
 ```
+
+Successful machine output has the shape
+`{"ok":true,"data":...,"meta":{"schema_version":"zotero-cli-agent-v1","cli_version":"..."}}`.
+Failures use `{"ok":false,"error":{"code":...,"message":...,"retryable":...,"hint":...},"meta":...}`.
+Stable exit classes are: `1` runtime, `2` authentication, `3` validation,
+`4` not found, `5` retryable network failure, and `6` version conflict.
+
+Four commands retain their pre-existing protocol instead of the envelope:
+`zsearch collection-snapshot` and `zfulltext profile` / `index` keep their bare
+launcher-facing JSON, while `zsearch serve` keeps stdio MCP framing. Their
+`output_contract` values are visible in `zsearch schema`.
+
+Agent skills should discover parameters through `zsearch schema`, inspect
+`error.retryable` before retrying, and force `ZSEARCH_FORMAT=table` only when
+they intentionally need human-formatted output.
 
 ### Option 2 — stdio MCP server
 
@@ -229,7 +251,7 @@ zotero_cli.zotero_db                        # SQL extraction (titles, abstracts,
         ↓
 zotero_cli.embed.make_embedder()            # Gemini (default) / Qwen text-embedding-v4 / Jina v3
         ↓
-zotero_cli.vector_store.SQLiteVecStore      # sqlite-vec single-file, we own the lifecycle
+zotero_cli.vector_store.SQLiteVecStore      # sqlite-vec + FTS5 single-file, one lifecycle
         ↓
 zsearch query / get / ls / ...              # CLI surface
 zsearch serve                               # optional stdio MCP wrapping the same calls

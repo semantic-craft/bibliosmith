@@ -39,6 +39,7 @@
   font-size: var(--fs-body);
   font-weight: 500;
   white-space: nowrap;
+  text-decoration: none;
 }
 
 .up-btn:hover:not(:disabled) {

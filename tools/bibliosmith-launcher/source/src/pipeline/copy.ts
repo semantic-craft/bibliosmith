@@ -241,16 +241,6 @@ export function pipelineCopy(locale: PipelineLocale) {
     deleteBookConfirmHint: zh
       ? "从书架移除这本书？磁盘上的已转换文件与 Zotero 附件都会保留，之后重新添加可复用。"
       : "Remove this book from the shelf? Converted files on disk and Zotero attachments are kept and can be reused if you re-add it.",
-    // A collection queued many books under one job, and the shelf shows one row
-    // per book — but delete removes the whole job. Until the state model allows
-    // dropping a single book (its collection membership is frozen on purpose),
-    // the confirmation has to say how many books actually go.
-    deleteBookBatchConfirmHint: (n: number) =>
-      zh
-        ? `这本书属于一个 ${n} 本的批次。删除会把这 ${n} 本一起从书架移除 —— 磁盘上已转换的文件与 Zotero 附件保留，重新发车可复用。`
-        : `This book belongs to a batch of ${n}. Deleting removes all ${n} from the shelf — converted files on disk and Zotero attachments are kept and can be reused if you re-add them.`,
-    deleteBookBatchConfirm: (n: number) =>
-      zh ? `确认删除这 ${n} 本` : `Delete all ${n}`,
     deleteBookConfirm: zh ? "确认删除" : "Confirm delete",
     deleteBookCancel: zh ? "取消" : "Cancel",
     deleteBookDone: zh ? "已从书架删除" : "Removed from the shelf",
@@ -285,6 +275,24 @@ export function pipelineCopy(locale: PipelineLocale) {
     stageFinishedLabel: zh ? "完成于" : "Finished",
 
     // Artifacts tab
+    // Story 18's other half: EPUBCheck says the file is well-formed, a person
+    // says it actually reads. Only the second half needs a human to record it.
+    readerEvidenceTitle: zh ? "阅读器实测" : "Reader verification",
+    readerEvidenceHint: zh
+      ? "在真实阅读器里打开成品 EPUB 后，把结论记在这里。可选 —— 不记不影响晋升。记录会绑定当时的产物摘要，重新构建后自动标记为失效。"
+      : "After opening the built EPUB in a real reader, record what happened. Optional — leaving it blank blocks nothing. The record binds the artifact digest it was taken against and is marked stale once the book is rebuilt.",
+    readerEvidenceEmpty: zh ? "尚未记录任何阅读器实测。" : "No reader verification recorded yet.",
+    readerEvidenceName: zh ? "阅读器" : "Reader",
+    readerEvidenceVersion: zh ? "版本" : "Version",
+    readerEvidenceArtifact: zh ? "被检产物" : "Artifact",
+    readerEvidenceConclusion: zh ? "结论" : "Conclusion",
+    readerEvidenceRecord: zh ? "记录" : "Record",
+    readerEvidencePassed: zh ? "通过" : "passed",
+    readerEvidenceFailed: zh ? "未通过" : "failed",
+    readerEvidenceStale: zh ? "已失效（产物已变更）" : "stale (the artifact changed)",
+    readerEvidenceNeedsBuild: zh
+      ? "需要先构建出成品 EPUB 才能记录实测。"
+      : "A built EPUB is needed before reader verification can be recorded.",
     thArtifact: zh ? "工件" : "Artifact",
     thPath: zh ? "路径 / 位置" : "Path / location",
     thSha: zh ? "SHA-256" : "SHA-256",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AbstractSet, Any, Callable, Mapping, Sequence
@@ -13,6 +15,7 @@ from .glossary import (
     GlossaryEntry,
     bind_glossary_entries,
     find_glossary_violations,
+    find_variant_spans,
     parse_glossary_csv,
 )
 from .pipeline import (
@@ -23,6 +26,7 @@ from .pipeline import (
     translate_chunk_with_fallback,
 )
 from .placeholders import (
+    PLACEHOLDER_PATTERN,
     ProtectedMarkdown,
     protect_chunk_structure,
     protect_markdown_for_chunking,
@@ -46,6 +50,11 @@ class EngineError(Exception):
 
 MAX_CUSTOM_INSTRUCTION_CHARACTERS = 2000
 
+# Enough places to see a pattern, few enough that a book-length report stays
+# readable and small on the way through stdout into the job's state.
+MAX_VIOLATION_OCCURRENCES = 2
+VIOLATION_EXCERPT_CHARACTERS = 200
+
 
 ProviderFactory = Callable[..., LLMProvider]
 TargetProfileFactory = Callable[[str], TargetLanguageProfile]
@@ -57,6 +66,21 @@ class TranslationUnitSource:
     source_text: str
     task_bytes: bytes
     profile_task: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class GlossaryViolationOccurrence:
+    """One place a demanded term appeared, next to what came back instead."""
+
+    chunk_index: int
+    source_excerpt: str
+    translated_excerpt: str
+
+
+@dataclass(frozen=True)
+class GlossaryViolation:
+    entry: GlossaryEntry
+    occurrences: tuple[GlossaryViolationOccurrence, ...]
 
 
 def run_manifest(
@@ -114,28 +138,32 @@ def run_manifest(
     ):
         raise EngineError("invalid_placeholder_retries")
 
-    unit_reports = []
-    for position, unit in enumerate(units):
+    # Latched once by whichever unit exhausts the provider's throttle budget, and
+    # then read by every unit that has not started yet. It stops dispatch; it
+    # never interrupts a unit already in flight. See _rate_limited_report.
+    dispatch_stopped = threading.Event()
+
+    def translate_one(unit: Any) -> dict[str, Any]:
+        if dispatch_stopped.is_set():
+            return _rate_limited_report(project_root, unit)
         try:
-            unit_reports.append(
-                _translate_unit(
-                    project_root=project_root,
-                    source_map=source_map,
-                    task_path=_project_path(
-                        project_root, _required_string(unit, "taskManifestPath")
-                    ),
-                    source_language=str(manifest.get("sourceLanguage", "auto")),
-                    target_language=target_language,
-                    provider=provider,
-                    target_profile=profile,
-                    max_tokens=max_tokens,
-                    translation_policy_version=translation_policy_version,
-                    placeholder_retries=placeholder_retries,
-                    second_pass=active_second_pass,
-                    text_cleanup=text_cleanup,
-                    custom_translation=custom_translation,
-                    custom_reflection=custom_reflection,
-                )
+            return _translate_unit(
+                project_root=project_root,
+                source_map=source_map,
+                task_path=_project_path(
+                    project_root, _required_string(unit, "taskManifestPath")
+                ),
+                source_language=str(manifest.get("sourceLanguage", "auto")),
+                target_language=target_language,
+                provider=provider,
+                target_profile=profile,
+                max_tokens=max_tokens,
+                translation_policy_version=translation_policy_version,
+                placeholder_retries=placeholder_retries,
+                second_pass=active_second_pass,
+                text_cleanup=text_cleanup,
+                custom_translation=custom_translation,
+                custom_reflection=custom_reflection,
             )
         except (
             OSError,
@@ -144,30 +172,38 @@ def run_manifest(
             ProviderError,
             ValueError,
         ) as error:
-            code = getattr(error, "code", "unit_invalid")
-            unit_reports.append(
-                {
-                    "unitId": _safe_unit_id(project_root, unit),
-                    "status": "failed",
-                    "error": {
-                        "code": code,
-                        "retryable": isinstance(error, ProviderUnavailableError),
-                    },
-                }
-            )
             if isinstance(error, RateLimitError):
-                # The provider pool is exhausted for longer than we are
-                # willing to wait; attempting further units would only churn
-                # the same throttle. Fail them retryable and stop.
-                unit_reports.extend(
-                    {
-                        "unitId": _safe_unit_id(project_root, remaining),
-                        "status": "failed",
-                        "error": {"code": RateLimitError.code, "retryable": True},
-                    }
-                    for remaining in units[position + 1 :]
-                )
-                break
+                dispatch_stopped.set()
+            return {
+                "unitId": _safe_unit_id(project_root, unit),
+                "status": "failed",
+                "error": {
+                    "code": getattr(error, "code", "unit_invalid"),
+                    "retryable": isinstance(error, ProviderUnavailableError),
+                },
+            }
+
+    # Units overlap up to the provider's declared limit. Chunks inside a unit
+    # stay strictly serial -- each chunk's prompt carries the tail of the previous
+    # chunk's translation -- and every unit writes only paths derived from its own
+    # unit id, so two units never contend for a checkpoint or an output file.
+    with ThreadPoolExecutor(
+        max_workers=_unit_concurrency(provider, len(units)),
+        thread_name_prefix="translation-unit",
+    ) as pool:
+        futures = [pool.submit(translate_one, unit) for unit in units]
+        try:
+            # Indexed by submission order, so the report follows the manifest's
+            # unit list and does not drift with whichever unit finished first.
+            unit_reports = [future.result() for future in futures]
+        except BaseException:
+            # A worker died in a way no per-unit handler covers: a kill, a signal,
+            # a bug. Drop the units that have not started rather than translating
+            # more of a run that is already over; the ones in flight cannot be
+            # interrupted and resume from their own checkpoints.
+            for future in futures:
+                future.cancel()
+            raise
 
     completed = sum(report["status"] == "completed" for report in unit_reports)
     failed = len(unit_reports) - completed
@@ -175,6 +211,35 @@ def run_manifest(
         "schema": "translation-engine-report-v1",
         "summary": {"total": len(unit_reports), "completed": completed, "failed": failed},
         "units": unit_reports,
+    }
+
+
+def _unit_concurrency(provider: LLMProvider, unit_count: int) -> int:
+    """How many units may translate at once against this provider.
+
+    The limit lives on the provider because it describes what the remote service
+    tolerates, not something a run gets to choose. A provider that declares none
+    -- the offline fake, or any client written before the limit existed -- runs one
+    unit at a time, which is what the engine did before units could overlap.
+    """
+    return max(1, min(getattr(provider, "concurrency_limit", 1), unit_count))
+
+
+def _rate_limited_report(project_root: Path, unit: Any) -> dict[str, Any]:
+    """A unit that was never attempted because the run is already throttled.
+
+    Once every credential is exhausted for longer than the provider is willing to
+    wait, starting another unit would only churn the same throttle, so units that
+    have not begun are failed retryable without a single request. Units already in
+    flight are deliberately left alone: one of them may hold a credential that is
+    still good, the throttle may lift before its next chunk, and killing it would
+    throw away a call that has already been paid for along with the checkpoint
+    prefix it was about to write. Each of those reports its own real outcome.
+    """
+    return {
+        "unitId": _safe_unit_id(project_root, unit),
+        "status": "failed",
+        "error": {"code": RateLimitError.code, "retryable": True},
     }
 
 
@@ -506,10 +571,25 @@ def _translate_unit(
     }
     if glossary_violations:
         # The count alone says a book drifted somewhere in 400 pages, which is
-        # not something anyone can act on. The terms are what make it fixable.
+        # not something anyone can act on. A structured finding is: the term, the
+        # translation it was supposed to get, the chunk it happened in, and the
+        # source and output text of the stretch it happened in. Reported as
+        # evidence and never as a gate -- see the note on find_glossary_violations
+        # for why a signal with known false positives must not block a chapter.
         report["glossaryViolations"] = [
-            {"source": entry.source, "translation": entry.translation}
-            for entry in glossary_violations
+            {
+                "source": violation.entry.source,
+                "translation": violation.entry.translation,
+                "occurrences": [
+                    {
+                        "chunkIndex": occurrence.chunk_index,
+                        "sourceExcerpt": occurrence.source_excerpt,
+                        "translatedExcerpt": occurrence.translated_excerpt,
+                    }
+                    for occurrence in violation.occurrences
+                ],
+            }
+            for violation in glossary_violations
         ]
     if second_pass_applied:
         second_pass_artifacts = {
@@ -539,7 +619,7 @@ def _collect_glossary_violations(
     output_chunks: Sequence[str],
     profile_task: Mapping[str, object],
     skip_indices: AbstractSet[int],
-) -> tuple[GlossaryEntry, ...]:
+) -> tuple[GlossaryViolation, ...]:
     """Union the per-chunk violations, keeping first-seen order.
 
     Per chunk because that is the granularity the glossary is injected at: each
@@ -548,15 +628,117 @@ def _collect_glossary_violations(
     not nine, and a count that scaled with chapter length would say more about
     the book's structure than its terminology.
     """
-    seen: dict[tuple[str, str], GlossaryEntry] = {}
+    entries: dict[tuple[str, str], GlossaryEntry] = {}
+    occurrences: dict[tuple[str, str], list[GlossaryViolationOccurrence]] = {}
     for index, source_chunk in enumerate(chunks):
         if index in skip_indices or index >= len(output_chunks):
             continue
         for entry in find_glossary_violations(
             source_chunk, output_chunks[index], profile_task
         ):
-            seen.setdefault((entry.source, entry.translation), entry)
-    return tuple(seen.values())
+            key = (entry.source, entry.translation)
+            entries.setdefault(key, entry)
+            found = occurrences.setdefault(key, [])
+            budget = MAX_VIOLATION_OCCURRENCES - len(found)
+            if budget > 0:
+                found.extend(
+                    _violation_occurrences(
+                        chunk_index=index,
+                        source_chunk=source_chunk,
+                        output_chunk=output_chunks[index],
+                        entry=entry,
+                    )[:budget]
+                )
+    return tuple(
+        GlossaryViolation(entry=entry, occurrences=tuple(occurrences[key]))
+        for key, entry in entries.items()
+    )
+
+
+def _violation_occurrences(
+    *,
+    chunk_index: int,
+    source_chunk: str,
+    output_chunk: str,
+    entry: GlossaryEntry,
+) -> list[GlossaryViolationOccurrence]:
+    """Pair each source occurrence of the term with what the model wrote there.
+
+    A term and an expected translation say a book drifted; they do not say what
+    it drifted to, and nobody can act on that without opening the chapter. The
+    pairing is exact rather than approximate: a candidate is only accepted when
+    it carries the chunk's protected placeholders once each and in order, and
+    paragraph breaks and heading prefixes are themselves placeholders, so
+    splitting source and output on the placeholder pattern yields the same number
+    of segments in the same order. Segment *i* of the output is therefore the
+    model's rendering of segment *i* of the source.
+    """
+    source_segments = _placeholder_segments(source_chunk)
+    output_segments = _placeholder_segments(output_chunk)
+    if len(source_segments) != len(output_segments):
+        # Unreachable while the validators hold; reporting the term without a
+        # location beats an IndexError in a run that otherwise succeeded.
+        return []
+    found: list[GlossaryViolationOccurrence] = []
+    reported: set[int] = set()
+    for start, end in find_variant_spans(source_chunk, entry):
+        position = _segment_index(source_segments, start)
+        # One entry per segment, not per match: a term used three times in the
+        # same stretch of text is one place to look, and repeating the excerpt
+        # would spend the occurrence budget saying the same thing.
+        if position in reported:
+            continue
+        reported.add(position)
+        segment_start, segment_text = source_segments[position]
+        found.append(
+            GlossaryViolationOccurrence(
+                chunk_index=chunk_index,
+                source_excerpt=_excerpt(
+                    segment_text, start - segment_start, end - segment_start
+                ),
+                translated_excerpt=_excerpt(output_segments[position][1], 0, 0),
+            )
+        )
+    return found
+
+
+def _placeholder_segments(text: str) -> list[tuple[int, str]]:
+    """The (offset, text) runs between protected placeholders, including empties."""
+    segments: list[tuple[int, str]] = []
+    cursor = 0
+    for placeholder in PLACEHOLDER_PATTERN.finditer(text):
+        segments.append((cursor, text[cursor : placeholder.start()]))
+        cursor = placeholder.end()
+    segments.append((cursor, text[cursor:]))
+    return segments
+
+
+def _segment_index(segments: Sequence[tuple[int, str]], position: int) -> int:
+    last = 0
+    for index, (start, _) in enumerate(segments):
+        if start > position:
+            break
+        last = index
+    return last
+
+
+def _excerpt(text: str, start: int, end: int) -> str:
+    """A window of at most VIOLATION_EXCERPT_CHARACTERS centred on [start, end).
+
+    Bounded because this report is JSON on stdout that the launcher folds into a
+    job's state: a four-hundred-page book must stay something a person can read.
+    """
+    if len(text) <= VIOLATION_EXCERPT_CHARACTERS:
+        return text.strip()
+    # Offsets are the caller's, measured against this exact string, so the window
+    # is computed before anything is trimmed and only the result is stripped.
+    span = max(end - start, 0)
+    margin = max((VIOLATION_EXCERPT_CHARACTERS - span) // 2, 0)
+    window_start = max(min(start - margin, len(text) - VIOLATION_EXCERPT_CHARACTERS), 0)
+    window_end = window_start + VIOLATION_EXCERPT_CHARACTERS
+    prefix = "…" if window_start > 0 else ""
+    suffix = "…" if window_end < len(text) else ""
+    return f"{prefix}{text[window_start:window_end].strip()}{suffix}"
 
 
 def _read_json(path: Path) -> dict[str, Any]:

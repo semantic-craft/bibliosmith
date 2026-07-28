@@ -8,6 +8,7 @@ write lock. Item-type names that are not bibliographically interesting
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import sqlite3
 import stat as stat_module
@@ -145,14 +146,21 @@ def _load_field_ids(conn: sqlite3.Connection) -> dict[str, int]:
     return {name: fid for fid, name in rows}
 
 
-def _load_creators_by_item(conn: sqlite3.Connection) -> dict[int, list[str]]:
+def _load_creators_by_item(
+    conn: sqlite3.Connection, item_ids: list[int]
+) -> dict[int, list[str]]:
+    if not item_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(item_ids))
     rows = conn.execute(
-        """
+        f"""
         SELECT ic.itemID, c.firstName, c.lastName
         FROM itemCreators ic
         JOIN creators c ON c.creatorID = ic.creatorID
+        WHERE ic.itemID IN ({placeholders})
         ORDER BY ic.itemID, ic.orderIndex
-        """
+        """,
+        item_ids,
     ).fetchall()
     out: dict[int, list[str]] = {}
     for item_id, first, last in rows:
@@ -164,14 +172,21 @@ def _load_creators_by_item(conn: sqlite3.Connection) -> dict[int, list[str]]:
     return out
 
 
-def _load_tags_by_item(conn: sqlite3.Connection) -> dict[int, list[str]]:
+def _load_tags_by_item(
+    conn: sqlite3.Connection, item_ids: list[int]
+) -> dict[int, list[str]]:
+    if not item_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(item_ids))
     rows = conn.execute(
-        """
+        f"""
         SELECT it.itemID, t.name
         FROM itemTags it
         JOIN tags t ON t.tagID = it.tagID
+        WHERE it.itemID IN ({placeholders})
         ORDER BY it.itemID
-        """
+        """,
+        item_ids,
     ).fetchall()
     out: dict[int, list[str]] = {}
     for item_id, name in rows:
@@ -180,28 +195,22 @@ def _load_tags_by_item(conn: sqlite3.Connection) -> dict[int, list[str]]:
     return out
 
 
-def iter_items(db_path: Path | None = None) -> list[ZoteroItem]:
-    """Return all bibliographically-indexable items from the local Zotero DB.
-
-    Args:
-        db_path: Path to ``zotero.sqlite``. Defaults to ``~/Zotero/zotero.sqlite``.
-
-    Returns:
-        List of ZoteroItem records, deleted items excluded.
-
-    Raises:
-        FileNotFoundError: If db_path does not exist.
-    """
-    db_path = db_path or DEFAULT_DB_PATH
+def _query_items(
+    db_path: Path,
+    *,
+    extra_where: str = "",
+    params: tuple[object, ...] = (),
+    limit: int | None = None,
+) -> list[ZoteroItem]:
     if not db_path.exists():
         raise FileNotFoundError(f"Zotero DB not found at {db_path}")
 
     with _connect_readonly(db_path) as conn:
         field_ids = _load_field_ids(conn)
-        creators = _load_creators_by_item(conn)
-        tags = _load_tags_by_item(conn)
 
         skip_clause = ",".join(f"'{t}'" for t in SKIP_TYPES)
+        limit_clause = " LIMIT ?" if limit is not None else ""
+        query_params = (*params, limit) if limit is not None else params
         rows = conn.execute(
             f"""
             SELECT i.itemID, i.key, it.typeName, i.dateModified
@@ -209,27 +218,36 @@ def iter_items(db_path: Path | None = None) -> list[ZoteroItem]:
             JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
             WHERE i.itemID NOT IN (SELECT itemID FROM deletedItems)
               AND it.typeName NOT IN ({skip_clause})
+              {extra_where}
             ORDER BY i.dateModified DESC
-            """
+            {limit_clause}
+            """,
+            query_params,
         ).fetchall()
 
-        # Bulk-load all itemData for these items into one lookup pass.
         item_ids = [r[0] for r in rows]
         if not item_ids:
             return []
+        creators = _load_creators_by_item(conn, item_ids)
+        tags = _load_tags_by_item(conn, item_ids)
+
+        # Bulk-load itemData only for the rows selected by the SQL query.
         placeholders = ",".join(["?"] * len(item_ids))
         wanted_field_ids = tuple(field_ids[f] for f in INDEX_FIELDS if f in field_ids)
-        field_placeholders = ",".join(["?"] * len(wanted_field_ids))
-        data_rows = conn.execute(
-            f"""
-            SELECT id.itemID, id.fieldID, idv.value
-            FROM itemData id
-            JOIN itemDataValues idv ON idv.valueID = id.valueID
-            WHERE id.itemID IN ({placeholders})
-              AND id.fieldID IN ({field_placeholders})
-            """,
-            (*item_ids, *wanted_field_ids),
-        ).fetchall()
+        if wanted_field_ids:
+            field_placeholders = ",".join(["?"] * len(wanted_field_ids))
+            data_rows = conn.execute(
+                f"""
+                SELECT id.itemID, id.fieldID, idv.value
+                FROM itemData id
+                JOIN itemDataValues idv ON idv.valueID = id.valueID
+                WHERE id.itemID IN ({placeholders})
+                  AND id.fieldID IN ({field_placeholders})
+                """,
+                (*item_ids, *wanted_field_ids),
+            ).fetchall()
+        else:
+            data_rows = []
 
     field_name_by_id = {fid: name for name, fid in field_ids.items()}
     item_data: dict[int, dict[str, str]] = {}
@@ -258,6 +276,21 @@ def iter_items(db_path: Path | None = None) -> list[ZoteroItem]:
             )
         )
     return items
+
+
+def iter_items(db_path: Path | None = None) -> list[ZoteroItem]:
+    """Return all bibliographically-indexable items from the local Zotero DB.
+
+    Args:
+        db_path: Path to ``zotero.sqlite``. Defaults to ``~/Zotero/zotero.sqlite``.
+
+    Returns:
+        List of ZoteroItem records, deleted items excluded.
+
+    Raises:
+        FileNotFoundError: If db_path does not exist.
+    """
+    return _query_items(db_path or DEFAULT_DB_PATH)
 
 
 def get_item(key: str, db_path: Path | None = None) -> ZoteroItem | None:
@@ -626,24 +659,145 @@ def recent_items(
     db_path: Path | None = None, n: int = 20
 ) -> list[ZoteroItem]:
     """Return the n most-recently-modified indexable items."""
-    items = iter_items(db_path)  # already ordered by dateModified DESC
-    return items[:n]
+    if n == 0:
+        return []
+    if n < 0:
+        return iter_items(db_path)[:n]
+    return _query_items(db_path or DEFAULT_DB_PATH, limit=n)
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def grep_items(
     query: str, db_path: Path | None = None, limit: int = 30
 ) -> list[ZoteroItem]:
-    """SQL LIKE search over title + abstract. Case-insensitive substring match."""
-    items = iter_items(db_path)
-    q = query.lower()
-    out: list[ZoteroItem] = []
-    for it in items:
-        hay = " ".join(filter(None, [it.title, it.abstract])).lower()
-        if q in hay:
-            out.append(it)
-            if len(out) >= limit:
-                break
-    return out
+    """Literal SQL LIKE search over title, abstract, and creator names."""
+    db_path = db_path or DEFAULT_DB_PATH
+    effective_limit = max(1, limit)
+    if not query:
+        return _query_items(db_path, limit=effective_limit)
+    pattern = f"%{_escape_like(query)}%"
+    return _query_items(
+        db_path,
+        extra_where=r"""
+          AND (
+            EXISTS (
+                SELECT 1
+                FROM itemData search_data
+                JOIN itemDataValues search_values
+                  ON search_values.valueID = search_data.valueID
+                JOIN fields search_fields
+                  ON search_fields.fieldID = search_data.fieldID
+                WHERE search_data.itemID = i.itemID
+                  AND search_fields.fieldName IN ('title', 'abstractNote')
+                  AND search_values.value LIKE ? ESCAPE '\'
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM itemCreators search_item_creators
+                JOIN creators search_creators
+                  ON search_creators.creatorID = search_item_creators.creatorID
+                WHERE search_item_creators.itemID = i.itemID
+                  AND (
+                    COALESCE(search_creators.lastName, '')
+                    || CASE
+                        WHEN search_creators.lastName IS NOT NULL
+                         AND search_creators.lastName != ''
+                         AND search_creators.firstName IS NOT NULL
+                         AND search_creators.firstName != ''
+                        THEN ', '
+                        ELSE ''
+                       END
+                    || COALESCE(search_creators.firstName, '')
+                  ) LIKE ? ESCAPE '\'
+            )
+          )
+        """,
+        params=(pattern, pattern),
+        limit=effective_limit,
+    )
+
+
+_ZOTERO_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _zotero_year(value: str | None) -> int | None:
+    match = _ZOTERO_YEAR_RE.search((value or "").strip())
+    return int(match.group(0)) if match else None
+
+
+def filtered_item_keys(
+    db_path: Path | None = None,
+    *,
+    item_type: str | None = None,
+    year: tuple[int | None, int | None] | None = None,
+    tag: str | None = None,
+) -> set[str]:
+    """Resolve exact semantic-search filters to eligible parent item keys in SQL."""
+    db_path = db_path or DEFAULT_DB_PATH
+    if not db_path.exists():
+        raise FileNotFoundError(f"Zotero DB not found at {db_path}")
+
+    clauses: list[str] = []
+    params: list[object] = []
+    if item_type is not None:
+        clauses.append("it.typeName = ?")
+        params.append(item_type)
+    if tag is not None:
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM itemTags filter_item_tags
+                JOIN tags filter_tags ON filter_tags.tagID = filter_item_tags.tagID
+                WHERE filter_item_tags.itemID = i.itemID
+                  AND filter_tags.name = ? COLLATE BINARY
+            )
+            """
+        )
+        params.append(tag)
+    if year is not None:
+        lo, hi = year
+        year_expression = """
+            (
+                SELECT zotero_year(filter_values.value)
+                FROM itemData filter_data
+                JOIN itemDataValues filter_values
+                  ON filter_values.valueID = filter_data.valueID
+                JOIN fields filter_fields
+                  ON filter_fields.fieldID = filter_data.fieldID
+                WHERE filter_data.itemID = i.itemID
+                  AND filter_fields.fieldName = 'date'
+                LIMIT 1
+            )
+        """
+        if lo is not None:
+            clauses.append(f"{year_expression} >= ?")
+            params.append(lo)
+        if hi is not None:
+            clauses.append(f"{year_expression} <= ?")
+            params.append(hi)
+        if lo is None and hi is None:
+            clauses.append(f"{year_expression} IS NOT NULL")
+
+    skip_clause = ",".join(f"'{skip_type}'" for skip_type in SKIP_TYPES)
+    filter_sql = "".join(f"\nAND ({clause})" for clause in clauses)
+    with _connect_readonly(db_path) as conn:
+        conn.create_function("zotero_year", 1, _zotero_year, deterministic=True)
+        rows = conn.execute(
+            f"""
+            SELECT i.key
+            FROM items i
+            JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+            WHERE i.itemID NOT IN (SELECT itemID FROM deletedItems)
+              AND it.typeName NOT IN ({skip_clause})
+              {filter_sql}
+            """,
+            params,
+        ).fetchall()
+    return {key for (key,) in rows}
 
 
 @dataclass(frozen=True)
