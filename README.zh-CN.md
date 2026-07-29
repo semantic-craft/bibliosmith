@@ -24,22 +24,11 @@ Windows 版本。
 取最新的 `BiblioSmith.Launcher_<版本>_aarch64.dmg`，打开后把
 `BiblioSmith Launcher.app` 拖进 `/Applications`。
 
-### 2. 首次打开过 Gatekeeper
+### 2. 打开应用
 
-DMG 是 **ad-hoc 签名、未公证**的（`src-tauri/tauri.conf.json` 里
-`"signingIdentity": "-"`），所以 macOS 一定会拦下第一次启动，提示「无法验证开发者」
-或「已损坏」。这是预期行为。
-
-1. 先双击一次，让 macOS 拒绝。
-2. 打开**系统设置 → 隐私与安全性**，翻到「安全性」一节，在 BiblioSmith Launcher
-   那一条旁边点**仍要打开**。
-3. 在弹出的确认框里再确认一次。之后 macOS 会记住这个决定。
-
-如果那一条没出现，就直接清掉隔离属性：
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/BiblioSmith Launcher.app"
-```
+发布流程使用 **Developer ID Application** 证书签名，向 Apple 公证，并在发布前附加
+公证票据。Gatekeeper 会将应用识别为 `Notarized Developer ID`；拖入
+`/Applications` 后直接双击即可，不需要去「隐私与安全性」放行，也不需要清除隔离属性。
 
 应用没有自动更新。要升级就重新下载新的 DMG。
 
@@ -74,10 +63,23 @@ xattr -dr com.apple.quarantine "/Applications/BiblioSmith Launcher.app"
 cd tools/bibliosmith-launcher/source
 npm ci
 npx tauri dev                    # 开发窗口，带热重载
-npx tauri build --bundles dmg    # 产出与发布流程相同的 DMG
+npx tauri build --bundles dmg --no-sign  # 不要求证书的本地构建
 ```
 
 `npx tauri dev` 第一次要编译整个 Rust 后端，会等一会儿。
+仓库的打包配置默认指向 `Developer ID Application`。持有该证书的发布维护者可以去掉
+`--no-sign`，或用 `APPLE_SIGNING_IDENTITY` 指定精确身份；只有 Release workflow 会注入
+签名与公证 Secrets。
+
+macOS 发布维护者可用下面的脚本更新 Apple App 专用密码，避免密码进入 shell 历史或
+命令参数：
+
+```sh
+./tools/bibliosmith-launcher/source/scripts/set-apple-password-secret-macos.sh
+```
+
+脚本会弹出隐藏输入框，并把内容直接写入 `semantic-craft/bibliosmith` 的
+`APPLE_PASSWORD` GitHub Secret；留空或取消不会改动现有 Secret。
 
 ## 起一本新书
 
