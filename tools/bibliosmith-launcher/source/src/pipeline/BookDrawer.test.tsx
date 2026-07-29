@@ -78,31 +78,33 @@ const CATALOG_SLOTS = MODEL_BRANDS.flatMap((brand) =>
 );
 
 describe("BookDrawer provider picker", () => {
-  // Regression: the options were one per brand while the registry carries eight
-  // slots, so Qwen's and MiMo's second billing plan could not be picked here at
-  // all — and before that, three brands were hard-coded against a catalog of six.
+  // Regression: the options were once hand-written, so newly supported
+  // providers and a brand's second supported plan could disappear here.
   it("offers every slot in the catalog, not just every brand", () => {
     renderDrawer(gateUnit({ jobOver: { translationProfileId: "deepseek", translationConfigId: "deepseek-default" } }));
 
     expect(CATALOG_SLOTS.length).toBeGreaterThan(MODEL_BRANDS.length);
     expect(optionValues(providerSelect())).toEqual(CATALOG_SLOTS);
-    expect(optionValues(providerSelect())).toContain("qwen:token-plan");
+    expect(optionValues(providerSelect())).toContain("qwen:payg");
+    expect(optionValues(providerSelect())).toContain("doubao:cn-beijing");
+    expect(optionValues(providerSelect())).not.toContain("qwen:token-plan");
     expect(optionValues(providerSelect())).toContain("mimo:token-plan");
   });
 
   it("labels a two-plan brand's slots apart", () => {
     renderDrawer(gateUnit({ jobOver: { translationProfileId: "deepseek", translationConfigId: "deepseek-default" } }));
     const labels = Array.from(providerSelect().options).map((option) => option.textContent);
-    const qwen = MODEL_BRANDS.find((brand) => brand.profileId === "qwen")!;
-    expect(labels).toContain(`${qwen.brand} · ${qwen.slots[0].label}`);
-    expect(labels).toContain(`${qwen.brand} · ${qwen.slots[1].label}`);
+    const mimo = MODEL_BRANDS.find((brand) => brand.profileId === "mimo")!;
+    expect(labels).toContain(`${mimo.brand} · ${mimo.slots[0].label}`);
+    expect(labels).toContain(`${mimo.brand} · ${mimo.slots[1].label}`);
     // A single-slot brand stays unqualified.
     expect(labels).toContain("DeepSeek");
+    expect(labels).toContain("火山方舟 · Doubao");
   });
 
   it("selects the slot the job already carries", () => {
-    renderDrawer(gateUnit({ jobOver: { translationProfileId: "qwen", translationConfigId: "token-plan" } }));
-    expect(providerSelect().value).toBe("qwen:token-plan");
+    renderDrawer(gateUnit({ jobOver: { translationProfileId: "doubao", translationConfigId: "cn-beijing" } }));
+    expect(providerSelect().value).toBe("doubao:cn-beijing");
   });
 
   // A job may predate a rename, or belong to the expert agent. Dropping such a
@@ -148,7 +150,7 @@ describe("BookDrawer sample provider decoupling", () => {
     const qwen = MODEL_BRANDS.find((brand) => brand.profileId === "qwen")!;
     // Scoped to the row: the same label is also one of the picker's options.
     const row = within(card as HTMLElement).getByText(copy.jobProvider).closest(".pl-evi-row");
-    expect(row?.querySelector(".pl-v")?.textContent).toBe(`${qwen.brand} · ${qwen.slots[0].label}`);
+    expect(row?.querySelector(".pl-v")?.textContent).toBe(qwen.brand);
   });
 
   it("says nothing while the picker still matches the book's model", () => {

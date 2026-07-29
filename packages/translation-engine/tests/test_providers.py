@@ -52,7 +52,7 @@ class ProviderFactoryTests(unittest.TestCase):
                 ("deepseek", "deepseek-default"),
                 ("kimi", "kimi-default"),
                 ("qwen", "payg"),
-                ("qwen", "token-plan"),
+                ("doubao", "cn-beijing"),
                 ("mimo", "payg"),
                 ("mimo", "token-plan"),
             },
@@ -70,18 +70,27 @@ class ProviderFactoryTests(unittest.TestCase):
             ("deepseek", "deepseek-default"),
             ("kimi", "kimi-default"),
             ("qwen", "payg"),
+            ("doubao", "cn-beijing"),
             ("mimo", "token-plan"),
         ]:
             self.assertEqual(
                 registry[(profile, config)].provider_type, "openai-compatible"
             )
-        # A brand's two billing plans carry different hosts and different keys,
-        # so they must not collapse onto one another.
         qwen_payg = registry[("qwen", "payg")]
-        qwen_plan = registry[("qwen", "token-plan")]
-        self.assertNotEqual(qwen_payg.base_url, qwen_plan.base_url)
-        self.assertNotEqual(qwen_payg.key_env, qwen_plan.key_env)
-        self.assertEqual(qwen_plan.key_env, "QWEN_TOKEN_PLAN_API_KEYS")
+        self.assertEqual(
+            qwen_payg.base_url,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        self.assertEqual(qwen_payg.model, "qwen3.7-max")
+        self.assertNotIn(("qwen", "token-plan"), registry)
+
+        doubao = registry[("doubao", "cn-beijing")]
+        self.assertEqual(
+            doubao.base_url,
+            "https://ark.cn-beijing.volces.com/api/v3",
+        )
+        self.assertEqual(doubao.model, "doubao-seed-2-1-pro-260628")
+        self.assertEqual(doubao.key_env, "VOLCENGINE_ARK_API_KEYS")
 
     def test_registry_factory_loads_keys_only_from_the_repository_root_env(
         self,

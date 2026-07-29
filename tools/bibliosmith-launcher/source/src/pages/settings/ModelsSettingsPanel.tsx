@@ -61,7 +61,18 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
   const patch = (key: string, next: Partial<SlotState>) =>
     setSlotState((prev) => ({
       ...prev,
-      [key]: { ...stateFor(key, next.model ?? ""), ...prev[key], ...next },
+      [key]: {
+        ...stateFor(
+          key,
+          configuredBy.get(key)?.defaultModel ??
+            MODEL_BRANDS.flatMap((brand) => brand.slots).find(
+              (slot) => slotKey(slot.profileId, slot.configId) === key,
+            )?.models[0] ??
+            "",
+        ),
+        ...prev[key],
+        ...next,
+      },
     }));
 
   const activeMeta = active ? slotMeta(active.profileId, active.configId) : undefined;
@@ -92,7 +103,7 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
               active?.configId === meta.configId;
             const defaultModel = view?.defaultModel ?? meta.models[0];
             const st = stateFor(key, defaultModel);
-            const chosenModel = st.model || defaultModel;
+            const chosenModel = st.model;
             return (
               <div
                 key={key}
@@ -117,20 +128,39 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
                 <div className="st-models-slot-grid">
                   <label>
                     <span>{copy.model}</span>
-                    <select
-                      value={chosenModel}
-                      onChange={(event) =>
-                        patch(key, { model: event.currentTarget.value })
-                      }
-                    >
-                      {Array.from(new Set([defaultModel, ...meta.models])).map(
-                        (model) => (
-                          <option key={model} value={model}>
-                            {model}
-                          </option>
-                        ),
-                      )}
-                    </select>
+                    {meta.allowCustomModel ? (
+                      <>
+                        <input
+                          list={`${key}-models`}
+                          value={chosenModel}
+                          onChange={(event) =>
+                            patch(key, { model: event.currentTarget.value })
+                          }
+                        />
+                        <datalist id={`${key}-models`}>
+                          {Array.from(new Set([defaultModel, ...meta.models])).map(
+                            (model) => (
+                              <option key={model} value={model} />
+                            ),
+                          )}
+                        </datalist>
+                      </>
+                    ) : (
+                      <select
+                        value={chosenModel}
+                        onChange={(event) =>
+                          patch(key, { model: event.currentTarget.value })
+                        }
+                      >
+                        {Array.from(new Set([defaultModel, ...meta.models])).map(
+                          (model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ),
+                        )}
+                      </select>
+                    )}
                   </label>
                   <label>
                     <span>{copy.apiKey}</span>

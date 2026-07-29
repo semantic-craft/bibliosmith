@@ -7,10 +7,9 @@ schema = 1
 #
 # Every profile except gemini-native speaks the OpenAI chat-completions protocol
 # (provider_type = "openai-compatible") and so shares one client; the client
-# appends /chat/completions to base_url. A brand that bills two ways (Qwen, MiMo)
-# is two entries under one profile_id, keyed by config_id (payg vs token-plan),
-# because the two plans use different hosts and different keys and must not be
-# mixed. The default model here is only a starting point; a run may override it.
+# appends /chat/completions to base_url. A brand that bills two supported ways
+# (currently MiMo) has one entry per config_id so its keys cannot be mixed. The
+# default model here is only a starting point; a run may override it.
 #
 # concurrency_limit is how many chapters the engine translates at once against
 # this service; chunks inside a chapter stay serial regardless. Chunk size is not
@@ -66,22 +65,23 @@ profile_id = "qwen"
 config_id = "payg"
 provider_type = "openai-compatible"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-model = "qwen-flash"
+model = "qwen3.7-max"
 timeout_seconds = 120
 concurrency_limit = 4
 key_env = "QWEN_PAYG_API_KEYS"
 
-# Qwen Token Plan: a separate host and a separate key from pay-as-you-go; the two
-# must never be mixed (official guidance).
+# Doubao (Volcengine Ark), standard pay-as-you-go platform route in Beijing.
+# Ark requires a complete versioned model ID or an ep-* inference endpoint ID;
+# the launcher therefore also lets the user replace this default when needed.
 [[providers]]
-profile_id = "qwen"
-config_id = "token-plan"
+profile_id = "doubao"
+config_id = "cn-beijing"
 provider_type = "openai-compatible"
-base_url = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-model = "qwen3.6-flash"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+model = "doubao-seed-2-1-pro-260628"
 timeout_seconds = 120
 concurrency_limit = 4
-key_env = "QWEN_TOKEN_PLAN_API_KEYS"
+key_env = "VOLCENGINE_ARK_API_KEYS"
 
 # Xiaomi MiMo, pay-as-you-go route.
 [[providers]]

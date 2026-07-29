@@ -651,9 +651,16 @@ export function getModelCatalog() {
         },
         {
           profileId: "qwen",
-          configId: "token-plan",
+          configId: "payg",
           providerType: "openai-compatible",
-          defaultModel: "qwen3.6-flash",
+          defaultModel: "qwen3.7-max",
+          configured: false,
+        },
+        {
+          profileId: "doubao",
+          configId: "cn-beijing",
+          providerType: "openai-compatible",
+          defaultModel: "doubao-seed-2-1-pro-260628",
           configured: false,
         },
       ],
