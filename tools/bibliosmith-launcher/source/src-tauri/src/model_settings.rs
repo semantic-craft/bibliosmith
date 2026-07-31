@@ -7,8 +7,9 @@
 //!
 //! Keys live in the macOS Keychain, one entry per `(profile, config)` slot —
 //! never in a file, so providers and supported billing routes stay distinct.
-//! The active selection (which slot and model to translate with) is not secret
-//! and lives in the launcher config alongside the proxy and repo settings.
+//! The active selection, Qwen's optional Workspace ID, and its web-search
+//! preference are not secret and live in launcher config alongside the proxy
+//! and repo settings.
 //!
 //! At translate time the Rust runner reads the key from the Keychain and injects
 //! it into the engine subprocess under the slot's `key_env`, so the engine's
@@ -21,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use crate::book_pipeline::translation_engine_repo_root;
 
 const KEYCHAIN_SERVICE: &str = "com.bibliosmith.launcher.models";
+const QWEN_PROFILE_ID: &str = "qwen";
+const QWEN_CONFIG_ID: &str = "payg";
 
 /// A slot as declared in the engine registry. Only the fields the launcher needs
 /// are modelled; toml ignores the rest (timeouts, limits).
@@ -30,6 +33,8 @@ pub struct RegistrySlot {
     pub config_id: String,
     pub provider_type: String,
     pub base_url: String,
+    pub base_url_env: Option<String>,
+    pub web_search_env: Option<String>,
     pub model: String,
     pub key_env: String,
 }
@@ -48,9 +53,9 @@ pub struct ActiveModel {
     pub model: String,
 }
 
-/// One slot as presented to the settings UI: the registry facts plus whether a
-/// key is stored for it. Display names and model preset lists are the frontend's
-/// concern; this is only what the backend can know.
+/// One slot as presented to the settings UI: the registry facts, whether a key
+/// is stored, and any non-secret workspace selection. Display names and model
+/// preset lists are the frontend's concern; this is only what the backend knows.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSlotView {
@@ -59,6 +64,8 @@ pub struct ModelSlotView {
     pub provider_type: String,
     pub default_model: String,
     pub configured: bool,
+    pub workspace_id: Option<String>,
+    pub web_search_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +114,71 @@ fn find_slot<'a>(
     slots
         .iter()
         .find(|slot| slot.profile_id == profile_id && slot.config_id == config_id)
+}
+
+fn normalize_qwen_workspace_id(value: &str) -> Result<Option<String>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let Some(identifier) = value.strip_prefix("ws-") else {
+        return Err("Workspace ID must start with ws-.".into());
+    };
+    if identifier.is_empty()
+        || !identifier
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+    {
+        return Err("Enter the Workspace ID only, for example ws-xxxxxxxx.".into());
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn qwen_base_url(workspace_id: &str) -> String {
+    format!("https://{workspace_id}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
+}
+
+fn qwen_slot_with_workspace(
+    slot: &RegistrySlot,
+    workspace_id: Option<&str>,
+) -> Result<RegistrySlot, String> {
+    let mut resolved = slot.clone();
+    if slot.profile_id == QWEN_PROFILE_ID && slot.config_id == QWEN_CONFIG_ID {
+        resolved.base_url = match workspace_id {
+            Some(value) => normalize_qwen_workspace_id(value)?
+                .map(|value| qwen_base_url(&value))
+                .unwrap_or_else(|| slot.base_url.clone()),
+            None => slot.base_url.clone(),
+        };
+    }
+    Ok(resolved)
+}
+
+pub fn base_url_env(
+    slots: &[RegistrySlot],
+    profile_id: &str,
+    config_id: &str,
+    read_workspace_id: impl Fn(&str) -> Option<String>,
+) -> Option<(String, String)> {
+    let slot = find_slot(slots, profile_id, config_id)?;
+    let variable = slot.base_url_env.as_ref()?;
+    let workspace_id = read_workspace_id(&account(profile_id, config_id))?;
+    let workspace_id = normalize_qwen_workspace_id(&workspace_id).ok()??;
+    Some((variable.clone(), qwen_base_url(&workspace_id)))
+}
+
+pub fn web_search_env(
+    slots: &[RegistrySlot],
+    profile_id: &str,
+    config_id: &str,
+    read_enabled: impl Fn(&str) -> bool,
+) -> Option<(String, String)> {
+    let slot = find_slot(slots, profile_id, config_id)?;
+    let variable = slot.web_search_env.as_ref()?;
+    Some((
+        variable.clone(),
+        read_enabled(&account(profile_id, config_id)).to_string(),
+    ))
 }
 
 /// Return only a registry-backed selection to the UI. Older launchers exposed
@@ -181,6 +253,28 @@ pub fn resolve_credential_env(
     credential_env(&slots, profile_id, config_id, keychain_read)
 }
 
+pub fn resolve_base_url_env(
+    repo_root: &Path,
+    profile_id: &str,
+    config_id: &str,
+) -> Option<(String, String)> {
+    let slots = load_slots(repo_root).ok()?;
+    base_url_env(&slots, profile_id, config_id, |_| {
+        crate::read_qwen_workspace_id()
+    })
+}
+
+pub fn resolve_web_search_env(
+    repo_root: &Path,
+    profile_id: &str,
+    config_id: &str,
+) -> Option<(String, String)> {
+    let slots = load_slots(repo_root).ok()?;
+    web_search_env(&slots, profile_id, config_id, |_| {
+        crate::read_qwen_web_search_enabled()
+    })
+}
+
 // ---- Tauri commands -------------------------------------------------------
 
 #[tauri::command]
@@ -190,18 +284,40 @@ pub fn get_model_catalog() -> Result<ModelCatalog, String> {
     let active = active_model_for_catalog(&slots, crate::read_active_model());
     let views = slots
         .into_iter()
-        .map(|slot| ModelSlotView {
-            configured: keychain_read(&account(&slot.profile_id, &slot.config_id)).is_some(),
-            profile_id: slot.profile_id,
-            config_id: slot.config_id,
-            provider_type: slot.provider_type,
-            default_model: slot.model,
+        .map(|slot| {
+            let workspace_id =
+                if slot.profile_id == QWEN_PROFILE_ID && slot.config_id == QWEN_CONFIG_ID {
+                    crate::read_qwen_workspace_id()
+                } else {
+                    None
+                };
+            let web_search_enabled =
+                if slot.profile_id == QWEN_PROFILE_ID && slot.config_id == QWEN_CONFIG_ID {
+                    Some(crate::read_qwen_web_search_enabled())
+                } else {
+                    None
+                };
+            ModelSlotView {
+                configured: keychain_read(&account(&slot.profile_id, &slot.config_id)).is_some(),
+                profile_id: slot.profile_id,
+                config_id: slot.config_id,
+                provider_type: slot.provider_type,
+                default_model: slot.model,
+                workspace_id,
+                web_search_enabled,
+            }
         })
         .collect();
     Ok(ModelCatalog {
         slots: views,
         active,
     })
+}
+
+#[tauri::command]
+pub fn save_qwen_settings(workspace_id: String, web_search_enabled: bool) -> Result<(), String> {
+    let workspace_id = normalize_qwen_workspace_id(&workspace_id)?;
+    crate::write_qwen_settings(workspace_id, web_search_enabled)
 }
 
 #[tauri::command]
@@ -265,6 +381,7 @@ pub fn test_model_connection(
     let slot = find_slot(&slots, &profile_id, &config_id)
         .ok_or_else(|| format!("Unknown provider slot {profile_id}/{config_id}."))?
         .clone();
+    let slot = qwen_slot_with_workspace(&slot, crate::read_qwen_workspace_id().as_deref())?;
 
     let key = match api_key {
         Some(key) if !key.trim().is_empty() => key.trim().to_string(),
@@ -277,7 +394,10 @@ pub fn test_model_connection(
         model.trim().to_string()
     };
 
-    let probe = probe_endpoint(&slot, &model, &key);
+    let web_search_enabled = slot.profile_id == QWEN_PROFILE_ID
+        && slot.config_id == QWEN_CONFIG_ID
+        && crate::read_qwen_web_search_enabled();
+    let probe = probe_endpoint(&slot, &model, &key, web_search_enabled);
     Ok(match probe {
         Ok(()) => ModelConnectionResult {
             ok: true,
@@ -287,7 +407,12 @@ pub fn test_model_connection(
     })
 }
 
-fn probe_endpoint(slot: &RegistrySlot, model: &str, key: &str) -> Result<(), String> {
+fn probe_endpoint(
+    slot: &RegistrySlot,
+    model: &str,
+    key: &str,
+    web_search_enabled: bool,
+) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -306,15 +431,8 @@ fn probe_endpoint(slot: &RegistrySlot, model: &str, key: &str) -> Result<(), Str
             }))
             .send()
     } else {
-        client
-            .post(format!("{}/chat/completions", slot.base_url))
-            .bearer_auth(key)
-            .json(&serde_json::json!({
-                "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 1
-            }))
-            .send()
+        let (url, body) = openai_probe_request(slot, model, web_search_enabled)?;
+        client.post(url).bearer_auth(key).json(&body).send()
     }
     .map_err(|err| format!("请求失败：{err}"))?;
 
@@ -337,6 +455,35 @@ fn probe_endpoint(slot: &RegistrySlot, model: &str, key: &str) -> Result<(), Str
     ))
 }
 
+fn openai_probe_request(
+    slot: &RegistrySlot,
+    model: &str,
+    web_search_enabled: bool,
+) -> Result<(String, serde_json::Value), String> {
+    match slot.provider_type.as_str() {
+        "openai-responses" => {
+            let mut body = serde_json::json!({
+                "model": model,
+                "input": "ping",
+                "store": false
+            });
+            if web_search_enabled {
+                body["tools"] = serde_json::json!([{"type": "web_search"}]);
+            }
+            Ok((format!("{}/responses", slot.base_url), body))
+        }
+        "openai-compatible" => Ok((
+            format!("{}/chat/completions", slot.base_url),
+            serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1
+            }),
+        )),
+        provider_type => Err(format!("Unsupported provider type {provider_type}.")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,16 +493,20 @@ mod tests {
             RegistrySlot {
                 profile_id: "qwen".into(),
                 config_id: "payg".into(),
-                provider_type: "openai-compatible".into(),
+                provider_type: "openai-responses".into(),
                 base_url: "https://payg.example/v1".into(),
+                base_url_env: Some("QWEN_API_BASE_URL".into()),
+                web_search_env: Some("QWEN_WEB_SEARCH_ENABLED".into()),
                 model: "qwen3.7-max".into(),
                 key_env: "QWEN_PAYG_API_KEYS".into(),
             },
             RegistrySlot {
                 profile_id: "doubao".into(),
                 config_id: "cn-beijing".into(),
-                provider_type: "openai-compatible".into(),
+                provider_type: "openai-responses".into(),
                 base_url: "https://ark.cn-beijing.volces.com/api/v3".into(),
+                base_url_env: None,
+                web_search_env: None,
                 model: "doubao-seed-2-1-pro-260628".into(),
                 key_env: "VOLCENGINE_ARK_API_KEYS".into(),
             },
@@ -380,6 +531,73 @@ mod tests {
         let doubao =
             credential_env(&slots(), "doubao", "cn-beijing", |_| Some("k".into())).unwrap();
         assert_ne!(qwen.0, doubao.0);
+    }
+
+    #[test]
+    fn responses_slots_build_a_private_responses_probe() {
+        let qwen = &slots()[0];
+        let (url, body) = openai_probe_request(qwen, "qwen3.7-plus", false)
+            .expect("responses slot should produce a probe");
+
+        assert_eq!(url, "https://payg.example/v1/responses");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "model": "qwen3.7-plus",
+                "input": "ping",
+                "store": false
+            })
+        );
+    }
+
+    #[test]
+    fn qwen_web_search_setting_applies_to_the_connection_probe() {
+        let qwen = &slots()[0];
+        let (_url, body) = openai_probe_request(qwen, "qwen3.7-plus", true)
+            .expect("responses slot should produce a probe");
+
+        assert_eq!(body["tools"], serde_json::json!([{"type": "web_search"}]));
+        assert!(body.get("enable_search").is_none());
+        assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn qwen_workspace_applies_to_connection_and_translation_runtime() {
+        let workspace_id = "ws-abc123";
+        let qwen = qwen_slot_with_workspace(&slots()[0], Some(workspace_id))
+            .expect("valid workspace should produce a Qwen slot");
+        let (url, _body) = openai_probe_request(&qwen, "qwen3.7-plus", false)
+            .expect("workspace slot should produce a probe");
+
+        assert_eq!(
+            url,
+            "https://ws-abc123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/responses"
+        );
+        assert_eq!(
+            base_url_env(&slots(), "qwen", "payg", |_| Some(workspace_id.into())),
+            Some((
+                "QWEN_API_BASE_URL".into(),
+                "https://ws-abc123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1".into()
+            ))
+        );
+        assert_eq!(
+            web_search_env(&slots(), "qwen", "payg", |_| true),
+            Some(("QWEN_WEB_SEARCH_ENABLED".into(), "true".into()))
+        );
+        assert_eq!(
+            web_search_env(&slots(), "qwen", "payg", |_| false),
+            Some(("QWEN_WEB_SEARCH_ENABLED".into(), "false".into()))
+        );
+    }
+
+    #[test]
+    fn qwen_workspace_accepts_an_id_only_and_blank_restores_the_shared_host() {
+        assert_eq!(normalize_qwen_workspace_id("  ").unwrap(), None);
+        assert_eq!(
+            normalize_qwen_workspace_id(" ws-abc123 ").unwrap(),
+            Some("ws-abc123".into())
+        );
+        assert!(normalize_qwen_workspace_id("ws-abc123.cn-beijing.maas.aliyuncs.com").is_err());
     }
 
     #[test]
@@ -423,6 +641,38 @@ mod tests {
             );
         }
         assert!(find_slot(&slots, "qwen", "token-plan").is_none());
+        assert_eq!(
+            find_slot(&slots, "qwen", "payg")
+                .expect("qwen slot")
+                .provider_type,
+            "openai-responses"
+        );
+        assert_eq!(
+            find_slot(&slots, "qwen", "payg")
+                .expect("qwen slot")
+                .base_url,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            find_slot(&slots, "qwen", "payg")
+                .expect("qwen slot")
+                .base_url_env
+                .as_deref(),
+            Some("QWEN_API_BASE_URL")
+        );
+        assert_eq!(
+            find_slot(&slots, "qwen", "payg")
+                .expect("qwen slot")
+                .web_search_env
+                .as_deref(),
+            Some("QWEN_WEB_SEARCH_ENABLED")
+        );
+        assert_eq!(
+            find_slot(&slots, "doubao", "cn-beijing")
+                .expect("doubao slot")
+                .provider_type,
+            "openai-responses"
+        );
     }
 
     #[test]

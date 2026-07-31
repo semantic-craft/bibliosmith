@@ -480,6 +480,8 @@ export type ModelSlotView = {
   providerType: string;
   defaultModel: string;
   configured: boolean;
+  workspaceId?: string | null;
+  webSearchEnabled?: boolean | null;
 };
 
 export type ModelCatalog = {

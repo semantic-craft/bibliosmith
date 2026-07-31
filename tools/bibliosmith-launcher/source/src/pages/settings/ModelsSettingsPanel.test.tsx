@@ -6,6 +6,7 @@ import { ModelsSettingsPanel } from "./ModelsSettingsPanel";
 const api = vi.hoisted(() => ({
   deleteModelCredential: vi.fn(),
   getModelCatalog: vi.fn(),
+  saveQwenSettings: vi.fn(),
   saveModelCredential: vi.fn(),
   setActiveModel: vi.fn(),
   testModelConnection: vi.fn(),
@@ -21,14 +22,24 @@ describe("ModelsSettingsPanel", () => {
         {
           profileId: "doubao",
           configId: "cn-beijing",
-          providerType: "openai-compatible",
+          providerType: "openai-responses",
           defaultModel: "doubao-seed-2-1-pro-260628",
           configured: true,
+        },
+        {
+          profileId: "qwen",
+          configId: "payg",
+          providerType: "openai-responses",
+          defaultModel: "qwen3.7-max",
+          configured: true,
+          workspaceId: null,
+          webSearchEnabled: false,
         },
       ],
       active: null,
     });
     api.setActiveModel.mockResolvedValue(undefined);
+    api.saveQwenSettings.mockResolvedValue(undefined);
   });
 
   it("accepts current provider model or endpoint IDs instead of locking the user to stale presets", async () => {
@@ -84,5 +95,29 @@ describe("ModelsSettingsPanel", () => {
     await user.type(key, "ark-key");
 
     expect(model.value).toBe("doubao-seed-2-1-pro-260628");
+  });
+
+  it("stores Qwen Workspace ID and optional web search separately from the API key", async () => {
+    const user = userEvent.setup();
+    render(<ModelsSettingsPanel locale="en" />);
+
+    await waitFor(() => expect(api.getModelCatalog).toHaveBeenCalled());
+    const heading = screen
+      .getAllByText("阿里云百炼 · Qwen")
+      .find((node) => node.tagName === "B");
+    const brand = heading!.closest(".st-models-brand") as HTMLElement;
+    const workspace = within(brand).getByLabelText("Workspace ID (optional)");
+    const webSearch = within(brand).getByLabelText("Web search (optional)");
+
+    await user.type(workspace, "ws-abc123");
+    await user.click(webSearch);
+    await user.click(within(brand).getByRole("button", { name: "Save Qwen settings" }));
+
+    await waitFor(() =>
+      expect(api.saveQwenSettings).toHaveBeenCalledWith(
+        "ws-abc123",
+        true,
+      ),
+    );
   });
 });

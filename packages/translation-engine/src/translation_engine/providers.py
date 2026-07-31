@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.resources import files
 import os
 from pathlib import Path
@@ -34,6 +34,9 @@ class ProviderConfig:
     # Read by the engine when it fans units out; see engine._unit_concurrency.
     concurrency_limit: int
     key_env: str
+    base_url_env: str | None = None
+    web_search_env: str | None = None
+    web_search_enabled: bool = False
 
 
 class ProviderError(RuntimeError):
@@ -216,6 +219,83 @@ class OpenAICompatibleProvider:
         return _unwrap_translation(content)
 
 
+class OpenAIResponsesProvider:
+    """OpenAI-compatible Responses transport for stateless private translation."""
+
+    def __init__(
+        self,
+        *,
+        config: ProviderConfig,
+        credential_pool: CredentialPool,
+        http_client: httpx.Client | None = None,
+        max_attempts: int = 3,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        self.profile_id = config.profile_id
+        self.config_id = config.config_id
+        self.base_url = config.base_url
+        self.model = config.model
+        self.timeout_seconds = config.timeout_seconds
+        self.concurrency_limit = config.concurrency_limit
+        self.web_search_enabled = config.web_search_enabled
+        self.credential_pool = credential_pool
+        self._http_client = http_client or httpx.Client(timeout=self.timeout_seconds)
+        self._max_attempts = max_attempts
+        self._sleep = sleep
+
+    def translate(self, request: TranslationRequest) -> str:
+        return _translate_with_retries(
+            request=request,
+            credential_pool=self.credential_pool,
+            max_attempts=self._max_attempts,
+            sleep=self._sleep,
+            operation=self._translate_once,
+        )
+
+    def _translate_once(self, request: TranslationRequest, key: str) -> str:
+        body: dict[str, object] = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": request.system_instruction},
+                {"role": "user", "content": request.text},
+            ],
+            # Local-reading source text is private and every translation unit
+            # is self-contained, so server-side conversation state is neither
+            # needed nor appropriate.
+            "store": False,
+        }
+        if self.web_search_enabled:
+            body["tools"] = [{"type": "web_search"}]
+        try:
+            response = self._http_client.post(
+                f"{self.base_url}/responses",
+                headers={"Authorization": f"Bearer {key}"},
+                json=body,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.TransportError as error:
+            raise TransientError("provider request failed transiently") from error
+        _raise_for_status(response)
+        try:
+            output = response.json()["output"]
+            content = "".join(
+                part["text"]
+                for item in output
+                if isinstance(item, dict) and item.get("type") == "message"
+                for part in item.get("content", [])
+                if isinstance(part, dict)
+                and part.get("type") == "output_text"
+                and isinstance(part.get("text"), str)
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise FatalError("provider returned an invalid response") from error
+        if not content.strip():
+            raise FatalError("provider returned an invalid response")
+        return _unwrap_translation(content)
+
+
 class GeminiProvider:
     def __init__(
         self,
@@ -296,11 +376,26 @@ def create_provider(
         config = registry[(profile_id, config_id)]
     except KeyError as error:
         raise ValueError("unknown provider configuration") from error
+    runtime_environ = os.environ if environ is None else environ
+    if environ is None:
+        load_root_dotenv(repo_root=repo_root)
+    if config.base_url_env:
+        base_url_override = runtime_environ.get(config.base_url_env, "").strip()
+        if base_url_override:
+            config = replace(config, base_url=base_url_override.rstrip("/"))
+    if config.web_search_env:
+        web_search_override = runtime_environ.get(config.web_search_env, "").strip().lower()
+        if web_search_override:
+            if web_search_override not in {"true", "false", "1", "0"}:
+                raise ValueError(
+                    f"provider {config.web_search_env} must be true or false"
+                )
+            config = replace(
+                config,
+                web_search_enabled=web_search_override in {"true", "1"},
+            )
     if credential_pool is None:
-        if environ is None:
-            load_root_dotenv(repo_root=repo_root)
-            environ = os.environ
-        keys = normalize_api_keys(environ.get(config.key_env, ""))
+        keys = normalize_api_keys(runtime_environ.get(config.key_env, ""))
         if not keys:
             raise ValueError(f"provider credentials missing from {config.key_env}")
         credential_pool = KeyPool(keys)
@@ -310,6 +405,10 @@ def create_provider(
     # OpenAI-compatible vendor.
     if config.provider_type == "openai-compatible":
         return OpenAICompatibleProvider(
+            config=config, credential_pool=credential_pool
+        )
+    if config.provider_type == "openai-responses":
+        return OpenAIResponsesProvider(
             config=config, credential_pool=credential_pool
         )
     if config.provider_type == "gemini-native":
@@ -375,7 +474,8 @@ def _parse_provider_config(entry: dict[str, object]) -> ProviderConfig:
         "concurrency_limit",
         "key_env",
     }
-    if set(entry) != required:
+    allowed = required | {"base_url_env", "web_search_env"}
+    if not required.issubset(entry) or not set(entry).issubset(allowed):
         raise ValueError("provider registry entry has invalid fields")
     strings = {
         name: entry[name]
@@ -391,7 +491,11 @@ def _parse_provider_config(entry: dict[str, object]) -> ProviderConfig:
     if any(not isinstance(value, str) or not value.strip() for value in strings.values()):
         raise ValueError("provider registry string fields must not be empty")
     provider_type = str(strings["provider_type"])
-    if provider_type not in {"openai-compatible", "gemini-native"}:
+    if provider_type not in {
+        "openai-compatible",
+        "openai-responses",
+        "gemini-native",
+    }:
         raise ValueError("unsupported provider type")
     timeout = entry["timeout_seconds"]
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
@@ -406,6 +510,18 @@ def _parse_provider_config(entry: dict[str, object]) -> ProviderConfig:
     key_env = str(strings["key_env"])
     if re.fullmatch(r"[A-Z_][A-Z0-9_]*", key_env) is None:
         raise ValueError("provider key_env must name an environment variable")
+    base_url_env = entry.get("base_url_env")
+    if base_url_env is not None and (
+        not isinstance(base_url_env, str)
+        or re.fullmatch(r"[A-Z_][A-Z0-9_]*", base_url_env) is None
+    ):
+        raise ValueError("provider base_url_env must name an environment variable")
+    web_search_env = entry.get("web_search_env")
+    if web_search_env is not None and (
+        not isinstance(web_search_env, str)
+        or re.fullmatch(r"[A-Z_][A-Z0-9_]*", web_search_env) is None
+    ):
+        raise ValueError("provider web_search_env must name an environment variable")
     return ProviderConfig(
         profile_id=str(strings["profile_id"]),
         config_id=str(strings["config_id"]),
@@ -415,6 +531,8 @@ def _parse_provider_config(entry: dict[str, object]) -> ProviderConfig:
         timeout_seconds=float(timeout),
         concurrency_limit=concurrency,
         key_env=key_env,
+        base_url_env=base_url_env,
+        web_search_env=web_search_env,
     )
 
 

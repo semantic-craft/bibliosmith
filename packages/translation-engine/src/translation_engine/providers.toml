@@ -5,11 +5,11 @@ schema = 1
 # .env, or, when the launcher stores them in the macOS Keychain, injected into
 # that variable by the Rust runner before the engine starts.
 #
-# Every profile except gemini-native speaks the OpenAI chat-completions protocol
-# (provider_type = "openai-compatible") and so shares one client; the client
-# appends /chat/completions to base_url. A brand that bills two supported ways
-# (currently MiMo) has one entry per config_id so its keys cannot be mixed. The
-# default model here is only a starting point; a run may override it.
+# provider_type names the wire protocol. openai-compatible appends
+# /chat/completions, openai-responses appends /responses, and gemini-native uses
+# GenerateContent. A brand that bills two supported ways (currently MiMo) has one
+# entry per config_id so its keys cannot be mixed. The default model here is only
+# a starting point; a run may override it.
 #
 # concurrency_limit is how many chapters the engine translates at once against
 # this service; chunks inside a chapter stay serial regardless. Chunk size is not
@@ -59,24 +59,26 @@ timeout_seconds = 120
 concurrency_limit = 4
 key_env = "KIMI_API_KEYS"
 
-# Qwen (Alibaba Model Studio / DashScope), pay-as-you-go route.
+# Qwen (Alibaba Model Studio / DashScope), pay-as-you-go Responses route.
 [[providers]]
 profile_id = "qwen"
 config_id = "payg"
-provider_type = "openai-compatible"
+provider_type = "openai-responses"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+base_url_env = "QWEN_API_BASE_URL"
+web_search_env = "QWEN_WEB_SEARCH_ENABLED"
 model = "qwen3.7-max"
 timeout_seconds = 120
 concurrency_limit = 4
 key_env = "QWEN_PAYG_API_KEYS"
 
-# Doubao (Volcengine Ark), standard pay-as-you-go platform route in Beijing.
+# Doubao (Volcengine Ark), standard pay-as-you-go Responses route in Beijing.
 # Ark requires a complete versioned model ID or an ep-* inference endpoint ID;
 # the launcher therefore also lets the user replace this default when needed.
 [[providers]]
 profile_id = "doubao"
 config_id = "cn-beijing"
-provider_type = "openai-compatible"
+provider_type = "openai-responses"
 base_url = "https://ark.cn-beijing.volces.com/api/v3"
 model = "doubao-seed-2-1-pro-260628"
 timeout_seconds = 120

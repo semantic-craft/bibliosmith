@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 import os
 from pathlib import Path
 import tempfile
@@ -14,6 +15,7 @@ from translation_engine.providers import (
     KeyPool,
     LLMProvider,
     OpenAICompatibleProvider,
+    OpenAIResponsesProvider,
     ProviderConfig,
     RateLimitError,
     TransientError,
@@ -65,22 +67,27 @@ class ProviderFactoryTests(unittest.TestCase):
             registry[("gemini-native", "gemini-default")].key_env,
             "GEMINI_API_KEYS",
         )
-        # Every brand but gemini shares the OpenAI-compatible client.
+        # Providers that still expose only Chat Completions share the legacy
+        # OpenAI-compatible client.
         for profile, config in [
             ("deepseek", "deepseek-default"),
             ("kimi", "kimi-default"),
-            ("qwen", "payg"),
-            ("doubao", "cn-beijing"),
             ("mimo", "token-plan"),
         ]:
             self.assertEqual(
                 registry[(profile, config)].provider_type, "openai-compatible"
+            )
+        for profile, config in [("qwen", "payg"), ("doubao", "cn-beijing")]:
+            self.assertEqual(
+                registry[(profile, config)].provider_type, "openai-responses"
             )
         qwen_payg = registry[("qwen", "payg")]
         self.assertEqual(
             qwen_payg.base_url,
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
+        self.assertEqual(qwen_payg.base_url_env, "QWEN_API_BASE_URL")
+        self.assertEqual(qwen_payg.web_search_env, "QWEN_WEB_SEARCH_ENABLED")
         self.assertEqual(qwen_payg.model, "qwen3.7-max")
         self.assertNotIn(("qwen", "token-plan"), registry)
 
@@ -201,6 +208,58 @@ key_env = "DEEPSEEK_TEST_KEYS"
         self.assertEqual(provider.model, "deepseek-chat")
         self.assertEqual(provider.base_url, "https://api.deepseek.com")
 
+    def test_responses_profiles_dispatch_on_the_wire_protocol(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            registry_path = Path(temporary_directory) / "providers.toml"
+            registry_path.write_text(
+                """
+schema = 1
+
+[[providers]]
+profile_id = "qwen"
+config_id = "payg"
+provider_type = "openai-responses"
+base_url = "https://dashscope.example/v1"
+model = "qwen3.7-max"
+timeout_seconds = 120
+concurrency_limit = 4
+key_env = "QWEN_TEST_KEYS"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            provider = create_provider(
+                "qwen",
+                config_id="payg",
+                registry_path=registry_path,
+                environ={"QWEN_TEST_KEYS": "qwen-key"},
+            )
+
+        self.assertIsInstance(provider, OpenAIResponsesProvider)
+        self.assertIsInstance(provider, LLMProvider)
+        self.assertEqual(provider.model, "qwen3.7-max")
+
+    def test_qwen_workspace_base_url_can_be_supplied_at_runtime(self) -> None:
+        provider = create_provider(
+            "qwen",
+            config_id="payg",
+            environ={
+                "QWEN_PAYG_API_KEYS": "qwen-key",
+                "QWEN_API_BASE_URL": (
+                    "https://ws-example.cn-beijing.maas.aliyuncs.com/"
+                    "compatible-mode/v1"
+                ),
+                "QWEN_WEB_SEARCH_ENABLED": "true",
+            },
+        )
+
+        self.assertEqual(
+            provider.base_url,
+            "https://ws-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        )
+        self.assertTrue(provider.web_search_enabled)
+
 
 class HTTPProviderTests(unittest.TestCase):
     def test_openai_compatible_provider_sends_chat_completion_and_returns_text(
@@ -256,6 +315,128 @@ class HTTPProviderTests(unittest.TestCase):
         )
 
         self.assertEqual(translated, "译文章节")
+
+    def test_responses_provider_sends_private_input_and_returns_message_text(
+        self,
+    ) -> None:
+        def handle(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(str(request.url), "https://responses.example/v1/responses")
+            self.assertEqual(request.headers["authorization"], "Bearer fake-key")
+            self.assertEqual(
+                json.loads(request.content),
+                {
+                    "model": "model-r",
+                    "input": [
+                        {"role": "system", "content": "Translate faithfully."},
+                        {"role": "user", "content": "Source chapter"},
+                    ],
+                    "store": False,
+                },
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "object": "response",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "reasoning",
+                            "status": "completed",
+                            "summary": [
+                                {"type": "summary_text", "text": "Translate."}
+                            ],
+                        },
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "<TRANSLATION>\n译文章节\n</TRANSLATION>",
+                                }
+                            ],
+                        },
+                    ],
+                },
+            )
+
+        provider = OpenAIResponsesProvider(
+            config=_provider_config(
+                profile_id="qwen",
+                provider_type="openai-responses",
+                base_url="https://responses.example/v1",
+                model="model-r",
+            ),
+            credential_pool=KeyPool(("fake-key",)),
+            http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+        )
+
+        self.assertEqual(provider.translate(_translation_request()), "译文章节")
+
+    def test_responses_provider_rejects_a_response_without_output_text(self) -> None:
+        provider = OpenAIResponsesProvider(
+            config=_provider_config(
+                profile_id="doubao",
+                provider_type="openai-responses",
+                base_url="https://responses.example/v1",
+                model="model-r",
+            ),
+            credential_pool=KeyPool(("fake-key",)),
+            http_client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(
+                        200,
+                        json={
+                            "object": "response",
+                            "status": "completed",
+                            "output": [{"type": "reasoning", "summary": []}],
+                        },
+                    )
+                )
+            ),
+        )
+
+        with self.assertRaisesRegex(FatalError, "invalid response"):
+            provider.translate(_translation_request())
+
+    def test_responses_provider_enables_qwen_web_search_with_a_tool(self) -> None:
+        def handle(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            self.assertEqual(body["tools"], [{"type": "web_search"}])
+            self.assertNotIn("enable_search", body)
+            return httpx.Response(
+                200,
+                json={
+                    "output": [
+                        {"type": "web_search_call", "status": "completed"},
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "联网核对后的译文"}
+                            ],
+                        },
+                    ]
+                },
+            )
+
+        provider = OpenAIResponsesProvider(
+            config=replace(
+                _provider_config(
+                    profile_id="qwen",
+                    provider_type="openai-responses",
+                    base_url="https://responses.example/v1",
+                    model="qwen3.7-max",
+                ),
+                web_search_enabled=True,
+            ),
+            credential_pool=KeyPool(("fake-key",)),
+            http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+        )
+
+        self.assertEqual(
+            provider.translate(_translation_request()), "联网核对后的译文"
+        )
 
     def test_429_rotates_keys_on_an_independent_pool_sized_budget(self) -> None:
         attempted_keys: list[str] = []

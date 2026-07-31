@@ -11,6 +11,7 @@ export type ModelSlotMeta = {
   models: string[];
   keyUrl: string;
   allowCustomModel?: boolean;
+  allowWorkspaceId?: boolean;
 };
 
 export type ProviderBrand = {
@@ -92,6 +93,7 @@ export const MODEL_BRANDS: ProviderBrand[] = [
         models: ["qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.6-flash"],
         keyUrl: "https://bailian.console.aliyun.com/",
         allowCustomModel: true,
+        allowWorkspaceId: true,
       },
     ],
   },
