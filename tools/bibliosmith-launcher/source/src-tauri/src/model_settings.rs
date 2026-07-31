@@ -181,10 +181,10 @@ pub fn web_search_env(
     ))
 }
 
-/// Return only a registry-backed selection to the UI. Older launchers exposed
-/// Qwen Token Plan for batch translation; current provider terms do not. Map
-/// that retired selection to Qwen pay-as-you-go without reading, moving, or
-/// deleting the old Keychain credential.
+/// Return only a registry-backed selection. Older launchers exposed Qwen Token
+/// Plan for batch translation; current provider terms do not. Map that retired
+/// selection to Qwen pay-as-you-go without reading, moving, or deleting the old
+/// Keychain credential.
 fn active_model_for_catalog(
     slots: &[RegistrySlot],
     active: Option<ActiveModel>,
@@ -202,6 +202,20 @@ fn active_model_for_catalog(
         });
     }
     None
+}
+
+/// The selection to write back when the normalization above replaced the stored
+/// one, or None to leave the stored value alone. Pure, so the write-back rule is
+/// unit-testable without a launcher config. A slot that is merely absent — a
+/// repoRoot pointing at a worktree whose registry differs — normalizes to None
+/// and must never clear what the user chose; only a concrete replacement is
+/// persisted.
+fn active_model_migration(
+    stored: Option<&ActiveModel>,
+    normalized: Option<&ActiveModel>,
+) -> Option<ActiveModel> {
+    let normalized = normalized?;
+    (stored != Some(normalized)).then(|| normalized.clone())
 }
 
 /// The `(key_env, secret)` pair to inject for a slot, or None when the slot is
@@ -281,7 +295,17 @@ pub fn resolve_web_search_env(
 pub fn get_model_catalog() -> Result<ModelCatalog, String> {
     let repo_root = translation_engine_repo_root()?;
     let slots = load_slots(&repo_root)?;
-    let active = active_model_for_catalog(&slots, crate::read_active_model());
+    let stored = crate::read_active_model();
+    let active = active_model_for_catalog(&slots, stored.clone());
+    // The normalization used to reach the settings UI and nowhere else: every
+    // other reader — apply_active_model_to_manifest above all — goes straight to
+    // the stored value. That left a retired selection translating on the
+    // registry default while Settings showed the replacement as already active
+    // and so disabled the button that would have written it, with no way for the
+    // user to correct it. Persist the replacement here instead.
+    if let Some(migrated) = active_model_migration(stored.as_ref(), active.as_ref()) {
+        crate::write_active_model(Some(migrated))?;
+    }
     let views = slots
         .into_iter()
         .map(|slot| {
@@ -690,5 +714,47 @@ mod tests {
         assert_eq!(active.profile_id, "qwen");
         assert_eq!(active.config_id, "payg");
         assert_eq!(active.model, "qwen3.7-max");
+    }
+
+    #[test]
+    fn a_migrated_selection_is_written_back() {
+        let stored = ActiveModel {
+            profile_id: "qwen".into(),
+            config_id: "token-plan".into(),
+            model: "qwen3.8-max-preview".into(),
+        };
+        let normalized = active_model_for_catalog(&slots(), Some(stored.clone()));
+
+        let migrated = active_model_migration(Some(&stored), normalized.as_ref())
+            .expect("a replacement must be persisted");
+        assert_eq!(migrated.config_id, "payg");
+    }
+
+    #[test]
+    fn a_selection_the_registry_still_lists_is_not_rewritten() {
+        let stored = ActiveModel {
+            profile_id: "qwen".into(),
+            config_id: "payg".into(),
+            model: "qwen3.7-max".into(),
+        };
+        let normalized = active_model_for_catalog(&slots(), Some(stored.clone()));
+
+        assert!(active_model_migration(Some(&stored), normalized.as_ref()).is_none());
+    }
+
+    // A repoRoot pointing at a worktree with a different registry makes an
+    // otherwise valid slot look absent. Clearing the selection there would lose
+    // the user's choice for a reason that has nothing to do with them.
+    #[test]
+    fn an_absent_slot_leaves_the_stored_selection_alone() {
+        let stored = ActiveModel {
+            profile_id: "nope".into(),
+            config_id: "payg".into(),
+            model: "whatever".into(),
+        };
+        let normalized = active_model_for_catalog(&slots(), Some(stored.clone()));
+
+        assert!(normalized.is_none());
+        assert!(active_model_migration(Some(&stored), normalized.as_ref()).is_none());
     }
 }
