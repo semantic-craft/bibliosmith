@@ -212,6 +212,36 @@ describe("BookDrawer gate card", () => {
     expect(within(card as HTMLElement).getByText(copy.gateBlockedByChecks)).toBeTruthy();
   });
 
+  // A book queued before Qwen Token Plan was retired still carries that slot,
+  // and create_provider rejects it, so approving would bind the book to a
+  // translation that dies at start-up. The picker and its "apply" button are the
+  // way out, so the gate has to say so rather than let the approval through.
+  it("disables approval while the book still points at a retired provider slot", () => {
+    const unit = gateUnit({
+      jobOver: { translationProfileId: "qwen", translationConfigId: "token-plan" },
+    });
+    const { card } = renderDrawer(unit);
+    expect(approveButton(card!).disabled).toBe(true);
+    expect(within(card as HTMLElement).getByText(copy.gateBlockedByRetiredProvider)).toBeTruthy();
+  });
+
+  // "expert-agent" is not in the catalog and never was: expert mode does not
+  // translate through a registry slot. Blocking on catalog membership alone
+  // would strand every expert book at the gate with no picker to fix it.
+  it("still approves an expert book whose profile the catalog never listed", () => {
+    const unit = gateUnit({
+      jobOver: {
+        translationMode: "expert",
+        translationSkillIds: ["skill-1"],
+        translationProfileId: "expert-agent",
+        translationConfigId: "default",
+      },
+    });
+    const { card } = renderDrawer(unit);
+    expect(approveButton(card!).disabled).toBe(false);
+    expect(within(card as HTMLElement).queryByText(copy.gateBlockedByRetiredProvider)).toBeNull();
+  });
+
   it("disables approval while the promotion gate's QA is unresolved", () => {
     const unit = bookUnit({
       status: "waiting_for_approval",
