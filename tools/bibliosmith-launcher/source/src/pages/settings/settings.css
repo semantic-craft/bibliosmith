@@ -35,8 +35,7 @@
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow);
+  background: var(--island);
 }
 
 .st-row {
@@ -118,6 +117,7 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
+  /* Knob stays white in both themes, as the platform switch does. */
   background: #ffffff;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
   transition: transform 0.15s ease;
@@ -140,14 +140,14 @@
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   color: var(--ink);
-  background: var(--surface);
+  background: var(--island);
   font-size: var(--fs-body);
   font-weight: 500;
   white-space: nowrap;
 }
 
 .st-btn:hover:not(:disabled) {
-  background: var(--surface-muted);
+  background: var(--sub);
 }
 
 /* Status pill inside title lines */
@@ -180,7 +180,7 @@
 
 .st-pill.muted {
   color: var(--muted);
-  background: var(--surface-muted);
+  background: var(--sub);
 }
 
 .st-title-line {
@@ -197,7 +197,7 @@
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   color: var(--ink);
-  background: var(--surface);
+  background: var(--island);
   font-size: var(--fs-body);
 }
 
@@ -234,7 +234,7 @@
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   color: var(--ink);
-  background: var(--surface);
+  background: var(--island);
   font-size: var(--fs-body);
 }
 
@@ -279,7 +279,7 @@
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--surface-muted);
+  background: var(--sub);
 }
 
 .st-progress-detail {
@@ -294,12 +294,12 @@
 
 /* Models settings panel */
 .st-models { display: flex; flex-direction: column; gap: 14px; }
-.st-models-lead { margin: 0; color: var(--muted, #6b7280); font-size: 13px; }
+.st-models-lead { margin: 0; color: var(--muted); font-size: 13px; }
 .st-models-active {
   padding: 8px 12px; border-radius: 8px; font-size: 13px;
   background: color-mix(in srgb, currentColor 6%, transparent);
 }
-.st-models-active.muted { color: var(--muted, #6b7280); }
+.st-models-active.muted { color: var(--muted); }
 .st-models-brand { display: flex; flex-direction: column; gap: 8px; }
 .st-models-brand-head {
   display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
@@ -309,16 +309,16 @@
   border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
   border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
 }
-.st-models-slot.active { border-color: color-mix(in srgb, #16a34a 55%, transparent); }
+.st-models-slot.active { border-color: color-mix(in srgb, var(--jade) 55%, transparent); }
 .st-models-slot-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .st-models-slot-name { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
 .st-models-badge {
   display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 600;
-  color: #16a34a; padding: 1px 7px; border-radius: 999px;
-  background: color-mix(in srgb, #16a34a 12%, transparent);
+  color: var(--jade); padding: 1px 7px; border-radius: 999px;
+  background: color-mix(in srgb, var(--jade) 12%, transparent);
 }
-.st-models-status.ok { color: #16a34a; font-size: 12px; }
-.st-models-status.muted { color: var(--muted, #9ca3af); font-size: 12px; }
+.st-models-status.ok { color: var(--jade); font-size: 12px; }
+.st-models-status.muted { color: var(--muted); font-size: 12px; }
 .st-models-slot-grid { display: grid; grid-template-columns: minmax(160px, 1fr) 2fr; gap: 10px; }
 .st-models-slot-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .st-models-slot-grid select, .st-models-slot-grid input {
@@ -328,9 +328,9 @@
 }
 .st-models-slot-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .st-models-msg { font-size: 12px; }
-.st-models-msg.ok { color: #16a34a; }
-.st-models-msg.error { color: #dc2626; }
-.st-models-msg.muted { color: var(--muted, #9ca3af); }
+.st-models-msg.ok { color: var(--jade); }
+.st-models-msg.error { color: var(--err); }
+.st-models-msg.muted { color: var(--muted); }
 @media (max-width: 640px) {
   .st-models-slot-grid { grid-template-columns: 1fr; }
 }
