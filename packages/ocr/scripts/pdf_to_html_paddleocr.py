@@ -716,6 +716,7 @@ def main() -> int:
     operation_progress.start("starting")
 
     # Process books
+    failed_books: list[str] = []
     if config.workers > 1 and len(pdf_files) > 1:
         with ThreadPoolExecutor(max_workers=config.workers) as executor:
             futures = {
@@ -731,6 +732,7 @@ def main() -> int:
                     logging.info("DONE: %s -> %s", pdf.name, html_path)
                 except Exception as exc:
                     logging.error("FAILED: %s -> %s", pdf.name, exc, exc_info=True)
+                    failed_books.append(pdf.name)
     else:
         for p in pdf_files:
             try:
@@ -740,7 +742,17 @@ def main() -> int:
                 logging.info("DONE: %s -> %s", p.name, html_path)
             except Exception as exc:
                 logging.error("FAILED: %s -> %s", p.name, exc, exc_info=True)
+                failed_books.append(p.name)
 
+    if failed_books:
+        operation_progress.touch("failed")
+        logging.error("Completed with %s failed book(s): %s", len(failed_books), ", ".join(failed_books))
+        return 1
+    operation_progress.update(
+        completed=total_pages,
+        total=total_pages,
+        phase="completed",
+    )
     logging.info("All done. Output: %s", output_dir)
     return 0
 

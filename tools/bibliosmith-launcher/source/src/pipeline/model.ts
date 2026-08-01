@@ -338,6 +338,25 @@ export function stepCaption(unit: BookUnit, copy: PipelineCopy): string {
   const index = activeStepIndex(states);
   if (index === -1) {
     if (unit.status === "completed" || unit.status === "skipped") return copy.capAllDone;
+    const stages = focusStages(unit);
+    if (
+      stages.find((stage) => stage.stageId === "translate")?.status === "completed" &&
+      ["pending", "ready"].includes(
+        stages.find((stage) => stage.stageId === "expert_qa")?.status ?? "",
+      )
+    ) {
+      return copy.capTranslationQaPending;
+    }
+    if (
+      stages.find((stage) => stage.stageId === "approve_promotion")?.status === "completed" &&
+      stages.some(
+        (stage) =>
+          ["promote", "build_reading", "validate_reading"].includes(stage.stageId) &&
+          ["pending", "ready"].includes(stage.status),
+      )
+    ) {
+      return copy.capPromotionApprovedPending;
+    }
     return copy.capQueued;
   }
   const name = stepName(index, copy);
@@ -351,11 +370,14 @@ export function stepCaption(unit: BookUnit, copy: PipelineCopy): string {
   if (state === "error") {
     const stage = currentStage(unit);
     const errorText = stage?.safeError?.summary || stage?.error || unit.child?.lastError || unit.job.lastError;
+    if (sourceChangedRequiresRebuild(unit)) return `${name} · ${copy.sourceChangedTitle}`;
     return errorText ? `${name} · ${errorText}` : `${name} · ${copy.capNeedsAttention}`;
   }
   const stage = currentStage(unit);
   if (stage?.status === "running" && stage.unitSummary && stage.unitSummary.total > 0) {
-    return `${name} · ${stage.unitSummary.completed}/${stage.unitSummary.total}`;
+    const runningName = stageLabel(stage.stageId, copy);
+    const count = `${stage.unitSummary.completed}/${stage.unitSummary.total}`;
+    return runningName === name ? `${name} · ${count}` : `${name} · ${runningName} ${count}`;
   }
   if (unit.status === "running") return `${name} · ${copy.capWorking}`;
   return `${name} · ${copy.capQueued}`;
@@ -528,6 +550,18 @@ export function currentStage(unit: BookUnit): BookPipelineStage | null {
   const stages = focusStages(unit);
   const active = stages.find((stage) => stage.status !== "completed" && stage.status !== "skipped");
   return active ?? stages.at(-1) ?? null;
+}
+
+const SOURCE_CHANGED_DOWNSTREAM_EXISTS = "source_changed_downstream_exists";
+
+/** The extracted source changed after downstream artifacts had already been produced. */
+export function sourceChangedRequiresRebuild(unit: BookUnit): boolean {
+  const values = [
+    unit.child?.lastError,
+    unit.job.lastError,
+    ...focusStages(unit).flatMap((stage) => [stage.error, stage.safeError?.code, stage.safeError?.summary]),
+  ];
+  return values.some((value) => value === SOURCE_CHANGED_DOWNSTREAM_EXISTS);
 }
 
 /** Progress in [0,1] for running rows; null when nothing meaningful can be derived. */

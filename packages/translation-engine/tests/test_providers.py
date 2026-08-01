@@ -628,6 +628,44 @@ class HTTPProviderTests(unittest.TestCase):
 
         self.assertLess(time.monotonic() - started, 0.15)
 
+    def test_owned_client_cleanup_cannot_extend_the_total_request_deadline(self) -> None:
+        close_started = threading.Event()
+
+        class BlockingOwnedClient:
+            def post(self, *args: object, **kwargs: object) -> httpx.Response:
+                time.sleep(0.2)
+                return httpx.Response(
+                    200,
+                    json={"choices": [{"message": {"content": "迟到的译文"}}]},
+                )
+
+            def close(self) -> None:
+                close_started.set()
+                time.sleep(0.2)
+
+        provider = OpenAICompatibleProvider(
+            config=_provider_config(
+                profile_id="openai-compatible",
+                provider_type="openai-compatible",
+                base_url="https://openai.example/v1",
+                model="model-a",
+                timeout_seconds=0.02,
+            ),
+            credential_pool=KeyPool(("fake-key",)),
+            max_attempts=1,
+        )
+
+        started = time.monotonic()
+        with mock.patch(
+            "translation_engine.providers.httpx.Client",
+            return_value=BlockingOwnedClient(),
+        ):
+            with self.assertRaises(ProviderTimeoutError):
+                provider.translate(_translation_request())
+
+        self.assertLess(time.monotonic() - started, 0.15)
+        self.assertTrue(close_started.wait(0.4))
+
     def test_total_deadline_does_not_close_or_overlap_an_injected_client(self) -> None:
         attempts = 0
         first_finished = threading.Event()

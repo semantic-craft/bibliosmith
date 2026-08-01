@@ -78,6 +78,12 @@ export function pipelineCopy(locale: PipelineLocale) {
     capNeedsAttention: zh ? "需要处理" : "Needs attention",
     capGateTranslation: zh ? "翻译 · 等你确认后开始" : "Translate · starts after you confirm",
     capGatePromotion: zh ? "生成阅读版 · 等你确认后进行" : "Build reading copy · runs after you confirm",
+    capTranslationQaPending: zh
+      ? "翻译：正文已完成；专家QA：等待开始"
+      : "Translate: body complete; Expert QA: not started",
+    capPromotionApprovedPending: zh
+      ? "生成阅读版：已确认；等待开始"
+      : "Build reading copy: approved; not started",
     stepCurrentPrefix: zh ? "当前：" : "Now: ",
     stepNotInJob: zh ? "本次任务不包含这一步" : "Not part of this job",
     stepSummaryPair: (completedStep: string, currentCaption: string) =>
@@ -110,8 +116,16 @@ export function pipelineCopy(locale: PipelineLocale) {
     savingCustomInstructions: zh ? "保存中…" : "Saving…",
     customInstructionsSaved: zh ? "本书自定义指令已保存" : "Custom instructions saved for this book",
     abNoAction: zh ? "不需要操作，好了会提醒你" : "Nothing to do — you'll be notified",
+    abAdvanceRequired: zh ? "需要操作：继续到下一阶段" : "Action needed: continue to the next stage",
     abGatePrefix: zh ? "下一步需要你：" : "Next step needs you: ",
     abRetryHint: zh ? "已完成的部分都保留着，重试只补失败的部分" : "Completed work is preserved; retry only re-runs what failed",
+    sourceChangedTitle: zh
+      ? "来源已变化：旧分章和译文不再有效"
+      : "Source changed: old chapters and translations are no longer valid",
+    sourceChangedBody: zh
+      ? "检测到 MinerU 精准解析结果与旧来源不同。需要按新来源重新分章并重做后续阶段；旧文件仍保留在备份中。"
+      : "The MinerU Precision result differs from the old source. Rebuild chapters and downstream stages from the new source; old files remain backed up.",
+    rebuildFromMineru: zh ? "按 MinerU 新源重建" : "Rebuild from MinerU source",
 
     // Live worker progress
     progressUnitPages: zh ? "页" : "pages",
@@ -251,7 +265,7 @@ export function pipelineCopy(locale: PipelineLocale) {
     // Overview tab
     evidenceTitle: zh ? "路由证据" : "Route evidence",
     artifactDigestTitle: zh ? "工件摘要" : "Artifact summary",
-    evTextLayer: zh ? "文本层探测" : "Text layer probe",
+    evTextLayer: zh ? "当前来源依据" : "Current source evidence",
     evRoute: zh ? "选定路线" : "Selected route",
     evSourceKind: zh ? "来源类型" : "Source kind",
     evFingerprint: zh ? "源指纹" : "Source fingerprint",

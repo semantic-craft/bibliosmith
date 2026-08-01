@@ -8,6 +8,9 @@ import tempfile
 import threading
 
 
+_TOTAL_UNSET = object()
+
+
 class OperationProgress:
     """Atomic aggregate progress sidecar shared with the Launcher.
 
@@ -32,6 +35,7 @@ class OperationProgress:
         self.scope_id = scope_id or None
         self.completed = 0
         self._item_completed: dict[str, int] = {}
+        self._item_total: dict[str, int] = {}
         self._lock = threading.Lock()
 
     @classmethod
@@ -47,8 +51,18 @@ class OperationProgress:
             scope_id=os.environ.get("BIBLIOSMITH_PROGRESS_SCOPE", "").strip() or None,
         )
 
-    def start(self, phase: str = "starting") -> None:
-        self.update(completed=0, total=self.total, phase=phase)
+    def start(
+        self,
+        phase: str = "starting",
+        total: int | None | object = _TOTAL_UNSET,
+    ) -> None:
+        with self._lock:
+            if total is not _TOTAL_UNSET:
+                self.total = total if isinstance(total, int) and total > 0 else None
+            self.completed = 0
+            self._item_completed.clear()
+            self._item_total.clear()
+            self._write(phase)
 
     def touch(self, phase: str) -> None:
         with self._lock:
@@ -65,16 +79,31 @@ class OperationProgress:
         self, *, completed: int, total: int | None, phase: str
     ) -> None:
         with self._lock:
-            self.total = total if total is not None and total > 0 else None
-            self.completed = max(0, completed)
+            if total is not None and total > 0:
+                self.total = max(self.total or 0, total)
+            self.completed = max(self.completed, completed, 0)
             if self.total is not None:
                 self.completed = min(self.completed, self.total)
             self._write(phase)
 
-    def update_item(self, item_id: str, completed: int, phase: str) -> None:
+    def update_item(
+        self,
+        item_id: str,
+        completed: int,
+        phase: str,
+        *,
+        total: int | None = None,
+    ) -> None:
         with self._lock:
-            self._item_completed[item_id] = max(0, completed)
-            self.completed = sum(self._item_completed.values())
+            if total is not None and total > 0:
+                self._item_total[item_id] = max(
+                    self._item_total.get(item_id, 0), total
+                )
+                self.total = max(self.total or 0, sum(self._item_total.values()))
+            self._item_completed[item_id] = max(
+                self._item_completed.get(item_id, 0), completed, 0
+            )
+            self.completed = max(self.completed, sum(self._item_completed.values()))
             if self.total is not None:
                 self.completed = min(self.completed, self.total)
             self._write(phase)

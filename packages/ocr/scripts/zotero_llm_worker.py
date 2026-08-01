@@ -81,6 +81,7 @@ class Config:
     zotero_api_key: str
     baidu_token: str
     mineru_token_available: bool
+    mineru_language: str
     baidu_job_url: str
     baidu_model: str
     max_ocr_pages_per_run: int
@@ -198,6 +199,7 @@ def get_config(*, zotero_tags: Iterable[str] = ()) -> Config:
             os.environ.get("MINERU_API_TOKEN", "").strip()
             or os.environ.get("MINERU_TOKEN", "").strip()
         ),
+        mineru_language=os.environ.get("MINERU_LANGUAGE", "ch").strip() or "ch",
         baidu_job_url=os.environ.get("BAIDU_PADDLEOCR_JOB_URL", DEFAULT_BAIDU_JOB_URL).rstrip("/"),
         baidu_model=os.environ.get("BAIDU_PADDLEOCR_MODEL", DEFAULT_BAIDU_MODEL).strip() or DEFAULT_BAIDU_MODEL,
         max_ocr_pages_per_run=env_int("MAX_OCR_PAGES_PER_RUN", 10000),
@@ -1822,6 +1824,41 @@ def format_page_ranges(pages: list[int]) -> str:
     return ",".join(ranges)
 
 
+def _is_relative_mineru_reference(value: str) -> bool:
+    reference = value.strip().strip("<>")
+    parsed = urlparse(reference)
+    return bool(reference) and not reference.startswith(("#", "/")) and not parsed.scheme
+
+
+def rewrite_mineru_references(markdown: str, prefix: str) -> str:
+    """Keep MinerU's relative assets reachable beside the staged Markdown."""
+
+    def markdown_replacement(match: re.Match[str]) -> str:
+        opening, raw_reference, closing = match.groups()
+        if not _is_relative_mineru_reference(raw_reference):
+            return match.group(0)
+        wrapped = raw_reference.startswith("<") and raw_reference.endswith(">")
+        reference = raw_reference.strip("<>")
+        rewritten = f"{prefix}/{reference}"
+        if wrapped:
+            rewritten = f"<{rewritten}>"
+        return f"{opening}{rewritten}{closing}"
+
+    rewritten = re.sub(
+        r"(!?\[[^\]]*\]\()([^\s)]+)([^)]*\))",
+        markdown_replacement,
+        markdown,
+    )
+
+    def html_replacement(match: re.Match[str]) -> str:
+        attribute, quote, reference = match.groups()
+        if not _is_relative_mineru_reference(reference):
+            return match.group(0)
+        return f"{attribute}={quote}{prefix}/{reference}{quote}"
+
+    return re.sub(r"\b(src|href)=(['\"])([^'\"]+)\2", html_replacement, rewritten)
+
+
 def process_mineru_route(
     *,
     attachment: Attachment,
@@ -1841,6 +1878,8 @@ def process_mineru_route(
     run_root = config.output_root / ".state" / "mineru" / attachment.key / source_md5
     run_root.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=run_root))
+    markdown_path, sidecar_path = output_paths(config, attachment, ROUTE_MINERU)
+    artifact_dir = markdown_path.with_suffix(".mineru")
     timeout_seconds = max(1, int(deadline - time.time()))
     try:
         command = [
@@ -1851,6 +1890,8 @@ def process_mineru_route(
             str(run_dir),
             "--mode",
             "batch",
+            "--language",
+            config.mineru_language,
             "--max-runtime-seconds",
             str(timeout_seconds),
         ]
@@ -1879,9 +1920,31 @@ def process_mineru_route(
         content = markdown_candidates[0].read_text(encoding="utf-8").strip()
         if not content:
             raise WorkerError("MinerU single-attachment adapter produced empty Markdown")
+        staged_artifact_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".{artifact_dir.name}-",
+                dir=artifact_dir.parent,
+            )
+        )
+        try:
+            shutil.copytree(
+                markdown_candidates[0].parent,
+                staged_artifact_dir,
+                dirs_exist_ok=True,
+            )
+            if artifact_dir.exists():
+                if not artifact_dir.is_dir():
+                    raise WorkerError(
+                        f"MinerU artifact destination is not a directory: {artifact_dir}"
+                    )
+                shutil.rmtree(artifact_dir)
+            staged_artifact_dir.replace(artifact_dir)
+        except BaseException:
+            shutil.rmtree(staged_artifact_dir, ignore_errors=True)
+            raise
+        content = rewrite_mineru_references(content, artifact_dir.name)
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
-    markdown_path, sidecar_path = output_paths(config, attachment, ROUTE_MINERU)
     metadata = build_metadata(
         attachment,
         source_md5=source_md5,
@@ -1897,6 +1960,9 @@ def process_mineru_route(
                 "source_pdf_key": attachment.key,
                 "route": ROUTE_MINERU,
                 "pages": pages,
+                "mineru_language": config.mineru_language,
+                "mineru_artifact_dir": str(artifact_dir),
+                "mineru_manifest_path": str(artifact_dir / "mineru_manifest.json"),
             },
             ensure_ascii=False,
             indent=2,

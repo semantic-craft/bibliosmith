@@ -11,7 +11,11 @@ from translation_engine.engine import (
     _restore_chunks,
     run_manifest,
 )
-from translation_engine.placeholders import protect_markdown
+from translation_engine.placeholders import (
+    protect_chunk_structure,
+    protect_markdown,
+    protect_markdown_for_chunking,
+)
 from translation_engine.profiles import ZH_HANS
 from translation_engine.providers import TranslationRequest
 from tests.fixtures import build_run_fixture
@@ -154,6 +158,49 @@ class StructurePreservationTests(unittest.TestCase):
         self.assertEqual(
             protected.restore(translated),
             "# 标题\n\n第一段。\n\n## 小标题\n\n第二段。\n",
+        )
+
+    def test_markdown_heading_labels_are_protected_verbatim(self) -> None:
+        source = (
+            "## II. Wirtschaftlicher Wert\n\n"
+            "### 3. Zwischenergebnis\n\n"
+            "#### aa) Nutzungswert\n"
+        )
+
+        protected = protect_markdown(source)
+
+        self.assertNotIn("II.", protected.text)
+        self.assertNotIn("3.", protected.text)
+        self.assertNotIn("aa)", protected.text)
+        translated = (
+            protected.text.replace("Wirtschaftlicher Wert", "经济价值")
+            .replace("Zwischenergebnis", "中间结论")
+            .replace("Nutzungswert", "使用价值")
+        )
+        self.assertEqual(
+            protected.restore(translated),
+            "## II. 经济价值\n\n### 3. 中间结论\n\n#### aa) 使用价值\n",
+        )
+
+        inline = protect_markdown_for_chunking(source)
+        chunk = protect_chunk_structure(inline.text, inline)
+        self.assertNotIn("II.", chunk.text)
+        self.assertNotIn("3.", chunk.text)
+        self.assertNotIn("aa)", chunk.text)
+
+    def test_html_table_tags_round_trip_as_chunk_structure_placeholders(self) -> None:
+        source = "<table><tr><td>Abkommen</td><td>Agreement</td></tr></table>"
+        inline = protect_markdown_for_chunking(source)
+        protected = protect_chunk_structure(inline.text, inline)
+
+        self.assertNotIn("<table>", protected.text)
+        self.assertNotIn("<td>", protected.text)
+        translated = protected.text.replace("Abkommen", "协定").replace(
+            "Agreement", "协议"
+        )
+        self.assertEqual(
+            protected.restore(translated),
+            "<table><tr><td>协定</td><td>协议</td></tr></table>",
         )
 
     def test_simplified_chinese_profile_requires_exact_markdown_structure(self) -> None:

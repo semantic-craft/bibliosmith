@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
-from io import BytesIO
+from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
@@ -172,6 +172,64 @@ class FailedBatchSession(LocalBatchSession):
 
 
 class MinerUPrecisionCliTests(unittest.TestCase):
+    def test_cli_marks_progress_failed_when_precision_extract_fails(self) -> None:
+        with (
+            mock.patch.object(
+                mineru, "main", side_effect=mineru.MinerUError("authentication failed")
+            ),
+            mock.patch.object(mineru.OPERATION_PROGRESS, "touch") as touch,
+            mock.patch("sys.stderr", new_callable=StringIO),
+        ):
+            result = mineru.cli([])
+
+        self.assertEqual(result, 1)
+        touch.assert_called_once_with("failed")
+
+    def test_local_pdf_finishes_with_known_page_total(self) -> None:
+        progress = mock.Mock()
+        progress.total = 450
+        item = mineru.WorkItem(
+            source="book.pdf",
+            name="book.pdf",
+            data_id="book",
+            local_path=Path("book.pdf"),
+            source_pages=450,
+        )
+        with (
+            mock.patch.object(mineru, "collect_items", return_value=([item], [])),
+            mock.patch.object(mineru, "process_batches"),
+            mock.patch.object(mineru, "OPERATION_PROGRESS", progress),
+            mock.patch.dict(os.environ, {"MINERU_API_TOKEN": "test-token"}, clear=False),
+        ):
+            result = mineru.main(["book.pdf"])
+
+        self.assertEqual(result, 0)
+        progress.start.assert_called_once_with("uploading", total=450)
+        progress.update.assert_called_once_with(
+            completed=450, total=450, phase="completed"
+        )
+
+    def test_submit_only_run_is_not_reported_as_completed(self) -> None:
+        progress = mock.Mock()
+        item = mineru.WorkItem(
+            source="book.pdf",
+            name="book.pdf",
+            data_id="book",
+            local_path=Path("book.pdf"),
+            source_pages=450,
+        )
+        with (
+            mock.patch.object(mineru, "collect_items", return_value=([item], [])),
+            mock.patch.object(mineru, "process_batches"),
+            mock.patch.object(mineru, "OPERATION_PROGRESS", progress),
+            mock.patch.dict(os.environ, {"MINERU_API_TOKEN": "test-token"}, clear=False),
+        ):
+            result = mineru.main(["book.pdf", "--no-wait"])
+
+        self.assertEqual(result, 0)
+        progress.touch.assert_called_once_with("submitted")
+        progress.update.assert_not_called()
+
     def test_single_html_url_uses_precision_task_with_mineru_html_model(self) -> None:
         session = SingleUrlSession()
         with (
@@ -275,6 +333,8 @@ class MinerUPrecisionCliTests(unittest.TestCase):
         from tempfile import TemporaryDirectory
 
         session = SplitPdfSession()
+        progress = mock.Mock()
+        progress.total = 201
         uploaded_pdfs: list[bytes] = []
 
         def put(url: str, **kwargs: object) -> FakeResponse:
@@ -302,6 +362,7 @@ class MinerUPrecisionCliTests(unittest.TestCase):
                 mock.patch.object(mineru.requests, "Session", return_value=session),
                 mock.patch.object(mineru.requests, "put", side_effect=put),
                 mock.patch.object(mineru.requests, "get", side_effect=get),
+                mock.patch.object(mineru, "OPERATION_PROGRESS", progress),
                 mock.patch.dict(os.environ, {"MINERU_API_TOKEN": "test-token"}, clear=False),
             ):
                 result = mineru.main(
@@ -316,6 +377,12 @@ class MinerUPrecisionCliTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual([len(PdfReader(BytesIO(payload)).pages) for payload in uploaded_pdfs], [200, 1])
+            progress.update_item.assert_has_calls(
+                [
+                    mock.call(mock.ANY, 200, "extracting", total=200),
+                    mock.call(mock.ANY, 1, "extracting", total=1),
+                ]
+            )
             full_markdown = list(output_dir.rglob("full.md"))
             self.assertEqual(len(full_markdown), 1)
             merged = full_markdown[0].read_text(encoding="utf-8")

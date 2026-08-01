@@ -256,6 +256,7 @@ class CheckpointStoreTests(unittest.TestCase):
                 provider_profile_id="fake-provider-profile",
                 provider_config_id="fake-config-no-secrets",
                 translation_policy_version="translation-policy-v1",
+                pass_id="translation-v1+chunking-policy-v5",
             )
             CheckpointStore(
                 project_root / "chapters" / "translated" / ".partial"

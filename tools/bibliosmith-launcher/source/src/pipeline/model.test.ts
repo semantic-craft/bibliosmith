@@ -258,6 +258,54 @@ describe("stepCaption", () => {
     expect(stepCaption(unit, copy)).toBe(`${copy.step3} · 12/26`);
   });
 
+  it("names expert QA instead of presenting its units as translation progress", () => {
+    const unit = bookUnit({
+      status: "running",
+      stages: [
+        stage("translate", "completed"),
+        stage("expert_qa", "running", {
+          unitSummary: unitSummary({ total: 17, completed: 0 }),
+        }),
+      ],
+    });
+
+    expect(stepCaption(unit, pipelineCopy("zh-CN"))).toBe("翻译 · 专家QA 0/17");
+  });
+
+  it("states that translation is complete while expert QA is waiting to start", () => {
+    const unit = bookUnit({
+      status: "ready",
+      stages: [
+        stage("translate", "completed"),
+        stage("expert_qa", "pending"),
+        stage("approve_promotion", "pending"),
+      ],
+    });
+
+    expect(stepCaption(unit, pipelineCopy("zh-CN"))).toBe(
+      "翻译：正文已完成；专家QA：等待开始",
+    );
+    expect(stepSummaryCaption(unit, pipelineCopy("zh-CN"))).toBe(
+      "翻译：正文已完成；专家QA：等待开始",
+    );
+  });
+
+  it("distinguishes an approved reading build from work that has started", () => {
+    const unit = bookUnit({
+      status: "ready",
+      stages: [
+        stage("expert_qa", "completed"),
+        stage("approve_promotion", "completed"),
+        stage("promote", "pending"),
+        stage("build_reading", "pending"),
+      ],
+    });
+
+    expect(stepCaption(unit, pipelineCopy("zh-CN"))).toBe(
+      "生成阅读版：已确认；等待开始",
+    );
+  });
+
   it("reports a finished book as all done", () => {
     const unit = bookUnit({ status: "completed", stages: [stage("route", "completed")] });
     expect(stepCaption(unit, copy)).toBe(copy.capAllDone);

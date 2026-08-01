@@ -222,7 +222,15 @@ def _post_with_total_deadline(
             )
         except BaseException as error:
             outcome = error
-        result.put(outcome)
+        try:
+            result.put(outcome)
+        finally:
+            # Cleanup belongs to the worker that owns the client. Closing an
+            # in-flight httpx client from the deadline thread can itself block
+            # on that request and silently turn a 120-second hard deadline into
+            # an unbounded wait.
+            if owns_client:
+                active_client.close()
 
     worker = Thread(target=post, name="provider-request", daemon=True)
     worker.start()
@@ -230,16 +238,9 @@ def _post_with_total_deadline(
         outcome = result.get(timeout=timeout_seconds)
     except Empty as error:
         deadline_guard.record_timeout(worker)
-        if owns_client:
-            active_client.close()
         raise httpx.ReadTimeout("provider request exceeded its total deadline") from error
-    finally:
-        if owns_client and not worker.is_alive():
-            active_client.close()
     if isinstance(outcome, BaseException):
         raise outcome
-    if owns_client:
-        active_client.close()
     return outcome
 
 

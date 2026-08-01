@@ -58,6 +58,7 @@ class EngineError(Exception):
 
 
 MAX_CUSTOM_INSTRUCTION_CHARACTERS = 2000
+CHUNKING_POLICY_VERSION = "chunking-policy-v5"
 
 # Enough places to see a pattern, few enough that a book-length report stays
 # readable and small on the way through stdout into the job's state.
@@ -291,7 +292,7 @@ def _planned_translation_work(
     completion_store = CompletionStore(
         project_root / "chapters" / "translated" / ".completed"
     )
-    translation_pass_id = _custom_instruction_pass_id(
+    translation_pass_id = _translation_pass_id(
         "translation-v1-text-cleanup" if text_cleanup else "translation-v1",
         custom_translation,
     )
@@ -608,7 +609,7 @@ def _translate_unit(
     checkpoint_store = CheckpointStore(
         project_root / "chapters" / "translated" / ".partial"
     )
-    translation_pass_id = _custom_instruction_pass_id(
+    translation_pass_id = _translation_pass_id(
         "translation-v1-text-cleanup" if text_cleanup else "translation-v1",
         custom_translation,
     )
@@ -1203,6 +1204,12 @@ def _custom_instruction_pass_id(base: str, instruction: str | None) -> str:
         return base
     digest = _sha256(instruction.encode())[:16]
     return f"{base}-custom-{digest}"
+
+
+def _translation_pass_id(base: str, instruction: str | None) -> str:
+    return _custom_instruction_pass_id(
+        f"{base}+{CHUNKING_POLICY_VERSION}", instruction
+    )
 
 
 def _restore_chunks(

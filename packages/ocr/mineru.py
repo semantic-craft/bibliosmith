@@ -583,18 +583,36 @@ def poll_batch(
         response = session.get(url, headers=auth_headers(token), timeout=args.timeout_seconds)
         payload = checked_json(response, f"poll {batch_id}")
         results = payload.get("data", {}).get("extract_result", [])
-        progress_rows = [result.get("extract_progress") or {} for result in results]
-        try:
-            extracted_pages = sum(int(row.get("extracted_pages")) for row in progress_rows)
-            total_pages = sum(int(row.get("total_pages")) for row in progress_rows)
-        except (TypeError, ValueError):
-            extracted_pages = 0
-            total_pages = None
-        OPERATION_PROGRESS.update(
-            completed=extracted_pages,
-            total=total_pages,
-            phase="extracting",
-        )
+        OPERATION_PROGRESS.touch("extracting")
+        items_by_id = {item.data_id: item for item in batch}
+        items_by_name: dict[str, list[WorkItem]] = {}
+        for item in batch:
+            items_by_name.setdefault(item.name, []).append(item)
+        for result in results:
+            item = items_by_id.get(str(result.get("data_id")))
+            if item is None and len(items_by_name.get(str(result.get("file_name")), [])) == 1:
+                item = items_by_name[str(result["file_name"])][0]
+            if item is None:
+                continue
+            progress = result.get("extract_progress") or {}
+            try:
+                extracted_pages = max(0, int(progress.get("extracted_pages")))
+            except (TypeError, ValueError):
+                extracted_pages = 0
+            try:
+                total_pages = max(0, int(progress.get("total_pages"))) or None
+            except (TypeError, ValueError):
+                total_pages = None
+            known_pages = page_count_for_item(item)
+            if result.get("state") == "done" and known_pages is not None:
+                extracted_pages = max(extracted_pages, known_pages)
+                total_pages = max(total_pages or 0, known_pages)
+            OPERATION_PROGRESS.update_item(
+                item.data_id,
+                extracted_pages,
+                "extracting",
+                total=total_pages,
+            )
         counts: dict[str, int] = {}
         for result in results:
             state = result.get("state", "unknown")
@@ -738,6 +756,13 @@ def page_count_for_item(item: WorkItem) -> int | None:
     if item.page_ranges and item.source_pages is not None:
         return len(parse_page_ranges(item.page_ranges, item.source_pages))
     return item.source_pages
+
+
+def aggregate_known_page_total(items: list[WorkItem]) -> int | None:
+    counts = [page_count_for_item(item) for item in items]
+    if not counts or any(count is None for count in counts):
+        return None
+    return sum(count for count in counts if count is not None)
 
 
 def merge_downloaded_parts(
@@ -959,15 +984,31 @@ def main(argv: list[str] | None = None) -> int:
     local_items, url_items = collect_items(args)
     if not local_items and not url_items:
         raise MinerUError("No supported local files or URLs found")
-    OPERATION_PROGRESS.start("uploading")
+    known_total = aggregate_known_page_total([*local_items, *url_items])
+    OPERATION_PROGRESS.start("uploading", total=known_total)
     print(f"local_files={len(local_items)} urls={len(url_items)}")
     process_batches(args, token, local_items, url_items)
+    if args.no_wait:
+        OPERATION_PROGRESS.touch("submitted")
+    elif OPERATION_PROGRESS.total is not None:
+        OPERATION_PROGRESS.update(
+            completed=OPERATION_PROGRESS.total,
+            total=OPERATION_PROGRESS.total,
+            phase="completed",
+        )
+    else:
+        OPERATION_PROGRESS.touch("completed")
     return 0
 
 
-if __name__ == "__main__":
+def cli(argv: list[str] | None = None) -> int:
     try:
-        raise SystemExit(main())
+        return main(argv)
     except MinerUError as exc:
+        OPERATION_PROGRESS.touch("failed")
         print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

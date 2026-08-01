@@ -168,13 +168,35 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             )
             config = get_config()
             config.output_root = root / "output"
+            config.mineru_language = "latin"
             state = StateDB(root / "state.sqlite3")
 
             def fake_run(command: list[str], **_: object) -> SimpleNamespace:
                 output_dir = Path(command[command.index("--output-dir") + 1])
-                result = output_dir / "batch" / "document" / "extracted" / "full.md"
+                self.assertEqual(
+                    command[command.index("--language") + 1],
+                    "latin",
+                )
+                result = output_dir / "document" / "full.md"
                 result.parent.mkdir(parents=True)
-                result.write_text("# MinerU result\n", encoding="utf-8")
+                image = (
+                    result.parent
+                    / ".mineru_batches"
+                    / "batch-1"
+                    / "part-1"
+                    / "images"
+                    / "figure.png"
+                )
+                image.parent.mkdir(parents=True)
+                image.write_bytes(b"png-fixture")
+                result.write_text(
+                    "# MinerU result\n\n"
+                    "![Figure](.mineru_batches/batch-1/part-1/images/figure.png)\n",
+                    encoding="utf-8",
+                )
+                (result.parent / "mineru_manifest.json").write_text(
+                    '{"model_version":"vlm"}\n', encoding="utf-8"
+                )
                 return SimpleNamespace(returncode=0)
 
             with patch("zotero_llm_worker.subprocess.run", side_effect=fake_run):
@@ -195,8 +217,28 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             assert row is not None
             self.assertEqual("mineru", row["route"])
             markdown = Path(row["output_path"])
-            self.assertIn('parent_item_key: "XEMDH9G8"', markdown.read_text(encoding="utf-8"))
-            self.assertEqual([], list(config.output_root.rglob("full.md")))
+            markdown_text = markdown.read_text(encoding="utf-8")
+            self.assertIn('parent_item_key: "XEMDH9G8"', markdown_text)
+            self.assertIn(
+                f"]({markdown.stem}.mineru/.mineru_batches/",
+                markdown_text,
+            )
+            artifact_dir = markdown.with_suffix(".mineru")
+            self.assertEqual(
+                b"png-fixture",
+                (
+                    artifact_dir
+                    / ".mineru_batches"
+                    / "batch-1"
+                    / "part-1"
+                    / "images"
+                    / "figure.png"
+                ).read_bytes(),
+            )
+            sidecar = json.loads(Path(row["sidecar_path"]).read_text(encoding="utf-8"))
+            self.assertEqual("latin", sidecar["mineru_language"])
+            self.assertEqual(str(artifact_dir), sidecar["mineru_artifact_dir"])
+            self.assertTrue((artifact_dir / "mineru_manifest.json").is_file())
 
     def test_completed_worker_evidence_binds_source_markdown_and_zotero_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -20,6 +20,7 @@ import {
   stepSummaryCaption,
   stepName,
   stepStatusCaption,
+  sourceChangedRequiresRebuild,
   translationFailureSummary,
   unitAdvanceAction,
   unitRoute,
@@ -59,7 +60,7 @@ export type BookDrawerProps = {
   onClose: () => void;
   onRetry: (jobId: string) => void;
   onDelete: (jobId: string, childId?: string | null) => void;
-  onAdvance: (jobId: string, childId: string) => void;
+  onAdvance: (jobId: string, childId: string, invalidateDownstream?: boolean) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   // Adopting a sampled slot as the book's own. Separate from sampling, because
   // sampling is "try one out" and this decides what the full run uses.
@@ -462,6 +463,23 @@ function StateCard(props: BookDrawerProps) {
     "";
   const advance = unitAdvanceAction(unit);
 
+  if (sourceChangedRequiresRebuild(unit) && unit.child) {
+    return (
+      <div className="pl-hintcard blockc">
+        <span>◈ {copy.sourceChangedBody}</span>
+        <span className="pl-spacer" />
+        <button
+          className="pl-btn sm primary"
+          type="button"
+          disabled={busy === "advance"}
+          onClick={() => onAdvance(unit.job.id, unit.child!.id, true)}
+        >
+          {copy.rebuildFromMineru}
+        </button>
+      </div>
+    );
+  }
+
   if (unit.status === "failed" || unit.status === "partial") {
     return (
       <div className="pl-hintcard errc">
@@ -675,6 +693,9 @@ function DiagnosticExport({
 function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement | null } {
   const { unit, copy, busy } = props;
   const gate = pendingGates(unit, copy)[0];
+  if (sourceChangedRequiresRebuild(unit)) {
+    return { hint: copy.sourceChangedTitle, button: null };
+  }
   if (gate && !gate.invalidated) {
     const isTranslation = gate.stageId === "approve_translation";
     const failedChecks = gate.checks.filter((check) => check.ok === false).length;
@@ -701,6 +722,9 @@ function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement
         </button>
       ),
     };
+  }
+  if (unitAdvanceAction(unit)) {
+    return { hint: copy.abAdvanceRequired, button: null };
   }
   if (unit.status === "completed" && unit.job.openTarget) {
     return {

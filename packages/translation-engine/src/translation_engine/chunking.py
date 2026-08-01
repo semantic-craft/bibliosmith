@@ -6,6 +6,8 @@ from .placeholders import PLACEHOLDER_PATTERN
 
 
 _SAFE_BREAK_PATTERN = re.compile(r"\n[ \t]*\n|\n|[.!?。！？][ \t]+|[ \t]+")
+_HTML_TABLE_ROW_BREAK_PATTERN = re.compile(r"</tr>", re.IGNORECASE)
+_HTML_TABLE_SOFT_LIMIT = 1024
 
 
 class Utf8ByteTokenCounter:
@@ -50,6 +52,12 @@ class TokenChunker:
             remaining = text[cursor:]
             spans = self.counter.spans(remaining)
             if len(spans) <= self.max_tokens:
+                if len(spans) > _HTML_TABLE_SOFT_LIMIT:
+                    table_end = self._last_table_row_break(remaining, len(remaining))
+                    if table_end is not None and table_end < len(remaining):
+                        chunks.append(remaining[:table_end])
+                        cursor += table_end
+                        continue
                 chunks.append(remaining)
                 break
 
@@ -69,9 +77,31 @@ class TokenChunker:
         return chunks
 
     def _last_safe_break(self, text: str, hard_end: int) -> int | None:
+        # MinerU may emit a complete table as one physical Markdown line. A
+        # generic whitespace break can then split a <td> value in half, leaving
+        # the model with two malformed HTML fragments. Prefer a complete row
+        # whenever one fits; the ordinary prose hierarchy remains the fallback.
+        table_row_break = self._last_table_row_break(text, hard_end)
+        if table_row_break is not None:
+            return table_row_break
         candidates = [
             match.end()
             for match in _SAFE_BREAK_PATTERN.finditer(text, 0, hard_end)
             if self.counter.count(text[: match.end()]) > 0
         ]
         return candidates[-1] if candidates else None
+
+    def _last_table_row_break(self, text: str, hard_end: int) -> int | None:
+        table_row_candidates = [
+            match.end()
+            for match in _HTML_TABLE_ROW_BREAK_PATTERN.finditer(text, 0, hard_end)
+            if self.counter.count(text[: match.end()]) > 0
+        ]
+        if not table_row_candidates:
+            return None
+        soft_candidates = [
+            end
+            for end in table_row_candidates
+            if self.counter.count(text[:end]) <= _HTML_TABLE_SOFT_LIMIT
+        ]
+        return soft_candidates[-1] if soft_candidates else table_row_candidates[0]

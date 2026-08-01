@@ -17,14 +17,18 @@ _PROTECTED_INLINE_MARKDOWN = re.compile(
     _INLINE_MARKDOWN_PATTERN,
     re.DOTALL | re.MULTILINE,
 )
+_HEADING_PREFIX_PATTERN = (
+    r"^[ \t]{0,3}#{1,6}[ \t]+(?:(?:[A-Za-z]+|\d+)[.)][ \t]+)?"
+)
 _STRUCTURE_MARKDOWN = re.compile(
-    r"(?P<heading_prefix>^[ \t]{0,3}#{1,6}[ \t]+)"
-    r"|(?P<paragraph_break>\n[ \t]*\n(?:[ \t]*\n)*)",
+    rf"(?P<heading_prefix>{_HEADING_PREFIX_PATTERN})"
+    r"|(?P<paragraph_break>\n[ \t]*\n(?:[ \t]*\n)*)"
+    r"|(?P<html_tag></?[A-Za-z][^>\n]*>)",
     re.MULTILINE,
 )
 _PROTECTED_MARKDOWN = re.compile(
     _INLINE_MARKDOWN_PATTERN
-    + r"|(?P<heading_prefix>^[ \t]{0,3}#{1,6}[ \t]+)"
+    + rf"|(?P<heading_prefix>{_HEADING_PREFIX_PATTERN})"
     + r"|(?P<paragraph_break>\n[ \t]*\n(?:[ \t]*\n)*)",
     re.DOTALL | re.MULTILINE,
 )

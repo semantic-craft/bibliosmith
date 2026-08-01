@@ -32,7 +32,7 @@ pub(crate) const ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION: &str = "zotero-worke
 pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_MARKER: &str =
     "BOOK_PIPELINE_ATTACHMENT_EVIDENCE ";
 pub(crate) const MIGRATED_INTERRUPTED_OWNER: &str = "migrated-interrupted";
-pub(crate) const SPLIT_POLICY_VERSION: &str = "split-policy-v2";
+pub(crate) const SPLIT_POLICY_VERSION: &str = "split-policy-v3";
 pub(crate) const TASK_POLICY_VERSION: &str = "task-policy-v1";
 pub(crate) const SOURCE_MAP_SCHEMA: &str = "local-reading-source-map-v1";
 pub(crate) const CHAPTER_CONTROL_SCHEMA: &str = "local-reading-chapter-control-v1";

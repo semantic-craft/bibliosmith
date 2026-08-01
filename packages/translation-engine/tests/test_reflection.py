@@ -533,13 +533,14 @@ class ReflectionSecondPassTests(unittest.TestCase):
                 {"code": "provider_unavailable", "retryable": True},
             )
             self.assertEqual(
-                draft_checkpoint["idempotencyKey"]["passId"], "translation-v1"
+                draft_checkpoint["idempotencyKey"]["passId"],
+                "translation-v1+chunking-policy-v5",
             )
             # The reflection key composes the first pass's id, because the
             # revisions it stores were computed from that pass's drafts.
             self.assertEqual(
                 reflection_checkpoint["idempotencyKey"]["passId"],
-                "reflection-v1+translation-v1",
+                "reflection-v1+translation-v1+chunking-policy-v5",
             )
             self.assertEqual(reflection_checkpoint["nextChunkIndex"], 1)
             self.assertEqual(reflection_checkpoint["translatedChunks"], ["AA\n"])

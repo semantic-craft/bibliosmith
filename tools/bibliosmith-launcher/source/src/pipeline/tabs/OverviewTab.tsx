@@ -10,6 +10,7 @@ import {
   routeKindLabel,
   stageLabel,
   statusLabel,
+  sourceChangedRequiresRebuild,
   translationFailureSummary,
   unitAdvanceAction,
   unitRoute,
@@ -67,6 +68,14 @@ function ActionCard({ unit, copy, busy, onRetry, onAdvance, onHandoff, onGoAppro
     unit.job.lastError ||
     "";
   const advance = unitAdvanceAction(unit);
+
+  if (sourceChangedRequiresRebuild(unit)) {
+    return (
+      <div className="pl-hintcard blockc">
+        <span>◈ {copy.sourceChangedBody}</span>
+      </div>
+    );
+  }
 
   if (unit.status === "waiting_for_approval" || pendingGates(unit, copy).length > 0) {
     return (
