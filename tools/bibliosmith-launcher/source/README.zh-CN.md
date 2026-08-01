@@ -62,6 +62,22 @@ cd src-tauri && cargo test
 `cargo test` 不需要先构建前端，测试不读 `dist/`。全仓的套件清单与实测数量见
 `CONTRIBUTING.md`。
 
+### cargo test 反复弹钥匙串密码
+
+`tauri.conf.json` 的 `signingIdentity` 只作用于 `tauri build` 打出的 bundle，管不到
+`cargo test` 与 `tauri dev` 直接跑的 rustc 二进制——那些是 ad-hoc 签名，designated
+requirement 是内容 cdhash，每编一次就变，所以「Always Allow」只对当次构建有效。
+
+持有 Apple Development 证书的话，用固定 bundle identifier 重签一次即可：
+
+```sh
+./scripts/codesign-dev-macos.sh
+```
+
+之后在钥匙串里对 `com.bibliosmith.launcher.models` 各条目 Always Allow 一次，重编不再
+失效。可用 `BIBLIOSMITH_CODESIGN_IDENTITY` 指定证书。没有证书就跳过这节——弹窗只影响
+本地开发体验，不影响测试结果。
+
 ## 日志
 
 ```text
