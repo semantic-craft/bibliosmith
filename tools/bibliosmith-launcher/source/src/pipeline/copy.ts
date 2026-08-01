@@ -167,6 +167,9 @@ export function pipelineCopy(locale: PipelineLocale) {
     sampleDegradationAligned: zh ? "已对齐修复" : "Aligned fallback",
     sampleDegradationSource: zh ? "保留原文" : "Source fallback",
     gateBlockedByChecks: zh ? "有检查未通过，展开高级详情查看。" : "Some checks failed — see advanced details.",
+    gateBlockedByRetiredProvider: zh
+      ? "本书正式模型已不再受支持，就这样批准的话翻译起不来。请在上面选一个当前支持的模型，点「以此模型翻译本书」，再批准。"
+      : "This book's model is no longer supported, and approving as-is leaves a translation that cannot start. Pick a supported model above, apply it to the book, then approve.",
     gateInvalidatedNote: zh
       ? "内容在审批后发生了变化，需要重新生成审批包。"
       : "Content changed after the packet was built; it needs re-packaging.",

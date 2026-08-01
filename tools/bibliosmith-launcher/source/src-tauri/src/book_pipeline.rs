@@ -9729,16 +9729,26 @@ fn apply_active_model_to_manifest(
     }
 }
 
-/// Inject the Keychain-stored API key for this slot into the engine subprocess,
-/// under the slot's key_env. A no-op when no key is stored, so translation still
-/// falls back to a key in the repository-root .env. The engine's credential path
-/// is unchanged either way — it reads an environment variable.
-fn inject_model_credential(command: &mut RunnerCommand, profile_id: &str, config_id: &str) {
+/// Inject the slot's per-user runtime settings into the engine subprocess. API
+/// keys come from Keychain; Qwen's optional workspace URL and web-search choice
+/// come from Launcher config. Missing values preserve the engine registry and
+/// root .env defaults.
+fn inject_model_runtime_env(command: &mut RunnerCommand, profile_id: &str, config_id: &str) {
     let Ok(repo_root) = translation_engine_repo_root() else {
         return;
     };
     if let Some((key_env, value)) =
         crate::model_settings::resolve_credential_env(&repo_root, profile_id, config_id)
+    {
+        command.env.push((key_env, value));
+    }
+    if let Some((key_env, value)) =
+        crate::model_settings::resolve_base_url_env(&repo_root, profile_id, config_id)
+    {
+        command.env.push((key_env, value));
+    }
+    if let Some((key_env, value)) =
+        crate::model_settings::resolve_web_search_env(&repo_root, profile_id, config_id)
     {
         command.env.push((key_env, value));
     }
@@ -10011,7 +10021,7 @@ fn run_translation_sample_with_executor(
     fs::write(&manifest_path, manifest_json).map_err(|err| err.to_string())?;
 
     let mut command = build_translation_sample_command(child, &manifest_path)?;
-    inject_model_credential(&mut command, provider_profile_id, provider_config_id);
+    inject_model_runtime_env(&mut command, provider_profile_id, provider_config_id);
     let command_result = match executor.execute(&command) {
         Ok(result) => {
             fs::remove_file(&manifest_path).map_err(|err| {
@@ -10474,7 +10484,7 @@ fn run_translate_stage(
     }
 
     let mut command = build_translation_engine_command(child, &manifest_path)?;
-    inject_model_credential(
+    inject_model_runtime_env(
         &mut command,
         &job.translation_profile_id,
         &job.translation_config_id,

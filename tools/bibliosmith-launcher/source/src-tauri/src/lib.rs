@@ -387,6 +387,8 @@ struct LauncherConfig {
     proxy: Option<NetworkProxySettings>,
     auto_install_node_modules: Option<bool>,
     active_model: Option<model_settings::ActiveModel>,
+    qwen_workspace_id: Option<String>,
+    qwen_web_search_enabled: Option<bool>,
 }
 
 pub(crate) fn read_active_model() -> Option<model_settings::ActiveModel> {
@@ -398,6 +400,26 @@ pub(crate) fn write_active_model(
 ) -> Result<(), String> {
     let mut config = read_launcher_config().unwrap_or_default();
     config.active_model = active_model;
+    write_launcher_config_file(&config)
+}
+
+pub(crate) fn read_qwen_workspace_id() -> Option<String> {
+    read_launcher_config()?.qwen_workspace_id
+}
+
+pub(crate) fn read_qwen_web_search_enabled() -> bool {
+    read_launcher_config()
+        .and_then(|config| config.qwen_web_search_enabled)
+        .unwrap_or(false)
+}
+
+pub(crate) fn write_qwen_settings(
+    workspace_id: Option<String>,
+    web_search_enabled: bool,
+) -> Result<(), String> {
+    let mut config = read_launcher_config().unwrap_or_default();
+    config.qwen_workspace_id = workspace_id;
+    config.qwen_web_search_enabled = Some(web_search_enabled);
     write_launcher_config_file(&config)
 }
 
@@ -4712,6 +4734,7 @@ pub fn run() {
             auto_detect_proxy_settings,
             model_settings::get_model_catalog,
             model_settings::save_model_credential,
+            model_settings::save_qwen_settings,
             model_settings::delete_model_credential,
             model_settings::set_active_model,
             model_settings::test_model_connection,
@@ -5207,6 +5230,8 @@ EN:
             proxy: None,
             auto_install_node_modules: None,
             active_model: None,
+            qwen_workspace_id: None,
+            qwen_web_search_enabled: None,
         };
 
         assert!(!diagnostic_logging_enabled_from_config(&config));
@@ -5224,6 +5249,8 @@ EN:
             proxy: None,
             auto_install_node_modules: Some(false),
             active_model: None,
+            qwen_workspace_id: None,
+            qwen_web_search_enabled: None,
         };
         assert!(!auto_install_node_modules_enabled_from_config(&config));
     }

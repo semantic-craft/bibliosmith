@@ -239,6 +239,17 @@ function GateCard({
   const providerProfileId = providerPicked?.profileId ?? jobProfile;
   const providerConfigId = providerPicked?.configId ?? jobConfig;
   const providerDiffers = providerProfileId !== jobProfile || providerConfigId !== jobConfig;
+  // A job stored before a slot was retired still carries it, and the engine
+  // rejects an unknown (profile, config) pair outright — so approving would
+  // bind the book to a translation that cannot start. The picker below already
+  // keeps the retired value selectable and "apply" already writes a new one, so
+  // the gap was only that nothing said the book had to be moved first.
+  //
+  // Gated on canRunProviderSample, not on the catalog alone: expert mode carries
+  // the "expert-agent" profile, which the catalog never lists and which is not
+  // retired, and the promotion gate does not run on this slot at all. Both would
+  // otherwise be blocked here with no picker on screen to unblock them.
+  const jobSlotRetired = canRunProviderSample && !slotMeta(jobProfile, jobConfig);
 
   const reportArtifact = canRunProviderSample ? translationSampleArtifact(unit) : null;
   const reportVersion = reportArtifact?.sha256 ?? reportArtifact?.artifactId ?? null;
@@ -404,7 +415,13 @@ function GateCard({
             <button
               className="pl-btn primary"
               type="button"
-              disabled={busy === "gateApproval" || busy === "sample" || failedChecks > 0 || !unit.child}
+              disabled={
+                busy === "gateApproval"
+                || busy === "sample"
+                || failedChecks > 0
+                || jobSlotRetired
+                || !unit.child
+              }
               onClick={() => unit.child && onApproveGate(unit.job.id, unit.child.id, gate.stageId)}
             >
               {isTranslation ? copy.gate1Ok : copy.gate2Ok}
@@ -417,6 +434,9 @@ function GateCard({
           </div>
         )}
         {failedChecks > 0 && !gate.invalidated && <p className="pl-gblocked">{copy.gateBlockedByChecks}</p>}
+        {jobSlotRetired && !gate.invalidated && (
+          <p className="pl-gblocked">{copy.gateBlockedByRetiredProvider}</p>
+        )}
       </div>
     </div>
   );

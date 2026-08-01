@@ -11,6 +11,19 @@ export function modelsCopy(locale: string) {
     setActive: zh ? "设为当前" : "Use this",
     apiKey: zh ? "API 密钥" : "API key",
     keyPlaceholder: zh ? "粘贴 API 密钥" : "Paste the API key",
+    workspaceId: zh ? "Workspace ID（可选）" : "Workspace ID (optional)",
+    workspacePlaceholder: zh
+      ? "留空使用共享域名；例如 ws-xxxxxxxx"
+      : "Blank uses the shared host; e.g. ws-xxxxxxxx",
+    webSearch: zh ? "联网搜索（可选）" : "Web search (optional)",
+    webSearchDescription: zh
+      ? "默认关闭；会产生额外费用，并将模型生成的检索词发送给联网搜索服务。"
+      : "Off by default. It costs extra and sends model-generated queries to the web search service.",
+    saveQwenSettings: zh ? "保存 Qwen 设置" : "Save Qwen settings",
+    savingQwenSettings: zh ? "保存中…" : "Saving…",
+    qwenSettingsSaved: zh
+      ? "Qwen 设置已保存；Workspace 留空时使用共享域名。"
+      : "Qwen settings saved. A blank Workspace ID uses the shared host.",
     save: zh ? "保存" : "Save",
     saving: zh ? "保存中…" : "Saving…",
     remove: zh ? "删除密钥" : "Remove key",

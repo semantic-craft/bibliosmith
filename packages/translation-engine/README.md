@@ -100,6 +100,12 @@ contains only non-secret settings. The built-in pairs are:
 | --- | --- | --- |
 | `openai-compatible` | `openai-default` | `OPENAI_COMPATIBLE_API_KEYS` |
 | `gemini-native` | `gemini-default` | `GEMINI_API_KEYS` |
+| `deepseek` | `deepseek-default` | `DEEPSEEK_API_KEYS` |
+| `kimi` | `kimi-default` | `KIMI_API_KEYS` |
+| `qwen` | `payg` | `QWEN_PAYG_API_KEYS` |
+| `doubao` | `cn-beijing` | `VOLCENGINE_ARK_API_KEYS` |
+| `mimo` | `payg` | `MIMO_PAYG_API_KEYS` |
+| `mimo` | `token-plan` | `MIMO_TOKEN_PLAN_API_KEYS` |
 
 Each key variable accepts comma- or newline-separated values. Empty items are
 discarded and duplicates are removed without changing order. Already exported
@@ -107,11 +113,39 @@ environment variables take precedence over the repository-root `.env`; package
 `.env` files are never read. Do not place key values in the registry, manifests,
 commands, logs, or job reports.
 
-OpenAI-compatible configurations call `{base_url}/chat/completions`, so the same
-adapter can target OpenAI, DeepSeek, OpenRouter, Together, or vLLM by adding a
-non-secret registry entry with the appropriate base URL and model. Gemini uses
-the native `models/{model}:generateContent` endpoint and sends its key in the
+Provider types name the wire protocol. `openai-compatible` configurations call
+`{base_url}/chat/completions`, so the same adapter can target services that still
+use Chat Completions. `openai-responses` configurations call
+`{base_url}/responses`, send the system and source messages as `input`, parse
+`message` / `output_text` items, and set `store: false` because local-reading
+translation units do not need server-side conversation state. Gemini uses the
+native `models/{model}:generateContent` endpoint and sends its key in the
 `x-goog-api-key` header.
+
+The built-in Qwen slot uses Alibaba Cloud Model Studio's mainland China
+pay-as-you-go Responses endpoint and defaults to `qwen3.7-max`. It uses the
+shared DashScope hostname until the user optionally saves a Workspace ID in the
+Launcher, which selects the corresponding Beijing workspace hostname for both
+connection tests and translation runs. The built-in Doubao slot uses Volcengine
+Ark's Beijing Responses endpoint and defaults to the versioned
+`doubao-seed-2-1-pro-260628` model. Ark standard API calls require a complete
+versioned model ID or an `ep-...` inference endpoint ID; the launcher therefore
+offers the stable `doubao-seed-evolving` alias alongside the two Seed 2.1 IDs
+shipped in this release, and lets the user paste a newer ID. The Qwen slot also
+accepts an exact model ID, while keeping the currently documented pay-as-you-go
+Max model as its default.
+
+The Launcher also exposes an optional Qwen web-search switch. It is off by
+default because search adds cost and sends model-generated queries to Alibaba's
+web-search service. When enabled, both connection probes and translation runs
+use the Responses built-in-tool contract `tools: [{"type": "web_search"}]`;
+the engine never sends the older Chat/DashScope `enable_search` parameter.
+Search remains model-directed (`tool_choice` defaults to `auto`), and every
+request continues to send `store: false`.
+
+These two slots accept ordinary pay-as-you-go API keys only. Alibaba Token Plan
+and Volcengine Agent/Coding Plan credentials are intentionally not registered:
+their current service terms exclude non-interactive batch API translation.
 
 ### Manual one-chapter smoke
 

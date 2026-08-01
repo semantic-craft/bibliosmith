@@ -651,9 +651,18 @@ export function getModelCatalog() {
         },
         {
           profileId: "qwen",
-          configId: "token-plan",
-          providerType: "openai-compatible",
-          defaultModel: "qwen3.6-flash",
+          configId: "payg",
+          providerType: "openai-responses",
+          defaultModel: "qwen3.7-max",
+          configured: false,
+          workspaceId: null,
+          webSearchEnabled: false,
+        },
+        {
+          profileId: "doubao",
+          configId: "cn-beijing",
+          providerType: "openai-responses",
+          defaultModel: "doubao-seed-2-1-pro-260628",
           configured: false,
         },
       ],
@@ -676,6 +685,19 @@ export function saveModelCredential(
     return Promise.resolve();
   }
   return invoke<void>("save_model_credential", { profileId, configId, apiKey });
+}
+
+export function saveQwenSettings(
+  workspaceId: string,
+  webSearchEnabled: boolean,
+) {
+  if (!isTauriRuntime()) {
+    return Promise.resolve();
+  }
+  return invoke<void>("save_qwen_settings", {
+    workspaceId,
+    webSearchEnabled,
+  });
 }
 
 export function deleteModelCredential(profileId: string, configId: string) {

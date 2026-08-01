@@ -4,6 +4,7 @@ import {
   deleteModelCredential,
   getModelCatalog,
   saveModelCredential,
+  saveQwenSettings,
   setActiveModel,
   testModelConnection,
 } from "../../api";
@@ -14,7 +15,9 @@ import { modelsCopy } from "./modelsCopy";
 type SlotState = {
   key: string;
   model: string;
-  busy: "save" | "test" | "delete" | null;
+  workspaceId: string;
+  webSearchEnabled: boolean;
+  busy: "save" | "qwen" | "test" | "delete" | null;
   message: string | null;
   ok: boolean | null;
 };
@@ -49,10 +52,17 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
 
   const active: ActiveModel | null = catalog?.active ?? null;
 
-  const stateFor = (key: string, fallbackModel: string): SlotState =>
+  const stateFor = (
+    key: string,
+    fallbackModel: string,
+    fallbackWorkspaceId = "",
+    fallbackWebSearchEnabled = false,
+  ): SlotState =>
     slotState[key] ?? {
       key: "",
       model: fallbackModel,
+      workspaceId: fallbackWorkspaceId,
+      webSearchEnabled: fallbackWebSearchEnabled,
       busy: null,
       message: null,
       ok: null,
@@ -61,7 +71,20 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
   const patch = (key: string, next: Partial<SlotState>) =>
     setSlotState((prev) => ({
       ...prev,
-      [key]: { ...stateFor(key, next.model ?? ""), ...prev[key], ...next },
+      [key]: {
+        ...stateFor(
+          key,
+          configuredBy.get(key)?.defaultModel ??
+            MODEL_BRANDS.flatMap((brand) => brand.slots).find(
+              (slot) => slotKey(slot.profileId, slot.configId) === key,
+            )?.models[0] ??
+            "",
+          configuredBy.get(key)?.workspaceId ?? "",
+          configuredBy.get(key)?.webSearchEnabled ?? false,
+        ),
+        ...prev[key],
+        ...next,
+      },
     }));
 
   const activeMeta = active ? slotMeta(active.profileId, active.configId) : undefined;
@@ -91,8 +114,13 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
               active?.profileId === meta.profileId &&
               active?.configId === meta.configId;
             const defaultModel = view?.defaultModel ?? meta.models[0];
-            const st = stateFor(key, defaultModel);
-            const chosenModel = st.model || defaultModel;
+            const st = stateFor(
+              key,
+              defaultModel,
+              view?.workspaceId ?? "",
+              view?.webSearchEnabled ?? false,
+            );
+            const chosenModel = st.model;
             return (
               <div
                 key={key}
@@ -117,20 +145,39 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
                 <div className="st-models-slot-grid">
                   <label>
                     <span>{copy.model}</span>
-                    <select
-                      value={chosenModel}
-                      onChange={(event) =>
-                        patch(key, { model: event.currentTarget.value })
-                      }
-                    >
-                      {Array.from(new Set([defaultModel, ...meta.models])).map(
-                        (model) => (
-                          <option key={model} value={model}>
-                            {model}
-                          </option>
-                        ),
-                      )}
-                    </select>
+                    {meta.allowCustomModel ? (
+                      <>
+                        <input
+                          list={`${key}-models`}
+                          value={chosenModel}
+                          onChange={(event) =>
+                            patch(key, { model: event.currentTarget.value })
+                          }
+                        />
+                        <datalist id={`${key}-models`}>
+                          {Array.from(new Set([defaultModel, ...meta.models])).map(
+                            (model) => (
+                              <option key={model} value={model} />
+                            ),
+                          )}
+                        </datalist>
+                      </>
+                    ) : (
+                      <select
+                        value={chosenModel}
+                        onChange={(event) =>
+                          patch(key, { model: event.currentTarget.value })
+                        }
+                      >
+                        {Array.from(new Set([defaultModel, ...meta.models])).map(
+                          (model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ),
+                        )}
+                      </select>
+                    )}
                   </label>
                   <label>
                     <span>{copy.apiKey}</span>
@@ -146,9 +193,80 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
                       }
                     />
                   </label>
+                  {meta.allowWorkspaceId && (
+                    <label>
+                      <span>{copy.workspaceId}</span>
+                      <input
+                        value={st.workspaceId}
+                        placeholder={copy.workspacePlaceholder}
+                        onChange={(event) =>
+                          patch(key, {
+                            workspaceId: event.currentTarget.value,
+                            message: null,
+                          })
+                        }
+                      />
+                    </label>
+                  )}
                 </div>
 
+                {meta.allowWorkspaceId && (
+                  <label className="st-row">
+                    <div className="st-row-copy">
+                      <strong>{copy.webSearch}</strong>
+                      <span>{copy.webSearchDescription}</span>
+                    </div>
+                    <span className="st-switch">
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        aria-label={copy.webSearch}
+                        aria-checked={st.webSearchEnabled}
+                        checked={st.webSearchEnabled}
+                        onChange={(event) =>
+                          patch(key, {
+                            webSearchEnabled: event.currentTarget.checked,
+                            message: null,
+                          })
+                        }
+                      />
+                    </span>
+                  </label>
+                )}
+
                 <div className="st-models-slot-actions">
+                  {meta.allowWorkspaceId && (
+                    <button
+                      className="pl-btn sm ghost"
+                      type="button"
+                      disabled={st.busy !== null}
+                      onClick={async () => {
+                        patch(key, { busy: "qwen", message: null });
+                        try {
+                          await saveQwenSettings(
+                            st.workspaceId.trim(),
+                            st.webSearchEnabled,
+                          );
+                          patch(key, {
+                            busy: null,
+                            ok: true,
+                            message: copy.qwenSettingsSaved,
+                          });
+                          await refresh();
+                        } catch (error) {
+                          patch(key, {
+                            busy: null,
+                            ok: false,
+                            message: String(error),
+                          });
+                        }
+                      }}
+                    >
+                      {st.busy === "qwen"
+                        ? copy.savingQwenSettings
+                        : copy.saveQwenSettings}
+                    </button>
+                  )}
                   <button
                     className="pl-btn sm"
                     type="button"

@@ -10,6 +10,8 @@ export type ModelSlotMeta = {
   label: string;
   models: string[];
   keyUrl: string;
+  allowCustomModel?: boolean;
+  allowWorkspaceId?: boolean;
 };
 
 export type ProviderBrand = {
@@ -19,8 +21,9 @@ export type ProviderBrand = {
   slots: ModelSlotMeta[];
 };
 
-// One entry per brand. A brand that bills two ways (Qwen, MiMo) lists two slots;
-// the others list one. Order is roughly "simplest to set up" first.
+// One entry per brand. A brand with two supported billing routes (currently
+// MiMo) lists two slots; the others list one. Order is roughly "simplest to set
+// up" first.
 export const MODEL_BRANDS: ProviderBrand[] = [
   {
     profileId: "deepseek",
@@ -80,22 +83,36 @@ export const MODEL_BRANDS: ProviderBrand[] = [
   },
   {
     profileId: "qwen",
-    brand: "通义千问 Qwen",
+    brand: "阿里云百炼 · Qwen",
     keyUrl: "https://bailian.console.aliyun.com/",
     slots: [
       {
         profileId: "qwen",
         configId: "payg",
-        label: "按量付费 · pay-as-you-go",
-        models: ["qwen-flash", "qwen-plus", "qwen3.6-flash"],
+        label: "中国大陆",
+        models: ["qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.6-flash"],
         keyUrl: "https://bailian.console.aliyun.com/",
+        allowCustomModel: true,
+        allowWorkspaceId: true,
       },
+    ],
+  },
+  {
+    profileId: "doubao",
+    brand: "火山方舟 · Doubao",
+    keyUrl: "https://console.volcengine.com/ark/region:ark+cn-beijing/apikey",
+    slots: [
       {
-        profileId: "qwen",
-        configId: "token-plan",
-        label: "Token Plan",
-        models: ["qwen3.6-flash", "qwen3.6-plus"],
-        keyUrl: "https://help.aliyun.com/zh/model-studio/token-plan-quickstart",
+        profileId: "doubao",
+        configId: "cn-beijing",
+        label: "华北 2（北京）",
+        models: [
+          "doubao-seed-evolving",
+          "doubao-seed-2-1-pro-260628",
+          "doubao-seed-2-1-turbo-260628",
+        ],
+        keyUrl: "https://console.volcengine.com/ark/region:ark+cn-beijing/apikey",
+        allowCustomModel: true,
       },
     ],
   },
