@@ -11,9 +11,10 @@ sampled page count rather than by book length: only the extracted pages are ever
 uploaded.
 
 Unlike the conversion workers, whose report goes to stdout, this one writes its
-report to the path the manifest names. The comparison has to survive the process
-that produced it -- the caller reads it back to render the choice, possibly long
-after the run.
+report to the path the manifest names and keeps it off stdout entirely. The
+comparison has to survive the process that produced it -- the caller reads it
+back to render the choice, possibly long after the run -- and it carries pages
+of the user's book, which the caller's run log is not the place for.
 """
 
 from __future__ import annotations
@@ -300,10 +301,11 @@ def redact_engine_error(message: str) -> str:
     survives intact -- an over-redacted message that hides which key is missing
     would make the failure unactionable, which is the point of showing it.
     """
-    redacted = _SIGNED_URL.sub(r"\1?<redacted>", message)
+    # Truncate first: the URL pattern is lazy, so scanning a pathological
+    # multi-megabyte exception body would cost far more than it is worth.
+    redacted = _SIGNED_URL.sub(r"\1?<redacted>", message[:2000])
     redacted = _BEARER.sub(r"\1 <redacted>", redacted)
-    redacted = _TOKEN_ASSIGNMENT.sub(r"\1=<redacted>", redacted)
-    return redacted[:2000]
+    return _TOKEN_ASSIGNMENT.sub(r"\1=<redacted>", redacted)
 
 
 def _run_one_engine(
@@ -357,9 +359,17 @@ def main(argv: list[str] | None = None) -> int:
     paddle.load_root_dotenv()
     args = build_parser().parse_args(argv)
     report = run_sample_manifest(Path(args.manifest).expanduser().resolve())
-    # stdout carries the report too, so the caller can validate the run without
-    # a second read; the file it just wrote is the durable copy.
-    print(json.dumps(report, ensure_ascii=False))
+    # Progress only. The excerpts are pages of the user's book -- the launcher
+    # classifies the report as private text and reads it from disk -- and the
+    # caller captures this stream into its run log, so the report itself must
+    # not travel through it.
+    for result in report["engines"]:
+        print(
+            "engine={} status={} characters={}".format(
+                result["engine"], result["status"], result["characterCount"]
+            )
+        )
+    print("pages={}".format(len(report["sampledPages"])))
     return 0
 
 

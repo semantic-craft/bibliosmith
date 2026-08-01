@@ -12530,6 +12530,27 @@ impl RunnerCommandExecutor for OcrSampleFixtureExecutor {
             command.args[4]
         );
         assert_eq!(command.args[5], "--manifest");
+        // `uv run --package ocr` resolves the workspace from the OCR root, and
+        // the script imports its sibling engine clients by bare name. Without
+        // this the subprocess fails only against a real install.
+        assert_eq!(
+            command.cwd.as_deref(),
+            Some(book_ocr_conversion_root().as_path())
+        );
+        // Whatever the Keychain holds is what the engines authenticate with;
+        // dropping inject_ocr_credentials would otherwise fail nothing here and
+        // report "not configured" for both engines on a configured machine.
+        let injected = command
+            .env
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<BTreeSet<_>>();
+        for (key, _) in crate::ocr_settings::resolve_credential_env() {
+            assert!(
+                injected.contains(key.as_str()),
+                "credential {key} was not injected"
+            );
+        }
 
         let manifest_path = PathBuf::from(&command.args[6]);
         let manifest: serde_json::Value =
@@ -13028,10 +13049,17 @@ fn ocr_sample_report_rejects_a_drifted_shape() {
 }
 
 /// Captured verbatim from a real run of `packages/ocr/sample_compare.py` with
-/// stubbed engines. The Rust fixture above writes a report of its own shape, so
-/// without this the two writers could drift apart and every test would still
-/// pass. packages/ocr/tests/test_sample_compare.py pins the same field set from
-/// the Python side.
+/// stubbed engines. The fixture executor above writes a report of its own
+/// shape, so without a sample of the real writer nothing here would notice the
+/// two drifting apart.
+///
+/// What this catches is Rust-side drift against a known-good payload: a renamed
+/// or newly required field, or a narrowed type. It cannot catch Python-side
+/// drift -- it is a frozen literal, and nothing regenerates it. That direction
+/// is covered by `ReportContractTests` in
+/// packages/ocr/tests/test_sample_compare.py, which asserts the field set and
+/// the value types of both the success and the failure branch against this same
+/// struct.
 // r##"..."## rather than r#"..."#: the captured Markdown starts with a heading,
 // so the payload contains the sequence that would close the shorter delimiter.
 const REAL_OCR_SAMPLE_REPORT: &str = r##"{
@@ -13211,4 +13239,175 @@ fn ocr_sample_read_refuses_a_report_outside_the_sample_directory() {
     assert!(err.contains("outside the job's sample directory"), "{err}");
 
     let _ = fs::remove_dir_all(root);
+}
+
+/// The shape zotero_source_ref actually produces. Before this, the fingerprint
+/// rode along as part of the file extension, so `is_pdf_path` was false for
+/// every real Zotero attachment and the feature refused its main input.
+#[test]
+fn ocr_sample_resolves_a_zotero_source_ref_with_its_fingerprint() {
+    let root = temp_root("ocr-sample-zotero-ref");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, source_pdf) = ocr_sample_ready_job(&root, &store);
+
+    let mut state = store.load().unwrap();
+    let stored = state.jobs.iter_mut().find(|it| it.id == job_id).unwrap();
+    stored.children[0].source.path = Some(zotero_source_ref(
+        "ABCD1234",
+        Some("d41d8cd98f00b204e9800998ecf8427e"),
+        Some(&display_path(&source_pdf)),
+    ));
+    store.save(&state).unwrap();
+
+    let executor = OcrSampleFixtureExecutor::default();
+    run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &executor,
+    )
+    .unwrap();
+
+    // The manifest must name the real file, fingerprint stripped.
+    assert_eq!(
+        executor.manifests()[0]["sourcePdfPath"],
+        serde_json::json!(display_path(&source_pdf))
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_names_an_unsynced_zotero_attachment_as_such() {
+    let root = temp_root("ocr-sample-unsynced");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+
+    let mut state = store.load().unwrap();
+    let stored = state.jobs.iter_mut().find(|it| it.id == job_id).unwrap();
+    // What zotero_source_ref returns when Zotero reported no output path.
+    stored.children[0].source.path = Some(zotero_source_ref("ABCD1234", Some("d41d8c"), None));
+    stored.children[0].route.clear();
+    store.save(&state).unwrap();
+
+    let err = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &OcrSampleFixtureExecutor::default(),
+    )
+    .unwrap_err();
+    assert!(err.contains("not stored locally"), "{err}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_local_path_strips_only_the_fingerprint_suffix() {
+    assert_eq!(
+        ocr_sample_local_path("/books/a.pdf#source_md5=abc"),
+        Some(PathBuf::from("/books/a.pdf"))
+    );
+    // `#` is legal in a filename, so only the exact producer suffix comes off.
+    assert_eq!(
+        ocr_sample_local_path("/books/draft#2.pdf"),
+        Some(PathBuf::from("/books/draft#2.pdf"))
+    );
+    assert_eq!(
+        ocr_sample_local_path("/books/draft#2.pdf#source_md5=abc"),
+        Some(PathBuf::from("/books/draft#2.pdf"))
+    );
+    assert_eq!(ocr_sample_local_path("zotero://attachment/KEY"), None);
+    assert_eq!(
+        ocr_sample_local_path("zotero://attachment/KEY#source_md5=abc"),
+        None
+    );
+    assert_eq!(ocr_sample_local_path(""), None);
+}
+
+/// The worker exits 0 but the report is unusable. These are the likeliest real
+/// failures -- a manifest whose reportPath the Python side resolved elsewhere,
+/// or an engine response that did not survive validation -- and each has to
+/// surface as its own message rather than as a panic or a silent success.
+#[test]
+fn ocr_sample_reports_a_worker_that_produced_no_usable_report() {
+    /// What the stand-in worker does with the report path the manifest names.
+    type ReportWriter = Box<dyn Fn(&Path) + Send + Sync>;
+
+    struct WritingExecutor(ReportWriter);
+    impl RunnerCommandExecutor for WritingExecutor {
+        fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+            let manifest: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&command.args[6]).unwrap()).unwrap();
+            let report_path = PathBuf::from(manifest["projectRoot"].as_str().unwrap())
+                .join(manifest["reportPath"].as_str().unwrap());
+            (self.0)(&report_path);
+            Ok(RunnerCommandResult::default())
+        }
+    }
+
+    let cases: Vec<(&str, ReportWriter)> = vec![
+        ("was not written", Box::new(|_: &Path| {})),
+        (
+            "invalid report JSON",
+            Box::new(|path: &Path| fs::write(path, "not json").unwrap()),
+        ),
+        (
+            "unsupported schema",
+            Box::new(|path: &Path| {
+                let report = serde_json::json!({
+                    "schema": "ocr-sample-compare-report-v0",
+                    "sourcePdfSha256": "0".repeat(64),
+                    "totalPages": 40,
+                    "sampledPages": [11, 21, 30],
+                    "characterBudget": OCR_SAMPLE_CHARACTER_BUDGET,
+                    "engines": [],
+                });
+                fs::write(path, serde_json::to_string(&report).unwrap()).unwrap();
+            }),
+        ),
+    ];
+
+    for (expected, writer) in cases {
+        let root = temp_root(&format!("ocr-sample-bad-{}", expected.replace(' ', "-")));
+        let store = MemoryStateStore::new(&root);
+        let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+        let err = run_ocr_sample_with_executor(
+            &store,
+            &job_id,
+            Some(&child_id),
+            OCR_SAMPLE_PAGE_COUNT,
+            &WritingExecutor(writer),
+        )
+        .unwrap_err();
+        assert!(err.contains(expected), "expected {expected:?}, got {err}");
+        // Nothing half-registered: a bad report must not become an artifact.
+        let after = store
+            .load()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        assert!(!after.children[0]
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "ocr_sample_report"));
+        // Nor left on disk: names are per-run, so an unregisterable report
+        // would otherwise accumulate one file per failed attempt.
+        let sample_dir = ocr_sample_dir(&store, &job_id, &child_id);
+        let leftovers: Vec<_> = fs::read_dir(&sample_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("report-") || name.starts_with("manifest-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "{expected}: left behind {leftovers:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }

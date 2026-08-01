@@ -11002,28 +11002,62 @@ fn ocr_sample_engines() -> [&'static str; 2] {
     [OCR_SAMPLE_ENGINE_PADDLEOCR, OCR_SAMPLE_ENGINE_MINERU]
 }
 
+/// The local file a source reference points at, or None when it names no file
+/// on this disk.
+///
+/// `zotero_source_ref` builds these, and both of its shapes need handling: it
+/// appends `#source_md5=<fingerprint>` to the attachment's storage path, and it
+/// falls back to a `zotero://attachment/<key>` URI when Zotero reported no path
+/// at all. Left alone, the fingerprint becomes part of the file extension --
+/// `book.pdf#source_md5=abc` has extension `pdf#source_md5=abc` -- so every
+/// real Zotero book reads as "not a PDF". Stripped by exact suffix rather than
+/// by splitting on `#`, because `#` is legal in a filename.
+fn ocr_sample_local_path(source_ref: &str) -> Option<PathBuf> {
+    let path = source_ref
+        .rsplit_once("#source_md5=")
+        .map_or(source_ref, |(base, _)| base)
+        .trim();
+    if path.is_empty() || path.starts_with("zotero://") {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
 /// The PDF the sample reads. Zotero attachment children carry the storage path
 /// their route was built from, and local-folder route items name the file
 /// directly; nothing here goes looking on disk for a file the state does not
 /// already point at.
 fn ocr_sample_source_pdf(child: &BookPipelineChildJob) -> Result<PathBuf, String> {
-    let candidate = non_empty(child.source.path.as_deref())
-        .map(PathBuf::from)
-        .or_else(|| {
+    let references = std::iter::once(child.source.path.as_deref())
+        .chain(
             child
                 .route
                 .iter()
-                .map(|route| PathBuf::from(&route.source_ref))
-                .find(|path| is_pdf_path(path))
-        })
-        .ok_or_else(|| "This book has no local PDF to sample.".to_string())?;
-    if !is_pdf_path(&candidate) {
-        return Err("OCR sampling needs a PDF source.".into());
-    }
-    if !candidate.is_file() {
+                .map(|route| Some(route.source_ref.as_str())),
+        )
+        .flatten()
+        .collect::<Vec<_>>();
+    let path = references
+        .iter()
+        .filter_map(|source_ref| ocr_sample_local_path(source_ref))
+        .find(|path| is_pdf_path(path));
+    let Some(path) = path else {
+        // An attachment Zotero knows about but has no local file for reads as a
+        // sync problem, not as a missing path the user was never shown.
+        if references
+            .iter()
+            .any(|source_ref| source_ref.starts_with("zotero://"))
+        {
+            return Err(
+                "This book's PDF is not stored locally. Sync the Zotero attachment first.".into(),
+            );
+        }
+        return Err("This book has no local PDF to sample.".into());
+    };
+    if !path.is_file() {
         return Err("The source PDF for this book is missing.".into());
     }
-    Ok(candidate)
+    Ok(path)
 }
 
 fn is_pdf_path(path: &Path) -> bool {
@@ -11230,11 +11264,26 @@ fn run_ocr_sample_with_executor(
     // Read from disk rather than stdout: the report is a durable artifact the
     // UI reads back long after this process is gone, so the file is the source
     // of truth and stdout is only progress.
+    //
+    // A report this run wrote but cannot register is deleted on the way out.
+    // The names are per-run, so leaving them would pile up one file per failed
+    // attempt -- and "both engines failed" is the ordinary first-run outcome on
+    // a machine with no tokens configured yet.
     let report_json = fs::read_to_string(&report_path)
         .map_err(|err| format!("OCR sample report was not written: {err}"))?;
-    let report: BookPipelineOcrSampleReport = serde_json::from_str(&report_json)
-        .map_err(|err| format!("OCR sample compare returned invalid report JSON: {err}"))?;
-    validate_ocr_sample_report(&report, sample_pages)?;
+    let accept = || -> Result<BookPipelineOcrSampleReport, String> {
+        let report: BookPipelineOcrSampleReport = serde_json::from_str(&report_json)
+            .map_err(|err| format!("OCR sample compare returned invalid report JSON: {err}"))?;
+        validate_ocr_sample_report(&report, sample_pages)?;
+        Ok(report)
+    };
+    let report = match accept() {
+        Ok(report) => report,
+        Err(err) => {
+            let _ = fs::remove_file(&report_path);
+            return Err(err);
+        }
+    };
     let report_sha256 = sha256_str(&report_json);
 
     let job = &mut state.jobs[job_index];

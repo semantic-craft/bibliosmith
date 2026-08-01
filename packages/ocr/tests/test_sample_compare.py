@@ -42,12 +42,25 @@ sample_compare = load_sample_compare()
 
 
 def write_pdf(path: Path, pages: int) -> Path:
+    """A PDF whose pages are told apart by size.
+
+    Identical blank pages would make the extraction step untestable: a
+    1-based/0-based slip would send the wrong pages to both paid APIs while the
+    page *count* stayed right, so every assertion about counts would still pass
+    and the user would compare engines on pages the report does not name.
+    Width encodes the 1-based page number.
+    """
     writer = PdfWriter()
-    for _ in range(pages):
-        writer.add_blank_page(width=200, height=200)
+    for number in range(1, pages + 1):
+        writer.add_blank_page(width=100 + number, height=200)
     with path.open("wb") as handle:
         writer.write(handle)
     return path
+
+
+def page_numbers_of(pdf: Path) -> list[int]:
+    """Recover the original page numbers write_pdf encoded into each page."""
+    return [int(round(float(page.mediabox.width))) - 100 for page in PdfReader(str(pdf)).pages]
 
 
 class RecordingRunner:
@@ -57,9 +70,13 @@ class RecordingRunner:
         self.markdown = markdown
         self.failure = failure
         self.calls: list[tuple[Path, Path]] = []
+        self.received_pages: list[list[int]] = []
 
     def __call__(self, sample_pdf: Path, work_dir: Path):  # type: ignore[no-untyped-def]
         self.calls.append((sample_pdf, work_dir))
+        # Read while the scratch PDF still exists; the run deletes it on the
+        # way out, so a test that looks afterwards sees nothing.
+        self.received_pages.append(page_numbers_of(sample_pdf))
         if self.failure is not None:
             raise self.failure
         return sample_compare.EngineOutcome(
@@ -145,6 +162,11 @@ class RunSampleManifestTests(unittest.TestCase):
         self.assertEqual(
             [entry["pageCount"] for entry in report["engines"]], [3, 3]
         )
+        # The bytes each engine received are the pages the report names. A page
+        # count alone would not catch an extraction that is off by one, which
+        # would bill both APIs for pages the comparison misattributes.
+        self.assertEqual(paddle_runner.received_pages[0], report["sampledPages"])
+        self.assertEqual(mineru_runner.received_pages[0], report["sampledPages"])
         # Separate scratch directories, so one engine cannot overwrite the other.
         self.assertNotEqual(paddle_runner.calls[0][1], mineru_runner.calls[0][1])
 
@@ -199,6 +221,26 @@ class RunSampleManifestTests(unittest.TestCase):
         # as a short extraction.
         self.assertEqual(engines["paddleocr"]["characterCount"], 10)
         self.assertEqual(engines["mineru"]["markdownExcerpt"], "abc")
+
+    def test_the_budget_counts_characters_not_bytes(self) -> None:
+        # Chinese scans are this project's main workload: 4000 characters is
+        # 12000 bytes, so a byte-based budget on either side would truncate
+        # every real sample to a third and the launcher would reject it for
+        # exceeding its own budget.
+        chinese = "第一章 绪论。" * 20
+        fixture = ManifestFixture(self.root, characterBudget=10)
+        report = sample_compare.run_sample_manifest(
+            fixture.path,
+            engine_runners={
+                "paddleocr": RecordingRunner(chinese),
+                "mineru": RecordingRunner("abc"),
+            },
+        )
+        excerpt = report["engines"][0]["markdownExcerpt"]
+        self.assertEqual(excerpt, chinese[:10])
+        self.assertEqual(len(excerpt), 10)
+        self.assertGreater(len(excerpt.encode("utf-8")), 10)
+        self.assertEqual(report["engines"][0]["characterCount"], len(chinese))
 
     def test_one_failing_engine_still_produces_a_comparison(self) -> None:
         fixture = ManifestFixture(self.root)
@@ -352,11 +394,14 @@ class ReportContractTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="ocr-sample-contract-")
         self.addCleanup(self._tmp.cleanup)
         fixture = ManifestFixture(Path(self._tmp.name))
+        # One engine succeeds and one fails, because _run_one_engine builds two
+        # independent dict literals and only exercising the success branch
+        # would let the failure branch drift away from the Rust struct.
         self.report = sample_compare.run_sample_manifest(
             fixture.path,
             engine_runners={
                 "paddleocr": RecordingRunner("# Paddle"),
-                "mineru": RecordingRunner("# MinerU"),
+                "mineru": RecordingRunner("", failure=RuntimeError("no token")),
             },
         )
 
@@ -373,7 +418,19 @@ class ReportContractTests(unittest.TestCase):
             ],
         )
 
+    def test_top_level_types_match_the_rust_struct(self) -> None:
+        # Rust types: String, String, u32, Vec<u32>, usize, Vec<_>. A float or
+        # a stringified number here deserializes nowhere.
+        self.assertIsInstance(self.report["schema"], str)
+        self.assertIsInstance(self.report["sourcePdfSha256"], str)
+        self.assertIsInstance(self.report["totalPages"], int)
+        self.assertNotIsInstance(self.report["totalPages"], bool)
+        self.assertTrue(all(isinstance(page, int) for page in self.report["sampledPages"]))
+        self.assertIsInstance(self.report["characterBudget"], int)
+
     def test_engine_fields_match_the_rust_struct(self) -> None:
+        statuses = {entry["status"] for entry in self.report["engines"]}
+        self.assertEqual(statuses, {"ok", "failed"}, "both branches must be covered")
         for entry in self.report["engines"]:
             self.assertEqual(
                 sorted(entry),
@@ -387,6 +444,27 @@ class ReportContractTests(unittest.TestCase):
                     "status",
                 ],
             )
+
+    def test_engine_types_match_the_rust_struct(self) -> None:
+        for entry in self.report["engines"]:
+            with self.subTest(status=entry["status"]):
+                self.assertIsInstance(entry["engine"], str)
+                self.assertIsInstance(entry["status"], str)
+                self.assertIsInstance(entry["markdownExcerpt"], str)
+                self.assertIsInstance(entry["characterCount"], int)
+                # Rust reads elapsedMs as u64: a float would not deserialize.
+                self.assertIsInstance(entry["elapsedMs"], int)
+                self.assertNotIsInstance(entry["elapsedMs"], bool)
+                self.assertGreaterEqual(entry["elapsedMs"], 0)
+                # Option<u32> / Option<String>: None, never 0 or "".
+                self.assertIn(
+                    type(entry["pageCount"]), (int, type(None)), entry["pageCount"]
+                )
+                if entry["status"] == "ok":
+                    self.assertIsNone(entry["error"])
+                else:
+                    self.assertIsInstance(entry["error"], str)
+                    self.assertIsNone(entry["pageCount"])
 
 
 class EngineRunnerWiringTests(unittest.TestCase):
