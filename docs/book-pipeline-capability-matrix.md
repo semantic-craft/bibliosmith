@@ -8,7 +8,7 @@ Every row is meant to be checkable against the code as it stands. Two convention
 
 | Capability | Status | Product boundary | Evidence |
 | --- | --- | --- | --- |
-| Local PDF folder conversion route | Automated | Core launcher route, external Book OCR Conversion wrapper execution | `local_pdf_folder` previews and runs `scripts/pdf_to_html_paddleocr.py`; artifacts are normalized as Markdown, HTML, EPUB, metadata, index, and output directory. |
+| Local PDF folder conversion route | Automated | Core launcher route, external Book OCR Conversion wrapper execution | `local_pdf_folder` previews and runs `scripts/pdf_to_html_paddleocr.py`, which writes `<book>/<book>.md`, `<book>/<book>.html`, the `<book>/<book>_assets/` images, `_state.json`, and the chunk JSONL under `.temp/`. `artifact_kind()` classifies those as Markdown, HTML, and metadata; the route produces no EPUB and no index. |
 | Zotero attachment discovery and route preview | Automated | Core launcher route, external Zotero worker dry-run | Worker dry-run output is parsed into attachment sources with direct text, PaddleOCR, MinerU, dirty text, and already-converted states. |
 | Zotero direct-text attachment execution | Automated | Core launcher route, external Zotero worker execution | `direct_text` runs the worker with `--force-text`; Markdown upload keys are captured on artifacts. |
 | Zotero remote PaddleOCR execution | Automated when credentials exist | Core launcher route, external worker/provider execution | `remote_paddleocr` runs with `--force-ocr`; missing credentials block only affected items. |
