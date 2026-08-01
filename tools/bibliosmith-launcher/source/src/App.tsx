@@ -503,10 +503,10 @@ export default function App() {
     }
   }, [addActivity, bookPipelineCopy.deleteBookDone, showFloatingToast]);
 
-  const advancePipeline = useCallback(async (jobId: string, childId: string) => {
+  const advancePipeline = useCallback(async (jobId: string, childId: string, invalidateDownstream = false) => {
     setPipelineBusy("advance");
     try {
-      const job = await advanceBookPipelineJob(jobId, childId);
+      const job = await advanceBookPipelineJob(jobId, childId, invalidateDownstream);
       setPipelineState((current) => upsertPipelineJob(current, job));
       addActivity(job.status === "failed" ? "error" : "info", `Book Pipeline advanced: ${job.currentStep}`);
       showFloatingToast(job.currentStep, job.status === "failed" ? "error" : "success");
@@ -1992,7 +1992,9 @@ export default function App() {
               onSearchZotero={(query) => void discoverZoteroByQuery(query)}
               onRetry={(jobId) => void retryPipeline(jobId)}
               onDelete={(jobId, childId) => void deletePipeline(jobId, childId)}
-              onAdvance={(jobId, childId) => void advancePipeline(jobId, childId)}
+              onAdvance={(jobId, childId, invalidateDownstream) =>
+                void advancePipeline(jobId, childId, invalidateDownstream)
+              }
               onSampleTranslation={(jobId, childId, providerProfileId, providerConfigId) =>
                 void samplePipelineTranslation(jobId, childId, providerProfileId, providerConfigId)
               }

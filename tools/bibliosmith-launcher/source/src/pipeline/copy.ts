@@ -71,12 +71,25 @@ export function pipelineCopy(locale: PipelineLocale) {
     step4: zh ? "生成阅读版" : "Build reading copy",
     capQueued: zh ? "排队中" : "Queued",
     capWorking: zh ? "进行中" : "In progress",
+    capCompleted: zh ? "已完成" : "Complete",
+    capNotStarted: zh ? "等待开始" : "Not started",
+    capWaitingConfirmation: zh ? "等你确认" : "Needs confirmation",
     capAllDone: zh ? "全部完成" : "All done",
     capNeedsAttention: zh ? "需要处理" : "Needs attention",
     capGateTranslation: zh ? "翻译 · 等你确认后开始" : "Translate · starts after you confirm",
     capGatePromotion: zh ? "生成阅读版 · 等你确认后进行" : "Build reading copy · runs after you confirm",
+    capTranslationQaPending: zh
+      ? "翻译：正文已完成；专家QA：等待开始"
+      : "Translate: body complete; Expert QA: not started",
+    capPromotionApprovedPending: zh
+      ? "生成阅读版：已确认；等待开始"
+      : "Build reading copy: approved; not started",
     stepCurrentPrefix: zh ? "当前：" : "Now: ",
     stepNotInJob: zh ? "本次任务不包含这一步" : "Not part of this job",
+    stepSummaryPair: (completedStep: string, currentCaption: string) =>
+      zh
+        ? `${completedStep}：已完成；${currentCaption.replace(" · ", "：")}`
+        : `${completedStep}: Complete; ${currentCaption.replace(" · ", ": ")}`,
 
     // Shelf ribbons
     ribbonWaiting: zh ? "等你确认" : "Needs you",
@@ -88,6 +101,7 @@ export function pipelineCopy(locale: PipelineLocale) {
     drawerPrev: zh ? "上一本" : "Previous book",
     drawerNext: zh ? "下一本" : "Next book",
     drawerClose: zh ? "关闭" : "Close",
+    resizeDrawer: zh ? "调整书架与详情栏宽度" : "Resize bookshelf and details pane",
     customInstructionsTitle: zh ? "本书自定义翻译指令" : "Custom instructions for this book",
     customInstructionsHelp: zh
       ? "两相互相隔离；占位符、标题和段落结构保护始终优先。"
@@ -102,8 +116,34 @@ export function pipelineCopy(locale: PipelineLocale) {
     savingCustomInstructions: zh ? "保存中…" : "Saving…",
     customInstructionsSaved: zh ? "本书自定义指令已保存" : "Custom instructions saved for this book",
     abNoAction: zh ? "不需要操作，好了会提醒你" : "Nothing to do — you'll be notified",
+    abAdvanceRequired: zh ? "需要操作：继续到下一阶段" : "Action needed: continue to the next stage",
     abGatePrefix: zh ? "下一步需要你：" : "Next step needs you: ",
     abRetryHint: zh ? "已完成的部分都保留着，重试只补失败的部分" : "Completed work is preserved; retry only re-runs what failed",
+    sourceChangedTitle: zh
+      ? "来源已变化：旧分章和译文不再有效"
+      : "Source changed: old chapters and translations are no longer valid",
+    sourceChangedBody: zh
+      ? "检测到 MinerU 精准解析结果与旧来源不同。需要按新来源重新分章并重做后续阶段；旧文件仍保留在备份中。"
+      : "The MinerU Precision result differs from the old source. Rebuild chapters and downstream stages from the new source; old files remain backed up.",
+    rebuildFromMineru: zh ? "按 MinerU 新源重建" : "Rebuild from MinerU source",
+
+    // Live worker progress
+    progressUnitPages: zh ? "页" : "pages",
+    progressUnitChapters: zh ? "章" : "chapters",
+    progressUnitChunks: zh ? "段" : "chunks",
+    progressUnitItems: zh ? "项" : "items",
+    progressStarting: zh ? "任务已启动" : "Task started",
+    progressUploading: zh ? "正在上传到 OCR 服务" : "Uploading to OCR service",
+    progressExtracting: zh ? "OCR 正在识别" : "OCR is extracting text",
+    progressDownloading: zh ? "正在下载识别结果" : "Downloading OCR results",
+    progressTranslating: zh ? "AI 正在翻译" : "AI is translating",
+    progressReviewing: zh ? "AI 正在二遍检查" : "AI is reviewing",
+    progressAssembling: zh ? "正在整理结果" : "Assembling results",
+    progressWorking: zh ? "任务正在运行" : "Task is running",
+    progressHeartbeat: zh ? "工作进度会自动更新，无需操作" : "Progress updates automatically; no action needed",
+    progressCount: (completed: number, total: number, unit: string) =>
+      zh ? `${completed} / ${total} ${unit}` : `${completed} / ${total} ${unit}`,
+    progressAria: (phase: string, count?: string) => (count ? `${phase}：${count}` : phase),
 
     // Gate cards（3-5 先看样张）
     gateCardTitle: zh ? "等你确认 · 先看一眼" : "Needs you · take a look",
@@ -225,7 +265,7 @@ export function pipelineCopy(locale: PipelineLocale) {
     // Overview tab
     evidenceTitle: zh ? "路由证据" : "Route evidence",
     artifactDigestTitle: zh ? "工件摘要" : "Artifact summary",
-    evTextLayer: zh ? "文本层探测" : "Text layer probe",
+    evTextLayer: zh ? "当前来源依据" : "Current source evidence",
     evRoute: zh ? "选定路线" : "Selected route",
     evSourceKind: zh ? "来源类型" : "Source kind",
     evFingerprint: zh ? "源指纹" : "Source fingerprint",
@@ -272,6 +312,16 @@ export function pipelineCopy(locale: PipelineLocale) {
     stageSkippedMeta: zh ? "已跳过" : "Skipped",
     stageErrorLabel: zh ? "错误" : "Error",
     stageUnitsLabel: zh ? "单元" : "Units",
+    stageFailedUnitsLabel: zh ? "失败单元" : "Failed units",
+    failureProviderTimeout: zh ? "模型请求超时" : "provider timeout",
+    failureProviderServer: zh ? "模型服务端错误（5xx）" : "provider server error (5xx)",
+    failureProviderRateLimit: zh ? "模型限流" : "provider rate limit",
+    failureProviderUnavailable: zh ? "模型服务不可用" : "provider unavailable",
+    failureStructureInvalid: zh ? "译文结构不合格" : "translation structure mismatch",
+    failureProviderFatal: zh ? "模型拒绝请求" : "provider rejected the request",
+    failureReasonSeparator: zh ? "；" : "; ",
+    translationFailureSummary: (count: number, reasons: string) =>
+      zh ? `翻译失败 ${count} 个单元：${reasons}` : `Translation failed for ${count} unit(s): ${reasons}`,
     stageArtifactsLabel: zh ? "登记工件" : "Artifacts",
     stageInputsLabel: zh ? "输入哈希" : "Input hashes",
     stageStartedLabel: zh ? "开始" : "Started",

@@ -5,6 +5,7 @@ import json
 from typing import Callable, Protocol
 
 from .placeholders import PLACEHOLDER_PATTERN
+from .profiles import VISUAL_LINE_BREAK_INSTRUCTION
 from .providers import (
     LLMProvider,
     ProviderUnavailableError,
@@ -38,6 +39,12 @@ class SecondPassRequest:
 class SecondPassChunkResult:
     reflection_text: str
     revised_text: str
+    draft_fallback: bool = False
+
+
+class TranslationStructureError(ValueError):
+    code = "translation_structure_invalid"
+    retryable = True
 
 
 class SecondPass(Protocol):
@@ -145,7 +152,13 @@ class WindowedReflectionSecondPass:
             "(iv) terminology (inappropriate for context, "
             "inconsistent use), and\n"
             "(v) other errors.\n\n"
+            "Translate each source segment exactly once. Never repeat or echo a phrase, "
+            "sentence, list entry, page label, footnote, or bibliography entry. Translate "
+            "all source-language prose, headings, labels, and bibliography title text; "
+            "preserve names, citations, URLs, identifiers, and conventional journal "
+            "abbreviations where translation would damage traceability.\n\n"
             "Output only the new translation and nothing else. "
+            f"{VISUAL_LINE_BREAK_INSTRUCTION} "
             "Preserve every protected placeholder exactly once and "
             "in its original order."
         )
@@ -154,13 +167,20 @@ class WindowedReflectionSecondPass:
                 f"{instruction} Protected placeholder and paragraph structure overrides "
                 "every reflection suggestion."
             )
+        # Reflection sees neighboring blocks, whose protected markers do not
+        # belong to the current draft.  Feeding those opaque tokens back into
+        # the editor lets a model copy them into the revised block and fail an
+        # otherwise valid second pass.  They carry no linguistic content, so
+        # omit them from the editing payload while retaining the original
+        # reflection text for QA evidence.
+        editing_reflection = PLACEHOLDER_PATTERN.sub("", reflection_text)
         return self.provider.translate(
             TranslationRequest(
                 text=json.dumps(
                     {
                         "source": request.source_text,
                         "draft": request.draft_text,
-                        "reflection": reflection_text,
+                        "reflection": editing_reflection,
                     },
                     ensure_ascii=False,
                     separators=(",", ":"),
@@ -176,22 +196,42 @@ def run_second_pass_chunk(
     second_pass: SecondPass,
     request: SecondPassRequest,
     *,
+    candidate_retries: int = 0,
+    candidate_normalizer: Callable[[str], str] | None = None,
     candidate_validator: Callable[[str], bool] | None = None,
+    draft_fallback_validator: Callable[[str], bool] | None = None,
 ) -> SecondPassChunkResult:
-    reflection = second_pass.reflect(request=request)
-    if not isinstance(reflection, str):
-        raise ValueError("invalid reflection output")
-    candidate = second_pass.improve(request=request, reflection_text=reflection)
+    if candidate_retries < 0:
+        raise ValueError("candidate_retries must not be negative")
     expected = tuple(PLACEHOLDER_PATTERN.findall(request.draft_text))
-    accepted = (
+    for _ in range(candidate_retries + 1):
+        reflection = second_pass.reflect(request=request)
+        if not isinstance(reflection, str):
+            raise ValueError("invalid reflection output")
+        candidate = second_pass.improve(request=request, reflection_text=reflection)
+        if isinstance(candidate, str) and candidate_normalizer is not None:
+            candidate = candidate_normalizer(candidate)
+        accepted = (
+            isinstance(candidate, str)
+            and _placeholders_valid(candidate, expected)
+            and (candidate_validator is None or candidate_validator(candidate))
+        )
+        if accepted:
+            return SecondPassChunkResult(
+                reflection_text=reflection,
+                revised_text=candidate,
+            )
+    if (
         isinstance(candidate, str)
-        and _placeholders_valid(candidate, expected)
-        and (candidate_validator is None or candidate_validator(candidate))
-    )
-    return SecondPassChunkResult(
-        reflection_text=reflection,
-        revised_text=candidate if accepted else request.draft_text,
-    )
+        and draft_fallback_validator is not None
+        and draft_fallback_validator(candidate)
+    ):
+        return SecondPassChunkResult(
+            reflection_text=reflection,
+            revised_text=request.draft_text,
+            draft_fallback=True,
+        )
+    raise TranslationStructureError("second-pass output changed protected structure")
 
 
 def _context_payload(
@@ -208,7 +248,9 @@ def translate_chunk_with_fallback(
     request: TranslationRequest,
     *,
     placeholder_retries: int,
+    candidate_normalizer: Callable[[str], str] | None = None,
     candidate_validator: Callable[[str], bool] | None = None,
+    candidate_repair: Callable[[str], str] | None = None,
 ) -> ChunkTranslationResult:
     if placeholder_retries < 0:
         raise ValueError("placeholder_retries must not be negative")
@@ -224,28 +266,52 @@ def translate_chunk_with_fallback(
             # text here would bake throttling into the output artifact.
             raise
         except ProviderUnavailableError:
-            continue
-        if (
+            raise
+        if isinstance(translated, str) and candidate_normalizer is not None:
+            translated = candidate_normalizer(translated)
+        accepted = (
             isinstance(translated, str)
             and _placeholders_valid(translated, expected)
             and (candidate_validator is None or candidate_validator(translated))
-        ):
+        )
+        if accepted:
             return ChunkTranslationResult(translated, "none", provider_attempts)
+        if isinstance(translated, str) and candidate_repair is not None:
+            translated = candidate_repair(translated)
+            if candidate_normalizer is not None:
+                translated = candidate_normalizer(translated)
+            if _placeholders_valid(translated, expected) and (
+                candidate_validator is None or candidate_validator(translated)
+            ):
+                return ChunkTranslationResult(translated, "none", provider_attempts)
 
     plain_source = PLACEHOLDER_PATTERN.sub("", request.text)
     provider_attempts += 1
     try:
         translated_plain = provider.translate(replace(request, text=plain_source))
+        translated_plain = PLACEHOLDER_PATTERN.sub("", translated_plain)
         if plain_source and not translated_plain:
             raise ValueError("empty aligned translation")
         aligned = _align_placeholders(request.text, translated_plain, expected)
+        if candidate_normalizer is not None:
+            aligned = candidate_normalizer(aligned)
         if _placeholders_valid(aligned, expected) and (
             candidate_validator is None or candidate_validator(aligned)
         ):
             return ChunkTranslationResult(aligned, "aligned", provider_attempts)
+        if candidate_repair is not None:
+            aligned = candidate_repair(aligned)
+            if candidate_normalizer is not None:
+                aligned = candidate_normalizer(aligned)
+            if _placeholders_valid(aligned, expected) and (
+                candidate_validator is None or candidate_validator(aligned)
+            ):
+                return ChunkTranslationResult(aligned, "aligned", provider_attempts)
     except RateLimitError:
         raise
-    except (ProviderUnavailableError, TypeError, ValueError):
+    except ProviderUnavailableError:
+        raise
+    except (TypeError, ValueError):
         pass
 
     return ChunkTranslationResult(request.text, "source", provider_attempts)

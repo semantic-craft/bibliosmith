@@ -22,10 +22,12 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlparse
 
 import requests
+
+from progress import OperationProgress
 
 try:
     import fitz  # PyMuPDF
@@ -79,6 +81,7 @@ class Config:
     zotero_api_key: str
     baidu_token: str
     mineru_token_available: bool
+    mineru_language: str
     baidu_job_url: str
     baidu_model: str
     max_ocr_pages_per_run: int
@@ -196,6 +199,7 @@ def get_config(*, zotero_tags: Iterable[str] = ()) -> Config:
             os.environ.get("MINERU_API_TOKEN", "").strip()
             or os.environ.get("MINERU_TOKEN", "").strip()
         ),
+        mineru_language=os.environ.get("MINERU_LANGUAGE", "ch").strip() or "ch",
         baidu_job_url=os.environ.get("BAIDU_PADDLEOCR_JOB_URL", DEFAULT_BAIDU_JOB_URL).rstrip("/"),
         baidu_model=os.environ.get("BAIDU_PADDLEOCR_MODEL", DEFAULT_BAIDU_MODEL).strip() or DEFAULT_BAIDU_MODEL,
         max_ocr_pages_per_run=env_int("MAX_OCR_PAGES_PER_RUN", 10000),
@@ -961,7 +965,12 @@ class BaiduOCRClient:
             raise RetryableRemoteError(f"Retryable Baidu submit response after upload: {exc}") from exc
         return payload["data"]["jobId"]
 
-    def poll_json_url(self, job_id: str, deadline: float) -> str:
+    def poll_json_url(
+        self,
+        job_id: str,
+        deadline: float,
+        on_progress: Callable[[int | None, int | None], None] | None = None,
+    ) -> str:
         stalled_seconds = int(os.environ.get("BAIDU_STALLED_JOB_SECONDS", "300") or "0")
         last_progress: tuple[Any, ...] | None = None
         last_progress_at = time.time()
@@ -988,6 +997,16 @@ class BaiduOCRClient:
                 raise WorkerError(f"Baidu OCR job failed: {data.get('errorMsg')}")
             if state in {"pending", "running"}:
                 progress = data.get("extractProgress", {})
+                if on_progress is not None:
+                    try:
+                        extracted_pages = int(progress.get("extractedPages"))
+                    except (TypeError, ValueError):
+                        extracted_pages = None
+                    try:
+                        reported_total = int(progress.get("totalPages"))
+                    except (TypeError, ValueError):
+                        reported_total = None
+                    on_progress(extracted_pages, reported_total)
                 progress_key = (
                     state,
                     progress.get("extractedPages"),
@@ -1601,6 +1620,10 @@ def process_ocr_route(
         return "blocked_missing_baidu_token", 0
 
     baidu = BaiduOCRClient(config)
+    operation_progress = OperationProgress.from_environment(
+        "extract", "pages", total=len(pages)
+    )
+    operation_progress.start("starting")
     markdown_path, sidecar_path = output_paths(config, attachment, "paddle-ocr")
     chunk_dir = config.output_root / ".state" / "chunks" / attachment.key / source_md5
     max_bytes = config.baidu_max_upload_mb * 1024 * 1024
@@ -1611,6 +1634,7 @@ def process_ocr_route(
 
     completed_jsonl: list[tuple[int, Path]] = []
     pages_used = 0
+    progress_done = 0
     queue = list(chunk_specs)
     while queue:
         chunk_pages, chunk_path = queue.pop(0)
@@ -1634,6 +1658,12 @@ def process_ocr_route(
             cached_path = Path(chunk_row["jsonl_path"])
             if result_file_matches_model(cached_path, config):
                 completed_jsonl.append((start_page, cached_path))
+                progress_done += len(chunk_pages)
+                operation_progress.update(
+                    completed=progress_done,
+                    total=len(pages),
+                    phase="extracting",
+                )
                 continue
             logging.info("Ignoring cached chunk %s pages %s-%s from another Baidu model", attachment.key, start_page, end_page)
             chunk_row = None
@@ -1648,6 +1678,7 @@ def process_ocr_route(
         job_id = chunk_row["job_id"] if chunk_row and chunk_row["job_id"] else None
         try:
             if not job_id:
+                operation_progress.touch("uploading")
                 job_id = baidu.submit_job(
                     chunk_path,
                     batch_id=baidu_batch_id(attachment.key, source_md5, start_page, end_page),
@@ -1661,7 +1692,18 @@ def process_ocr_route(
                     chunk_path=chunk_path,
                     job_id=job_id,
                 )
-            json_url = baidu.poll_json_url(job_id, deadline)
+            completed_before_chunk = progress_done
+            json_url = baidu.poll_json_url(
+                job_id,
+                deadline,
+                on_progress=lambda extracted, _reported_total: operation_progress.update(
+                    completed=completed_before_chunk
+                    + min(max(extracted or 0, 0), len(chunk_pages)),
+                    total=len(pages),
+                    phase="extracting",
+                ),
+            )
+            operation_progress.touch("downloading")
             jsonl_text = baidu.download_jsonl(json_url)
             jsonl_path.write_text(jsonl_text, encoding="utf-8")
             state.upsert_chunk(
@@ -1676,6 +1718,12 @@ def process_ocr_route(
             )
             completed_jsonl.append((start_page, jsonl_path))
             pages_used += len(chunk_pages)
+            progress_done += len(chunk_pages)
+            operation_progress.update(
+                completed=progress_done,
+                total=len(pages),
+                phase="extracting",
+            )
             ocr_pages_remaining -= len(chunk_pages)
         except WorkerError as exc:
             if should_split_failed_ocr(exc) and len(chunk_pages) > 1:
@@ -1704,6 +1752,9 @@ def process_ocr_route(
                 continue
             raise
 
+    operation_progress.update(
+        completed=len(pages), total=len(pages), phase="assembling"
+    )
     if is_layout_model(config):
         markdown_text, combined_lines, parsed_pages = read_layout_markdown(completed_jsonl)
         if parsed_pages and parsed_pages != len(pages):
@@ -1773,6 +1824,41 @@ def format_page_ranges(pages: list[int]) -> str:
     return ",".join(ranges)
 
 
+def _is_relative_mineru_reference(value: str) -> bool:
+    reference = value.strip().strip("<>")
+    parsed = urlparse(reference)
+    return bool(reference) and not reference.startswith(("#", "/")) and not parsed.scheme
+
+
+def rewrite_mineru_references(markdown: str, prefix: str) -> str:
+    """Keep MinerU's relative assets reachable beside the staged Markdown."""
+
+    def markdown_replacement(match: re.Match[str]) -> str:
+        opening, raw_reference, closing = match.groups()
+        if not _is_relative_mineru_reference(raw_reference):
+            return match.group(0)
+        wrapped = raw_reference.startswith("<") and raw_reference.endswith(">")
+        reference = raw_reference.strip("<>")
+        rewritten = f"{prefix}/{reference}"
+        if wrapped:
+            rewritten = f"<{rewritten}>"
+        return f"{opening}{rewritten}{closing}"
+
+    rewritten = re.sub(
+        r"(!?\[[^\]]*\]\()([^\s)]+)([^)]*\))",
+        markdown_replacement,
+        markdown,
+    )
+
+    def html_replacement(match: re.Match[str]) -> str:
+        attribute, quote, reference = match.groups()
+        if not _is_relative_mineru_reference(reference):
+            return match.group(0)
+        return f"{attribute}={quote}{prefix}/{reference}{quote}"
+
+    return re.sub(r"\b(src|href)=(['\"])([^'\"]+)\2", html_replacement, rewritten)
+
+
 def process_mineru_route(
     *,
     attachment: Attachment,
@@ -1792,6 +1878,8 @@ def process_mineru_route(
     run_root = config.output_root / ".state" / "mineru" / attachment.key / source_md5
     run_root.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=run_root))
+    markdown_path, sidecar_path = output_paths(config, attachment, ROUTE_MINERU)
+    artifact_dir = markdown_path.with_suffix(".mineru")
     timeout_seconds = max(1, int(deadline - time.time()))
     try:
         command = [
@@ -1802,6 +1890,8 @@ def process_mineru_route(
             str(run_dir),
             "--mode",
             "batch",
+            "--language",
+            config.mineru_language,
             "--max-runtime-seconds",
             str(timeout_seconds),
         ]
@@ -1830,9 +1920,31 @@ def process_mineru_route(
         content = markdown_candidates[0].read_text(encoding="utf-8").strip()
         if not content:
             raise WorkerError("MinerU single-attachment adapter produced empty Markdown")
+        staged_artifact_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".{artifact_dir.name}-",
+                dir=artifact_dir.parent,
+            )
+        )
+        try:
+            shutil.copytree(
+                markdown_candidates[0].parent,
+                staged_artifact_dir,
+                dirs_exist_ok=True,
+            )
+            if artifact_dir.exists():
+                if not artifact_dir.is_dir():
+                    raise WorkerError(
+                        f"MinerU artifact destination is not a directory: {artifact_dir}"
+                    )
+                shutil.rmtree(artifact_dir)
+            staged_artifact_dir.replace(artifact_dir)
+        except BaseException:
+            shutil.rmtree(staged_artifact_dir, ignore_errors=True)
+            raise
+        content = rewrite_mineru_references(content, artifact_dir.name)
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
-    markdown_path, sidecar_path = output_paths(config, attachment, ROUTE_MINERU)
     metadata = build_metadata(
         attachment,
         source_md5=source_md5,
@@ -1848,6 +1960,9 @@ def process_mineru_route(
                 "source_pdf_key": attachment.key,
                 "route": ROUTE_MINERU,
                 "pages": pages,
+                "mineru_language": config.mineru_language,
+                "mineru_artifact_dir": str(artifact_dir),
+                "mineru_manifest_path": str(artifact_dir / "mineru_manifest.json"),
             },
             ensure_ascii=False,
             indent=2,

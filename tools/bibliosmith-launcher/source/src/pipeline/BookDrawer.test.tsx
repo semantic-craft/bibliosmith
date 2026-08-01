@@ -307,6 +307,45 @@ describe("BookDrawer gate card", () => {
     expect(props.onRouteOverride).toHaveBeenCalledWith("job-1", "child-1", "DIRTY", "mineru");
   });
 
+  it("offers one explicit rebuild action when the MinerU source changed", async () => {
+    const user = userEvent.setup();
+    const changed = bookUnit({
+      status: "blocked",
+      stages: [
+        stage("route", "completed"),
+        stage("extract", "completed"),
+        stage("split", "blocked", { error: "source_changed_downstream_exists" }),
+        stage("prepare", "pending"),
+      ],
+      childOver: { lastError: "source_changed_downstream_exists" },
+      jobOver: { status: "blocked", lastError: "source_changed_downstream_exists" },
+    });
+    const { props } = renderDrawer(changed);
+
+    const rebuild = screen.getByRole("button", { name: "Rebuild from MinerU source" });
+    expect(screen.queryByRole("button", { name: copy.blockedKeepMineru })).toBeNull();
+    expect(screen.queryByText(copy.abNoAction)).toBeNull();
+    await user.click(rebuild);
+
+    expect(props.onAdvance).toHaveBeenCalledWith("job-1", "child-1", true);
+  });
+
+  it("does not claim that no action is needed while a stage awaits manual advance", () => {
+    const queued = bookUnit({
+      status: "pending",
+      stages: [
+        stage("route", "completed"),
+        stage("extract", "completed"),
+        stage("split", "completed"),
+        stage("prepare", "pending"),
+      ],
+    });
+    renderDrawer(queued);
+
+    expect(screen.queryByText(copy.abNoAction, { exact: false })).toBeNull();
+    expect(screen.getByText("Action needed: continue to the next stage", { exact: false })).toBeTruthy();
+  });
+
   // Deleting used to remove the whole job, taking every other book in the batch
   // with it. It now drops just the book the user pointed at.
   it("drops only the book it was opened on", async () => {

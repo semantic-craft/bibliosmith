@@ -87,6 +87,131 @@ fn program_search_dirs_survive_a_desktop_launch_without_path() {
     assert_eq!(dirs, vec![PathBuf::from("/opt/homebrew/bin")]);
 }
 
+#[test]
+fn only_real_ocr_commands_request_keychain_credentials() {
+    let output = PathBuf::from("/tmp/book-pipeline-command-scope");
+    let fake = RunnerCommand {
+        kind: RunnerCommandKind::Fake,
+        label: "fake Book Pipeline runner".into(),
+        program: PathBuf::from("fake"),
+        args: Vec::new(),
+        env: Vec::new(),
+        cwd: None,
+        output_dir: output,
+        attempts: 0,
+        accepted_exit_codes: vec![0],
+    };
+    assert!(!command_uses_ocr_credentials(&fake));
+
+    let mut command = fake.clone();
+    for label in [
+        ZOTERO_CONVERSION_COMMAND_LABEL,
+        "MinerU Precision batch",
+        "local PDF conversion wrapper",
+    ] {
+        command.label = label.into();
+        assert!(command_uses_ocr_credentials(&command), "{label}");
+    }
+    command.label = "external Book Pipeline adapter".into();
+    assert!(!command_uses_ocr_credentials(&command));
+}
+
+#[test]
+fn public_state_prefers_a_digest_verified_mineru_source_over_the_old_route_label() {
+    let root = temp_root("current-mineru-evidence");
+    let project = root.join("project");
+    fs::create_dir_all(project.join("source/source.mineru")).unwrap();
+    fs::create_dir_all(project.join("metadata")).unwrap();
+    let source = project.join("source/source.md");
+    fs::write(&source, "# MinerU source\n").unwrap();
+    fs::write(
+        project.join("source/source.mineru/mineru_manifest.json"),
+        "{}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("metadata/source_manifest.json"),
+        serde_json::to_string(&serde_json::json!({
+            "source_sha256": sha256_file(&source).unwrap(),
+            "extraction_engine": "MinerU Precision v4 VLM",
+            "mineru_manifest_path": "source/source.mineru/mineru_manifest.json",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut job = mineru_overlay_fixture_job(&project);
+
+    overlay_current_mineru_source_evidence(&mut job);
+
+    let route = &job.children[0].route[0];
+    assert_eq!(route.route_kind, "mineru");
+    assert!(route.summary.contains("MinerU Precision v4 VLM"));
+    assert!(route.summary.contains("direct_text"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn mineru_source_overlay_rejects_a_stale_source_digest() {
+    let root = temp_root("stale-mineru-evidence");
+    let project = root.join("project");
+    fs::create_dir_all(project.join("source/source.mineru")).unwrap();
+    fs::create_dir_all(project.join("metadata")).unwrap();
+    fs::write(project.join("source/source.md"), "# Changed source\n").unwrap();
+    fs::write(
+        project.join("source/source.mineru/mineru_manifest.json"),
+        "{}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("metadata/source_manifest.json"),
+        r#"{"source_sha256":"deadbeef","extraction_engine":"MinerU Precision v4 VLM","mineru_manifest_path":"source/source.mineru/mineru_manifest.json"}"#,
+    )
+    .unwrap();
+    let mut job = mineru_overlay_fixture_job(&project);
+
+    overlay_current_mineru_source_evidence(&mut job);
+
+    assert_eq!(job.children[0].route[0].route_kind, "direct_text");
+    let _ = fs::remove_dir_all(root);
+}
+
+fn mineru_overlay_fixture_job(project: &Path) -> BookPipelineJob {
+    serde_json::from_value(serde_json::json!({
+        "id": "job-mineru-overlay",
+        "mode": "convert_then_translate",
+        "source": { "kind": "zotero_attachment", "routeOverrides": {} },
+        "route": [],
+        "status": "completed",
+        "currentStep": "Completed",
+        "lastError": null,
+        "logSummary": [],
+        "artifacts": [],
+        "outputDir": null,
+        "attempts": 1,
+        "children": [{
+            "id": "child-mineru-overlay",
+            "parentJobId": "job-mineru-overlay",
+            "status": "completed",
+            "currentStageId": "validate_reading",
+            "source": { "kind": "zotero_attachment", "routeOverrides": {} },
+            "route": [{
+                "id": "book",
+                "title": "Book",
+                "sourceKind": "zotero_attachment",
+                "sourceRef": "zotero://attachment/BOOK",
+                "routeKind": "direct_text",
+                "canRun": true,
+                "blockedReason": null,
+                "summary": "Direct embedded text extraction"
+            }],
+            "localProjectRoot": display_path(project)
+        }],
+        "createdAt": "2026-07-30T00:00:00Z",
+        "updatedAt": "2026-07-30T00:00:00Z"
+    }))
+    .unwrap()
+}
+
 // The launchd default a Finder-launched .app inherits holds no uv and no
 // node, so a bare name has to resolve out of the fallback roots instead.
 #[test]
@@ -795,13 +920,9 @@ impl RunnerCommandExecutor for MineruFixtureExecutor {
         assert_eq!(command.kind, RunnerCommandKind::Process);
         match command.label.as_str() {
             ITEM_INDEX_PROFILE_COMMAND_LABEL => Ok(fixture_item_index_profile_result()),
-            "MinerU extraction wrapper" => {
+            ZOTERO_CONVERSION_COMMAND_LABEL => {
                 assert!(has_arg_pair(&command.args, "--attachment-key", "MINERU"));
-                assert!(has_arg_pair(
-                    &command.args,
-                    "--output-dir",
-                    &display_path(&command.output_dir)
-                ));
+                assert!(command.args.iter().any(|arg| arg == "--force-mineru"));
                 fs::create_dir_all(&command.output_dir).unwrap();
                 fs::write(
                     command.output_dir.join("mineru.md"),
@@ -814,7 +935,7 @@ impl RunnerCommandExecutor for MineruFixtureExecutor {
                 )
                 .unwrap();
                 Ok(RunnerCommandResult {
-                    stdout: "MinerU completed without token details".into(),
+                    stdout: "Uploaded mineru.md to Zotero attachment MINERUMD".into(),
                     stderr: String::new(),
                     log_summary: vec!["MinerU fixture completed".into()],
                 })
@@ -874,6 +995,7 @@ impl RunnerCommandExecutor for ExternalAdapterFixtureExecutor {
 
 struct TranslationEngineFixtureExecutor {
     fail_once: Mutex<Option<String>>,
+    failure_code: String,
     requested_units: Mutex<Vec<Vec<String>>>,
     expected_second_pass_enabled: bool,
     expected_text_cleanup: bool,
@@ -888,6 +1010,7 @@ impl TranslationEngineFixtureExecutor {
     fn succeeding() -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
@@ -900,6 +1023,7 @@ impl TranslationEngineFixtureExecutor {
     fn with_second_pass_enabled() -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: true,
             expected_text_cleanup: false,
@@ -912,6 +1036,7 @@ impl TranslationEngineFixtureExecutor {
     fn with_text_cleanup() -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: true,
@@ -924,6 +1049,7 @@ impl TranslationEngineFixtureExecutor {
     fn with_custom_instructions(custom_instructions: BookPipelineCustomInstructions) -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: true,
             expected_text_cleanup: false,
@@ -936,6 +1062,7 @@ impl TranslationEngineFixtureExecutor {
     fn failing_once(unit_id: &str) -> Self {
         Self {
             fail_once: Mutex::new(Some(unit_id.into())),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
@@ -945,9 +1072,17 @@ impl TranslationEngineFixtureExecutor {
         }
     }
 
+    fn failing_once_with_code(unit_id: &str, failure_code: &str) -> Self {
+        Self {
+            failure_code: failure_code.into(),
+            ..Self::failing_once(unit_id)
+        }
+    }
+
     fn with_paragraph_mismatch() -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
@@ -1017,6 +1152,7 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
             manifest["translationPolicyVersion"],
             TRANSLATION_POLICY_VERSION
         );
+        assert_eq!(TRANSLATION_POLICY_VERSION, "translation-policy-v10");
         assert_eq!(manifest["maxTokens"], TRANSLATION_ENGINE_MAX_TOKENS);
         assert_eq!(
             manifest["placeholderRetries"],
@@ -1083,7 +1219,7 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
                     "unitId": unit_id,
                     "status": "failed",
                     "artifact": artifact,
-                    "error": {"code": "translation_incomplete", "retryable": true},
+                    "error": {"code": self.failure_code.as_str(), "retryable": true},
                 })
             } else {
                 let mut completed = serde_json::json!({
@@ -1562,7 +1698,8 @@ impl RunnerCommandExecutor for ZoteroBatchFixtureExecutor {
                 assert!(command.args.iter().any(|arg| arg == "--force-ocr"));
             }
             "MINERU" => {
-                assert_eq!(command.label, "MinerU extraction wrapper");
+                assert_eq!(command.label, ZOTERO_CONVERSION_COMMAND_LABEL);
+                assert!(command.args.iter().any(|arg| arg == "--force-mineru"));
             }
             other => panic!("unexpected batch key {other}"),
         }
@@ -5248,6 +5385,88 @@ fn public_state_reports_stage_and_unit_progress() {
 }
 
 #[test]
+fn public_state_overlays_live_worker_progress_without_persisting_it() {
+    let root = temp_root("live-worker-progress-contract");
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let mut state = store.load().unwrap();
+    let stored = state
+        .jobs
+        .iter_mut()
+        .find(|stored| stored.id == job.id)
+        .unwrap();
+    let child = stored.children.first_mut().unwrap();
+    start_stage(child, "extract", store.execution_owner().unwrap());
+    stage_mut(child, "extract").unwrap().started_at = Some("2026-07-29T11:00:00Z".into());
+    child.status = STATUS_RUNNING.into();
+    derive_job(stored);
+    store.save(&state).unwrap();
+
+    let output_dir = store.job_output_dir(&job.id);
+    fs::create_dir_all(&output_dir).unwrap();
+    fs::write(
+        output_dir.join(LIVE_PROGRESS_FILE),
+        r#"{
+          "schema":"book-pipeline-progress-v1",
+          "stageId":"extract",
+          "completed":37,
+          "total":100,
+          "unitKind":"pages",
+          "phase":"extracting",
+          "activityAt":"2026-07-29T12:00:00Z"
+        }"#,
+    )
+    .unwrap();
+
+    let observed = load_state_with_live_progress(&store).unwrap();
+    let progress = observed.jobs[0].progress.operation.as_ref().unwrap();
+    assert_eq!(progress.completed, 37);
+    assert_eq!(progress.total, Some(100));
+    assert_eq!(progress.unit_kind, "pages");
+    assert_eq!(
+        observed.jobs[0]
+            .progress
+            .unit_summary
+            .as_ref()
+            .unwrap()
+            .completed,
+        37
+    );
+    assert!(
+        store.load().unwrap().jobs[0].progress.operation.is_none(),
+        "ephemeral worker progress must not be written into durable jobs.json"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn live_progress_older_than_the_current_attempt_is_ignored() {
+    let stage = BookPipelineStage {
+        stage_id: "translate".into(),
+        status: STATUS_RUNNING.into(),
+        started_at: Some("2026-07-29T12:00:00Z".into()),
+        ..BookPipelineStage::default()
+    };
+    let progress = BookPipelineOperationProgress {
+        stage_id: "translate".into(),
+        completed: 99,
+        total: Some(100),
+        unit_kind: "chapters".into(),
+        phase: "translating".into(),
+        activity_at: "2026-07-29T11:59:59Z".into(),
+        ..BookPipelineOperationProgress::default()
+    };
+
+    assert!(!live_progress_matches_stage(&stage, &progress));
+}
+
+#[test]
 fn terminal_webhook_is_safe_deterministic_and_idempotent() {
     let root = temp_root("terminal-webhook-contract");
     let store = BookPipelineStore::for_test(&root);
@@ -5280,6 +5499,43 @@ fn terminal_webhook_is_safe_deterministic_and_idempotent() {
     assert!(!payload.contains("/private/library"));
     assert!(!payload.contains("lastError"));
     assert!(!payload.contains("logSummary"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn terminal_webhook_progress_excludes_local_unit_failure_details() {
+    let root = temp_root("terminal-webhook-local-failures");
+    let store = BookPipelineStore::for_test(&root);
+    let mut job = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    job.progress.unit_summary = Some(BookPipelineUnitSummary {
+        total: 2,
+        completed: 1,
+        failed: 1,
+        failures: vec![BookPipelineUnitFailure {
+            unit_id: "private-chapter-name".into(),
+            code: "provider_timeout".into(),
+            retryable: true,
+        }],
+        ..BookPipelineUnitSummary::default()
+    });
+
+    let event = terminal_event(&job);
+
+    let summary = event.progress.unit_summary.as_ref().unwrap();
+    assert_eq!(
+        (summary.total, summary.completed, summary.failed),
+        (2, 1, 1)
+    );
+    assert!(summary.failures.is_empty());
+    let payload = serde_json::to_string(&event).unwrap();
+    assert!(!payload.contains("private-chapter-name"));
+    assert!(!payload.contains("provider_timeout"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -5546,17 +5802,19 @@ fn every_ocr_entry_point_runs_through_the_workspace_venv() {
         .unwrap(),
         "zotero_llm_worker.py",
     );
-    assert_runs_in_the_ocr_workspace(
-        &build_zotero_conversion_command_for_source(
-            &fake_direct_zotero_source(),
-            &zotero_route("mineru"),
-            0,
-            &output,
-            &worker_root,
-        )
-        .unwrap(),
-        "mineru.py",
-    );
+    let mineru_command = build_zotero_conversion_command_for_source(
+        &fake_direct_zotero_source(),
+        &zotero_route("mineru"),
+        0,
+        &output,
+        &worker_root,
+    )
+    .unwrap();
+    assert_runs_in_the_ocr_workspace(&mineru_command, "zotero_llm_worker.py");
+    assert!(mineru_command
+        .args
+        .iter()
+        .any(|arg| arg == "--force-mineru"));
     assert_runs_in_the_ocr_workspace(
         &build_zotero_discovery_command_for_root(&fake_direct_zotero_source(), 5, &worker_root)
             .unwrap(),
@@ -5630,6 +5888,80 @@ fn local_pdf_runner_command_uses_existing_wrapper_contract() {
         "--output-dir",
         &display_path(&command.output_dir)
     ));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn local_pdf_folder_forced_to_mineru_uses_precision_batch_client() {
+    let root = temp_root("local-pdf-mineru-batch-command");
+    let input = root.join("input");
+    let output = root.join("output");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("one.pdf"), "%PDF fixture one").unwrap();
+    fs::write(input.join("two.pdf"), "%PDF fixture two").unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let mineru_script = wrapper_root.join("mineru.py");
+    fs::write(&mineru_script, "print('mineru fixture')\n").unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: false,
+            has_mineru_credentials: true,
+            route_overrides: BTreeMap::from([
+                ("local-pdf-1".into(), "mineru".into()),
+                ("local-pdf-2".into(), "mineru".into()),
+            ]),
+        },
+    )
+    .unwrap();
+
+    let command = build_local_pdf_folder_command_for_root(&job, &output, &wrapper_root).unwrap();
+
+    assert_eq!(command.label, "MinerU Precision batch");
+    assert_runs_in_the_ocr_workspace(&command, "mineru.py");
+    assert!(command.args.iter().any(|arg| arg == &display_path(&input)));
+    assert!(has_arg_pair(&command.args, "--mode", "batch"));
+    assert!(has_arg_pair(&command.args, "--model-version", "vlm"));
+    assert!(has_arg_pair(
+        &command.args,
+        "--output-dir",
+        &display_path(&output)
+    ));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn local_pdf_folder_rejects_a_mixed_mineru_and_paddle_batch() {
+    let root = temp_root("local-pdf-mixed-ocr-command");
+    let input = root.join("input");
+    let output = root.join("output");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("one.pdf"), "%PDF fixture one").unwrap();
+    fs::write(input.join("two.pdf"), "%PDF fixture two").unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    fs::write(wrapper_root.join("mineru.py"), "print('mineru fixture')\n").unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            has_mineru_credentials: true,
+            route_overrides: BTreeMap::from([("local-pdf-1".into(), "mineru".into())]),
+        },
+    )
+    .unwrap();
+
+    let error = build_local_pdf_folder_command_for_root(&job, &output, &wrapper_root).unwrap_err();
+
+    assert!(
+        error.contains("cannot mix MinerU and non-MinerU"),
+        "{error}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -5844,7 +6176,7 @@ fn mineru_runner_command_records_artifacts() {
     assert!(completed
         .log_summary
         .iter()
-        .any(|line| line.contains("Runner command prepared: MinerU extraction wrapper")));
+        .any(|line| line.contains("Runner command prepared: Zotero conversion worker")));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -7920,6 +8252,62 @@ fn handoff_ready_child_job(
     job.id
 }
 
+#[test]
+fn mineru_handoff_preserves_assets_and_split_keeps_links_resolvable() {
+    let root = temp_root("mineru-handoff-assets");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let source_assets = root.join("source.mineru");
+    fs::create_dir_all(source_assets.join("images")).unwrap();
+    fs::create_dir_all(source_assets.join("parts/0001")).unwrap();
+    fs::write(source_assets.join("images/figure.png"), b"png-fixture").unwrap();
+    fs::write(
+        source_assets.join("parts/0001/part.md"),
+        "# Wrong per-part candidate\n",
+    )
+    .unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\n![Figure](source.mineru/images/figure.png)\n",
+    );
+
+    let handed_off = store.load().unwrap().jobs[0].clone();
+    let project_root = child_project_root(&handed_off);
+    let copied_asset = project_root.join("source/source.mineru/images/figure.png");
+    assert_eq!(fs::read(&copied_asset).unwrap(), b"png-fixture");
+    assert!(fs::read_to_string(project_root.join("source/source.md"))
+        .unwrap()
+        .starts_with("# One"));
+    assert!(handed_off
+        .artifacts
+        .iter()
+        .all(|artifact| { !artifact.path.contains("source.mineru/parts/0001/part.md") }));
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let chapter_path = split.children[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "chapter_source")
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .unwrap();
+    let chapter = fs::read_to_string(&chapter_path).unwrap();
+    let relative = "../../source/source.mineru/images/figure.png";
+    assert!(chapter.contains(relative), "{chapter}");
+    assert_eq!(
+        chapter_path
+            .parent()
+            .unwrap()
+            .join(relative)
+            .canonicalize()
+            .unwrap(),
+        copied_asset.canonicalize().unwrap()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 fn fake_handoff_ready_job(store: &BookPipelineStore, repo: &Path) -> String {
     fake_handoff_ready_job_with_options(store, repo, false, false)
 }
@@ -8222,6 +8610,19 @@ fn automated_qa_covers_placeholders_structure_glossary_and_completeness() {
     let terms = vec![("Foo".to_string(), "术语".to_string())];
 
     assert!(automated_qa_checks(&unit("# 标题\n\n使用 {name} 术语。\n"), &terms).passed());
+    assert!(
+        automated_qa_checks(&unit("# 标题\n\n使用 {name} 术语。\\(^{12}\\)\n"), &terms)
+            .placeholder_integrity
+    );
+    assert!(
+        !automated_qa_checks(&unit("# 标题\n\n使用 {name} 术语。^{missing}\n"), &terms)
+            .placeholder_integrity
+    );
+    assert_eq!(
+        placeholder_tokens(r"Use ^{name}"),
+        BTreeMap::from([(String::from("{name}"), 1)])
+    );
+    assert!(placeholder_tokens(r"Use \(^{12}\)").is_empty());
     assert!(!automated_qa_checks(&unit("# 标题\n\n使用术语。\n"), &terms).placeholder_integrity);
     assert!(!automated_qa_checks(&unit("## 标题\n\n使用 {name} 术语。\n"), &terms).structure);
     assert!(
@@ -9536,6 +9937,57 @@ fn a_stage_policy_overrides_the_default_budget_and_backoff() {
 }
 
 #[test]
+fn translate_failure_persists_each_units_safe_reason() {
+    let root = temp_root("fake-translate-failure-reason");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = fake_handoff_ready_job(&store, &repo);
+    let handed_off = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    let project_root = child_project_root(&handed_off);
+    fs::write(
+        project_root.join("source").join("source.md"),
+        "# Alpha\n\nFirst body.\n\n# Beta\n\nSecond body.\n",
+    )
+    .unwrap();
+    let executor =
+        TranslationEngineFixtureExecutor::failing_once_with_code("chapter_002", "provider_timeout");
+    let mut state = store.load().unwrap();
+    let stored_job = state.jobs.iter_mut().find(|job| job.id == job_id).unwrap();
+    let translate = stored_job.children[0]
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "translate")
+        .unwrap();
+    translate.max_attempts = 1;
+    store.save(&state).unwrap();
+
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let failed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    let translate = failed.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "translate")
+        .unwrap();
+    let summary = translate.unit_summary.as_ref().unwrap();
+    assert_eq!(summary.failures.len(), 1);
+    assert_eq!(summary.failures[0].unit_id, "chapter_002");
+    assert_eq!(summary.failures[0].code, "provider_timeout");
+    assert!(summary.failures[0].retryable);
+    assert_eq!(
+        translate.error.as_deref(),
+        Some("Translation failed for 1 unit(s). See failed-unit details.")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn translate_failure_retries_only_failed_units_and_recovers_stage() {
     let root = temp_root("fake-translate-retry");
     let repo = handoff_repo_fixture(&root);
@@ -9645,6 +10097,19 @@ fn expert_qa_retries_only_failed_unit_and_separates_fix_from_pass_attempt() {
 
     let failed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     assert_eq!(child_stage_status(&failed, "expert_qa"), STATUS_FAILED);
+    assert!(failed.children[0].artifacts.iter().any(|artifact| {
+        matches!(
+            artifact.producer.stage_id.as_str(),
+            "translate" | "expert_qa"
+        )
+    }));
+    assert!(failed.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "expert_qa")
+        .unwrap()
+        .unit_summary
+        .is_some());
     let qa_stage = failed.children[0]
         .stages
         .iter()
@@ -9880,6 +10345,33 @@ fn completed_reading_job(
         .find(|job| job.id == job_id)
         .unwrap();
     (job_id, completed)
+}
+
+#[test]
+fn reading_validation_status_marks_every_finished_stage_explicitly() {
+    let root = temp_root("reading-validation-status");
+    fs::create_dir_all(root.join("qa")).unwrap();
+    fs::write(
+        root.join("qa/status.md"),
+        "# QA Status\n\n- extraction: completed\n- split: pending rerun\n- translation: pending rerun\n- expert QA: pending\n- reading output: pending\n- EPUBCheck: pending\n",
+    )
+    .unwrap();
+
+    write_reading_validation_status(&root, &EpubCheckSummary::default(), true, &[]).unwrap();
+
+    let status = fs::read_to_string(root.join("qa/status.md")).unwrap();
+    for completed_line in [
+        "- split: passed",
+        "- translation: passed",
+        "- expert QA: passed",
+        "- reading output: passed",
+        "- EPUBCheck: passed",
+    ] {
+        assert!(status.contains(completed_line), "{status}");
+    }
+    assert!(!status.contains(": pending"), "{status}");
+    assert!(status.contains("- EPUBCheck: fatal=0, error=0, warning=0"));
+    let _ = fs::remove_dir_all(root);
 }
 
 // Story 18's second half — "and a real reader" — had nowhere to land, so the
@@ -10168,7 +10660,19 @@ fn fake_pipeline_promotes_builds_validates_and_completes() {
     assert_eq!(report["checker"]["nFatal"], 0);
     assert_eq!(report["checker"]["nError"], 0);
     let qa_status = fs::read_to_string(project_root.join("qa/status.md")).unwrap();
-    assert!(qa_status.contains("- reading output: passed"));
+    for completed_line in [
+        "- split: passed",
+        "- translation: passed",
+        "- expert QA: passed",
+        "- reading output: passed",
+        "- EPUBCheck: passed",
+    ] {
+        assert!(
+            qa_status.contains(completed_line),
+            "{completed_line} missing from:\n{qa_status}"
+        );
+    }
+    assert!(!qa_status.contains(": pending"), "{qa_status}");
     assert!(qa_status.contains(
         "- accepted residual risks: 1 EPUBCheck warning(s), accepted for local reading output"
     ));
@@ -10692,6 +11196,135 @@ fn source_change_before_prepare_reruns_split_without_blocking() {
 }
 
 #[test]
+fn split_bounds_an_oversized_book_unit_at_deeper_headings_without_losing_text() {
+    let root = temp_root("advance-bounded-split");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let section = "x".repeat(40 * 1024);
+    let source = format!(
+        "# Book\n\n## Page 1\n\n{section}\n\n## Page 2\n\n{section}\n\n## Page 3\n\n{section}\n"
+    );
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, &source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let chapter_paths = split.children[0]
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "chapter_source")
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .collect::<Vec<_>>();
+    let chapters = chapter_paths
+        .iter()
+        .map(|path| fs::read_to_string(path).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(chapters.len(), 3);
+    assert!(chapters.iter().all(|chapter| chapter.len() <= 64 * 1024));
+    assert_eq!(chapters.concat(), source);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_bounds_an_oversized_heading_free_unit_at_paragraphs_without_losing_text() {
+    let root = temp_root("advance-bounded-paragraph-split");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let paragraph = "x".repeat(40 * 1024);
+    let source = format!("{paragraph}\n\n{paragraph}\n\n{paragraph}\n");
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, &source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let chapters = split.children[0]
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "chapter_source")
+        .map(|artifact| fs::read_to_string(&artifact.path).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(chapters.len(), 3);
+    assert!(chapters.iter().all(|chapter| chapter.len() <= 64 * 1024));
+    assert_eq!(chapters.concat(), source);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_hard_bounds_one_unbroken_paragraph_without_losing_text() {
+    let root = temp_root("advance-hard-bounded-paragraph");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let source = format!("{}\n", "界".repeat(50 * 1024));
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, &source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let chapters = split.children[0]
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "chapter_source")
+        .map(|artifact| fs::read_to_string(&artifact.path).unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(chapters.len() > 1);
+    assert!(chapters.iter().all(|chapter| chapter.len() <= 64 * 1024));
+    assert_eq!(chapters.concat(), source);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn paragraph_fallback_never_splits_inside_a_fenced_code_block() {
+    let root = temp_root("advance-fenced-paragraph-split");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let prose = "x".repeat(40 * 1024);
+    let code = "y".repeat(20 * 1024);
+    let source = format!("{prose}\n\n```text\n{code}\n\n{code}\n```\n\n{prose}\n");
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, &source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let chapters = split.children[0]
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "chapter_source")
+        .map(|artifact| fs::read_to_string(&artifact.path).unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(chapters
+        .iter()
+        .all(|chapter| chapter.matches("```").count() % 2 == 0));
+    assert_eq!(chapters.concat(), source);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn mixed_fence_markers_do_not_close_the_active_code_block() {
+    let text = "```text\none\n~~~\n\ntwo\n```\ntail\n";
+
+    let atoms = structural_text_atoms(text);
+
+    assert_eq!(
+        atoms,
+        vec![("```text\none\n~~~\n\ntwo\n```\n", false), ("tail\n", true),]
+    );
+}
+
+#[test]
+fn hard_bound_separates_a_small_fence_from_oversized_plain_text() {
+    let text = format!("```text\nsmall\n```\n{}", "界".repeat(40 * 1024));
+
+    let pieces = hard_bound_text(&text);
+
+    assert!(pieces.len() > 1);
+    assert!(pieces
+        .iter()
+        .all(|piece| piece.len() <= MAX_TRANSLATION_UNIT_BYTES));
+    assert_eq!(pieces.concat(), text);
+    assert_eq!(pieces[0], "```text\nsmall\n```\n");
+}
+
+#[test]
 fn source_change_after_prepare_blocks_split_pending_invalidation() {
     let root = temp_root("advance-block");
     let repo = handoff_repo_fixture(&root);
@@ -10738,6 +11371,196 @@ fn source_change_after_prepare_blocks_split_pending_invalidation() {
 }
 
 #[test]
+fn source_change_is_not_hidden_by_a_failed_downstream_stage() {
+    let root = temp_root("advance-block-after-downstream-failure");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    let prepared = advance_job(&store, &job_id, None, false).unwrap();
+    fs::write(
+        child_source_md(&prepared),
+        "# Rewritten\n\nDifferent body.\n",
+    )
+    .unwrap();
+    let mut state = store.load().unwrap();
+    let child = &mut state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    set_stage_status(
+        child,
+        "expert_qa",
+        STATUS_FAILED,
+        Some("simulated stale failure".into()),
+    );
+
+    let change = evaluate_split_freshness(child, false)
+        .unwrap()
+        .expect("changed source must supersede a stale downstream failure");
+
+    assert!(matches!(change.action, SplitFreshnessAction::Block));
+    assert!(change.stop_after);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn source_change_after_expert_qa_failure_persists_a_clean_invalidation_gate() {
+    let root = temp_root("advance-block-after-expert-qa-failure");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = fake_handoff_ready_job(&store, &repo);
+    let executor = TranslationEngineFixtureExecutor::succeeding();
+    let handed_off = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    fs::write(
+        child_source_md(&handed_off),
+        "# Alpha\n\nFirst body.\n\n# Beta\n\nSecond body.\n",
+    )
+    .unwrap();
+
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let translated = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    fs::write(
+        child_project_root(&translated)
+            .join("chapters")
+            .join("translated")
+            .join("chapter_002.md"),
+        "# Broken\n",
+    )
+    .unwrap();
+    let failed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    assert_eq!(child_stage_status(&failed, "expert_qa"), STATUS_FAILED);
+    fs::write(child_source_md(&failed), "# Rewritten\n\nDifferent body.\n").unwrap();
+
+    let blocked = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    assert_eq!(child_stage_status(&blocked, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&blocked, "expert_qa"), STATUS_PENDING);
+    assert!(blocked.children[0].artifacts.iter().all(|artifact| {
+        ordered_stage_index(&artifact.producer.stage_id)
+            .is_none_or(|order| order <= ordered_stage_index("split").unwrap())
+    }));
+    for stage in blocked.children[0].stages.iter().filter(|stage| {
+        ordered_stage_index(&stage.stage_id)
+            .is_some_and(|order| order > ordered_stage_index("split").unwrap())
+    }) {
+        assert!(
+            stage.artifact_ids.is_empty(),
+            "{} kept artifact ids",
+            stage.stage_id
+        );
+        assert!(
+            stage.unit_summary.is_none(),
+            "{} kept unit summary",
+            stage.stage_id
+        );
+        assert!(
+            stage.safe_error.is_none(),
+            "{} kept safe error",
+            stage.stage_id
+        );
+        assert_eq!(stage.attempt, 0, "{} kept retry attempts", stage.stage_id);
+        assert!(
+            stage.give_up_reason.is_none(),
+            "{} kept give-up reason",
+            stage.stage_id
+        );
+        assert!(
+            stage.next_retry_at.is_none(),
+            "{} kept retry deadline",
+            stage.stage_id
+        );
+    }
+    assert_eq!(
+        blocked.children[0].last_error.as_deref(),
+        Some("source_changed_downstream_exists")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn prepared_unit_scope_repair_removes_legacy_downstream_records() {
+    let root = temp_root("prepared-unit-scope-repair");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    let mut prepared = advance_job(&store, &job_id, None, false).unwrap();
+    let child = &mut prepared.children[0];
+    child.artifacts.push(BookPipelineArtifact {
+        kind: "chapter_translation".into(),
+        path: "/tmp/chapter_999.md".into(),
+        producer: BookPipelineArtifactProducer {
+            stage_id: "translate".into(),
+            unit_id: Some("chapter_999".into()),
+            ..BookPipelineArtifactProducer::default()
+        },
+        producer_stage: Some("translate".into()),
+        ..BookPipelineArtifact::default()
+    });
+    child.artifacts.push(BookPipelineArtifact {
+        kind: "chapter_control".into(),
+        path: "/tmp/chapter_999.json".into(),
+        producer: BookPipelineArtifactProducer {
+            stage_id: "expert_qa".into(),
+            unit_id: Some("chapter_999".into()),
+            ..BookPipelineArtifactProducer::default()
+        },
+        producer_stage: Some("expert_qa".into()),
+        ..BookPipelineArtifact::default()
+    });
+    let expert = child
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "expert_qa")
+        .unwrap();
+    expert.attempt = 27;
+    expert.unit_summary = Some(BookPipelineUnitSummary {
+        total: 23,
+        failed: 22,
+        ..BookPipelineUnitSummary::default()
+    });
+    expert.artifact_ids.push("legacy-control".into());
+
+    assert!(reconcile_prepared_unit_scope(child));
+    assert!(!child
+        .artifacts
+        .iter()
+        .any(|artifact| { artifact.producer.unit_id.as_deref() == Some("chapter_999") }));
+    let expert = child
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "expert_qa")
+        .unwrap();
+    assert_eq!(expert.attempt, 0);
+    assert!(expert.unit_summary.is_none());
+    assert!(expert.artifact_ids.is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn explicit_invalidation_reruns_split_and_prepare_from_new_source() {
     let root = temp_root("advance-invalidate");
     let repo = handoff_repo_fixture(&root);
@@ -10780,6 +11603,265 @@ fn explicit_invalidation_reruns_split_and_prepare_from_new_source() {
         .join("src")
         .join("chapter_002.md")
         .exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_policy_upgrade_automatically_invalidates_downstream_and_reruns() {
+    let root = temp_root("advance-split-policy-upgrade");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    let prepared = advance_job(&store, &job_id, None, false).unwrap();
+    assert_eq!(child_stage_status(&prepared, "prepare"), STATUS_COMPLETED);
+
+    let mut state = store.load().unwrap();
+    let child = &mut state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    child
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap()
+        .input_hashes
+        .insert("splitPolicyVersion".into(), "split-policy-obsolete".into());
+    store.save(&state).unwrap();
+
+    let rerun = advance_job(&store, &job_id, None, false).unwrap();
+
+    let split = rerun.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap();
+    assert_eq!(split.status, STATUS_COMPLETED);
+    assert_eq!(
+        split
+            .input_hashes
+            .get("splitPolicyVersion")
+            .map(String::as_str),
+        Some(SPLIT_POLICY_VERSION)
+    );
+    assert_eq!(child_stage_status(&rerun, "prepare"), STATUS_PENDING);
+    assert_eq!(
+        child_stage_status(&rerun, "approve_translation"),
+        STATUS_PENDING
+    );
+    let source_map = fs::read_to_string(
+        child_project_root(&rerun)
+            .join("metadata")
+            .join("source_map.json"),
+    )
+    .unwrap();
+    assert!(source_map.contains(SPLIT_POLICY_VERSION));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn source_change_still_blocks_when_split_policy_also_changed() {
+    let root = temp_root("advance-source-and-policy-change");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    let prepared = advance_job(&store, &job_id, None, false).unwrap();
+    fs::write(
+        child_source_md(&prepared),
+        "# Rewritten\n\nDifferent body.\n",
+    )
+    .unwrap();
+    let mut state = store.load().unwrap();
+    state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0]
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap()
+        .input_hashes
+        .insert("splitPolicyVersion".into(), "split-policy-obsolete".into());
+    store.save(&state).unwrap();
+
+    let blocked = advance_job(&store, &job_id, None, false).unwrap();
+
+    assert_eq!(child_stage_status(&blocked, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&blocked, "prepare"), STATUS_PENDING);
+    assert_eq!(
+        blocked.children[0].last_error.as_deref(),
+        Some("source_changed_downstream_exists")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_policy_upgrade_does_not_cancel_an_agent_owned_handoff() {
+    let root = temp_root("split-policy-agent-handoff");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = fake_handoff_ready_job(&store, &repo);
+    configure_expert_job(&store, &job_id);
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    approve_ready_translation_for_test(&store, &job_id);
+
+    let mut state = store.load().unwrap();
+    let child = &mut state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    set_agent_handoff_waiting(child, "translate", "fake-agent-profile");
+    child
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap()
+        .input_hashes
+        .insert("splitPolicyVersion".into(), "split-policy-obsolete".into());
+    store.save(&state).unwrap();
+
+    let state = store.load().unwrap();
+    let child = &state
+        .jobs
+        .iter()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    assert!(evaluate_split_freshness(child, false).unwrap().is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn retry_button_routes_a_staged_failure_to_advance_without_reextracting() {
+    let root = temp_root("retry-staged-failure");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    approve_ready_translation_for_test(&store, &job_id);
+
+    let mut state = store.load().unwrap();
+    let owner = store.execution_owner().unwrap().to_string();
+    let child = &mut state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    start_stage(child, "translate", &owner);
+    store.save(&state).unwrap();
+
+    let mut state = store.load().unwrap();
+    let child = &mut state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    set_stage_status(
+        child,
+        "translate",
+        STATUS_FAILED,
+        Some("simulated staged failure".into()),
+    );
+    child
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap()
+        .input_hashes
+        .insert("splitPolicyVersion".into(), "split-policy-obsolete".into());
+    store.save(&state).unwrap();
+
+    let retried = retry_job_from_ui(&store, &SystemPipelineRunner, &job_id).unwrap();
+
+    assert_eq!(child_stage_status(&retried, "split"), STATUS_COMPLETED);
+    assert_eq!(child_stage_status(&retried, "prepare"), STATUS_PENDING);
+    assert_eq!(child_stage_status(&retried, "translate"), STATUS_PENDING);
+    assert_eq!(stage_attempt(&retried, "extract"), 1);
+    assert_eq!(
+        retried.children[0]
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == "split")
+            .unwrap()
+            .input_hashes
+            .get("splitPolicyVersion")
+            .map(String::as_str),
+        Some(SPLIT_POLICY_VERSION)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_policy_invalidation_marker_cannot_authorize_unrelated_stage_regressions() {
+    let root = temp_root("split-policy-invalidation-scope");
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let base = job.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "extract")
+        .unwrap()
+        .clone();
+
+    let assert_rejected = |stage_id: &str, version: &str, extra_hash: bool| {
+        let mut previous = base.clone();
+        previous.stage_id = stage_id.into();
+        previous.status = STATUS_FAILED.into();
+        let mut next = previous.clone();
+        next.status = STATUS_PENDING.into();
+        next.input_hashes.clear();
+        next.input_hashes
+            .insert("splitPolicyVersion".into(), version.into());
+        if extra_hash {
+            next.input_hashes
+                .insert("unexpected".into(), "value".into());
+        }
+        assert!(!is_allowed_stage_transition(&previous, &next));
+    };
+
+    assert_rejected("extract", SPLIT_POLICY_VERSION, false);
+    assert_rejected("prepare", "split-policy-spoofed", false);
+    assert_rejected("prepare", SPLIT_POLICY_VERSION, true);
     let _ = fs::remove_dir_all(root);
 }
 

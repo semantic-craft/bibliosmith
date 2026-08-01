@@ -8,6 +8,11 @@ from .glossary import build_mandatory_glossary_block
 
 GlossaryHook = Callable[[str, Mapping[str, object]], str]
 
+VISUAL_LINE_BREAK_INSTRUCTION = (
+    "Use actual line breaks where needed; never spell a line break as the two "
+    "characters \\n and never insert HTML <br> tags."
+)
+
 TEXT_CLEANUP_SECTION = (
     "# TEXT CLEANUP - WITHIN PARAGRAPHS ONLY\n"
     "While translating, repair only obvious source-text defects within each existing "
@@ -66,6 +71,12 @@ ZH_HANS = TargetLanguageProfile(
         "Do not provide any explanations or text apart from the translation. "
         "Preserve every protected placeholder exactly and in the same order. "
         "Do not add, remove, merge, or split headings or paragraphs. "
+        "Translate each source segment exactly once. Never repeat or echo a phrase, "
+        "sentence, list entry, page label, footnote, or bibliography entry. Translate "
+        "all source-language prose, headings, labels, and bibliography title text; "
+        "preserve names, citations, URLs, identifiers, and conventional journal "
+        "abbreviations where translation would damage traceability. "
+        f"{VISUAL_LINE_BREAK_INSTRUCTION} "
         "Do not add commentary, labels, or Markdown fences around the translation.\n\n"
         "# EXAMPLE: PLACEHOLDER PRESERVATION\n"
         "```text\n"

@@ -180,7 +180,7 @@ class TextCleanupTests(unittest.TestCase):
             )
             self.assertEqual(
                 checkpoint["idempotencyKey"]["passId"],
-                "translation-v1-text-cleanup",
+                "translation-v1-text-cleanup+chunking-policy-v5",
             )
 
 

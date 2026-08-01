@@ -35,6 +35,84 @@ class UnitCheckpoint:
     next_chunk_index: int
     translated_chunks: tuple[str, ...]
     reflection_chunks: tuple[str, ...] = ()
+    second_pass_draft_fallbacks: tuple[bool, ...] = ()
+
+
+@dataclass(frozen=True)
+class UnitCompletion:
+    chunk_count: int
+    report: dict[str, Any]
+
+
+class CompletionStore:
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def path_for(self, unit_id: str) -> Path:
+        if _UNIT_ID.fullmatch(unit_id) is None:
+            raise ValueError("invalid unit id")
+        return self.directory / f"{unit_id}.json"
+
+    def load(
+        self,
+        unit_id: str,
+        key: UnitIdempotencyKey,
+    ) -> UnitCompletion | None:
+        path = self.path_for(unit_id)
+        if not path.is_file():
+            return None
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                self.delete(unit_id)
+                return None
+            chunk_count = document.get("chunkCount")
+            report = document.get("report")
+            if (
+                document.get("schema") != "translation-engine-completion-v1"
+                or document.get("unitId") != unit_id
+                or document.get("idempotencyKey") != key.to_dict()
+                or not isinstance(chunk_count, int)
+                or isinstance(chunk_count, bool)
+                or chunk_count < 1
+                or not isinstance(report, dict)
+                or report.get("unitId") != unit_id
+                or report.get("status") != "completed"
+            ):
+                self.delete(unit_id)
+                return None
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            self.delete(unit_id)
+            return None
+        return UnitCompletion(chunk_count=chunk_count, report=report)
+
+    def save(
+        self,
+        unit_id: str,
+        key: UnitIdempotencyKey,
+        completion: UnitCompletion,
+    ) -> None:
+        if completion.chunk_count < 1:
+            raise ValueError("completion chunk count must be positive")
+        if (
+            completion.report.get("unitId") != unit_id
+            or completion.report.get("status") != "completed"
+        ):
+            raise ValueError("completion report must describe the completed unit")
+        document = {
+            "schema": "translation-engine-completion-v1",
+            "unitId": unit_id,
+            "idempotencyKey": key.to_dict(),
+            "chunkCount": completion.chunk_count,
+            "report": completion.report,
+        }
+        atomic_write_text(
+            self.path_for(unit_id),
+            json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n",
+        )
+
+    def delete(self, unit_id: str) -> None:
+        self.path_for(unit_id).unlink(missing_ok=True)
 
 
 class CheckpointStore:
@@ -80,6 +158,12 @@ class CheckpointStore:
             checkpoint.reflection_chunks
         ):
             raise ValueError("checkpoint must contain a contiguous reflection prefix")
+        if (
+            checkpoint.second_pass_draft_fallbacks
+            and checkpoint.next_chunk_index
+            != len(checkpoint.second_pass_draft_fallbacks)
+        ):
+            raise ValueError("checkpoint must contain contiguous fallback evidence")
         document = {
             "schema": "translation-engine-checkpoint-v1",
             "unitId": unit_id,
@@ -89,6 +173,10 @@ class CheckpointStore:
         }
         if checkpoint.reflection_chunks:
             document["reflectionChunks"] = list(checkpoint.reflection_chunks)
+        if checkpoint.second_pass_draft_fallbacks:
+            document["secondPassDraftFallbacks"] = list(
+                checkpoint.second_pass_draft_fallbacks
+            )
         path = self.path_for(unit_id)
         atomic_write_text(path, json.dumps(document, separators=(",", ":")) + "\n")
 
@@ -100,6 +188,7 @@ class CheckpointStore:
         next_chunk_index = document.get("nextChunkIndex")
         translated_chunks = document.get("translatedChunks")
         reflection_chunks = document.get("reflectionChunks", [])
+        second_pass_draft_fallbacks = document.get("secondPassDraftFallbacks", [])
         if (
             not isinstance(next_chunk_index, int)
             or isinstance(next_chunk_index, bool)
@@ -110,10 +199,19 @@ class CheckpointStore:
             or not isinstance(reflection_chunks, list)
             or not all(isinstance(chunk, str) for chunk in reflection_chunks)
             or (reflection_chunks and next_chunk_index != len(reflection_chunks))
+            or not isinstance(second_pass_draft_fallbacks, list)
+            or not all(
+                isinstance(value, bool) for value in second_pass_draft_fallbacks
+            )
+            or (
+                second_pass_draft_fallbacks
+                and next_chunk_index != len(second_pass_draft_fallbacks)
+            )
         ):
             raise ValueError("invalid checkpoint")
         return UnitCheckpoint(
             next_chunk_index,
             tuple(translated_chunks),
             tuple(reflection_chunks),
+            tuple(second_pass_draft_fallbacks),
         )

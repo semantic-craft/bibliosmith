@@ -35,7 +35,9 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from progress import OperationProgress
 
 import markdown
 import requests
@@ -282,7 +284,12 @@ class BaiduOCRClient:
         payload = self._checked_json(response, "submit")
         return payload["data"]["jobId"]
 
-    def poll_json_url(self, job_id: str, deadline: float) -> str:
+    def poll_json_url(
+        self,
+        job_id: str,
+        deadline: float,
+        on_progress: Callable[[int | None, int | None], None] | None = None,
+    ) -> str:
         stalled_seconds = int(os.environ.get("BAIDU_STALLED_JOB_SECONDS", "300") or "0")
         last_progress: tuple[Any, ...] | None = None
         last_progress_at = time.time()
@@ -309,6 +316,16 @@ class BaiduOCRClient:
                 raise ConverterError(f"Baidu job failed: {data.get('errorMsg')}")
             if state in {"pending", "running"}:
                 progress = data.get("extractProgress", {})
+                if on_progress is not None:
+                    try:
+                        extracted_pages = int(progress.get("extractedPages"))
+                    except (TypeError, ValueError):
+                        extracted_pages = None
+                    try:
+                        reported_total = int(progress.get("totalPages"))
+                    except (TypeError, ValueError):
+                        reported_total = None
+                    on_progress(extracted_pages, reported_total)
                 progress_key = (state, progress.get("extractedPages"), progress.get("totalPages"))
                 if progress_key != last_progress:
                     last_progress = progress_key
@@ -485,6 +502,7 @@ def process_book(
     output_dir: Path,
     config: Config,
     temp_root: Path,
+    operation_progress: OperationProgress,
 ) -> Path:
     """Convert a single PDF to standalone HTML. Returns path to HTML file."""
     book_name = pdf_path.stem
@@ -507,6 +525,9 @@ def process_book(
     page_count = pdf_page_count(pdf_path)
     state["pages_total"] = page_count
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    operation_progress.update_item(
+        book_name, min(int(state.get("pages_done", 0)), page_count), "starting"
+    )
 
     all_pages = list(range(1, page_count + 1))
     chunk_dir = temp_root / safe_name / "chunks"
@@ -530,6 +551,7 @@ def process_book(
         # Submit
         deadline = time.time() + 1800  # 30 min per chunk
         try:
+            operation_progress.touch("uploading")
             job_id = client.submit_job(chunk_path, batch_id)
         except ConverterError as submit_exc:
             err_msg = str(submit_exc)
@@ -542,7 +564,18 @@ def process_book(
         logging.info("[%s] Job submitted: %s", book_name, job_id)
 
         # Poll
-        json_url = client.poll_json_url(job_id, deadline)
+        completed_before_chunk = int(state.get("pages_done", 0))
+        json_url = client.poll_json_url(
+            job_id,
+            deadline,
+            on_progress=lambda extracted, _reported_total: operation_progress.update_item(
+                book_name,
+                completed_before_chunk
+                + min(max(extracted or 0, 0), len(pages)),
+                "extracting",
+            ),
+        )
+        operation_progress.touch("downloading")
         logging.info("[%s] Job done, downloading result…", book_name)
 
         # Download JSONL
@@ -555,6 +588,7 @@ def process_book(
         chunk_pages_map = {cp.name: len(p) for p, cp in chunk_specs}
         state["pages_done"] = sum(chunk_pages_map.get(c, 0) for c in done_chunks)
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        operation_progress.update_item(book_name, state["pages_done"], "extracting")
 
         # Optional: clean chunk PDF to save disk
         chunk_path.unlink(missing_ok=True)
@@ -563,6 +597,7 @@ def process_book(
     # Assemble HTML
     # ------------------------------------------------------------------
     logging.info("[%s] Assembling HTML…", book_name)
+    operation_progress.update_item(book_name, page_count, "assembling")
 
     all_results: list[tuple[int, dict[str, Any]]] = []
     for pages, chunk_path in chunk_specs:
@@ -675,12 +710,19 @@ def main() -> int:
 
     total_pages = sum(pdf_page_count(p) for p in pdf_files)
     logging.info("Total pages: %s  Est. chunks: %s  Workers: %s", total_pages, (total_pages + 11) // 12, config.workers)
+    operation_progress = OperationProgress.from_environment(
+        "extract", "pages", total=total_pages
+    )
+    operation_progress.start("starting")
 
     # Process books
+    failed_books: list[str] = []
     if config.workers > 1 and len(pdf_files) > 1:
         with ThreadPoolExecutor(max_workers=config.workers) as executor:
             futures = {
-                executor.submit(process_book, p, output_dir, config, temp_root): p
+                executor.submit(
+                    process_book, p, output_dir, config, temp_root, operation_progress
+                ): p
                 for p in pdf_files
             }
             for future in as_completed(futures):
@@ -690,14 +732,27 @@ def main() -> int:
                     logging.info("DONE: %s -> %s", pdf.name, html_path)
                 except Exception as exc:
                     logging.error("FAILED: %s -> %s", pdf.name, exc, exc_info=True)
+                    failed_books.append(pdf.name)
     else:
         for p in pdf_files:
             try:
-                html_path = process_book(p, output_dir, config, temp_root)
+                html_path = process_book(
+                    p, output_dir, config, temp_root, operation_progress
+                )
                 logging.info("DONE: %s -> %s", p.name, html_path)
             except Exception as exc:
                 logging.error("FAILED: %s -> %s", p.name, exc, exc_info=True)
+                failed_books.append(p.name)
 
+    if failed_books:
+        operation_progress.touch("failed")
+        logging.error("Completed with %s failed book(s): %s", len(failed_books), ", ".join(failed_books))
+        return 1
+    operation_progress.update(
+        completed=total_pages,
+        total=total_pages,
+        phase="completed",
+    )
     logging.info("All done. Output: %s", output_dir)
     return 0
 

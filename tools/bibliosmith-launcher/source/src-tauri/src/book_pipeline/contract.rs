@@ -32,7 +32,7 @@ pub(crate) const ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION: &str = "zotero-worke
 pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_MARKER: &str =
     "BOOK_PIPELINE_ATTACHMENT_EVIDENCE ";
 pub(crate) const MIGRATED_INTERRUPTED_OWNER: &str = "migrated-interrupted";
-pub(crate) const SPLIT_POLICY_VERSION: &str = "split-policy-v1";
+pub(crate) const SPLIT_POLICY_VERSION: &str = "split-policy-v3";
 pub(crate) const TASK_POLICY_VERSION: &str = "task-policy-v1";
 pub(crate) const SOURCE_MAP_SCHEMA: &str = "local-reading-source-map-v1";
 pub(crate) const CHAPTER_CONTROL_SCHEMA: &str = "local-reading-chapter-control-v1";
@@ -46,7 +46,7 @@ pub(crate) const TRANSLATION_ENGINE_SAMPLE_REPORT_SCHEMA: &str =
 pub(crate) const TRANSLATION_ENGINE_SAMPLE_COMMAND_LABEL: &str = "translation engine sample";
 pub(crate) const TRANSLATION_SAMPLE_COUNT: usize = 3;
 pub(crate) const TRANSLATION_SAMPLE_CHARACTER_BUDGET: usize = 800;
-pub(crate) const TRANSLATION_POLICY_VERSION: &str = "translation-policy-v6";
+pub(crate) const TRANSLATION_POLICY_VERSION: &str = "translation-policy-v10";
 pub(crate) const TRANSLATION_ENGINE_MAX_TOKENS: u32 = 2_048;
 pub(crate) const TRANSLATION_ENGINE_PLACEHOLDER_RETRIES: u32 = 1;
 pub(crate) const TRANSLATION_HANDOFF_SCHEMA: &str = "local-reading-translation-handoff-v1";

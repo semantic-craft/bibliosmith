@@ -354,6 +354,32 @@ pub struct BookPipelineUnitSummary {
     pub failed: u32,
     pub completed: u32,
     pub skipped: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<BookPipelineUnitFailure>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BookPipelineUnitFailure {
+    pub unit_id: String,
+    pub code: String,
+    pub retryable: bool,
+}
+
+/// Ephemeral, aggregate-only progress reported by a running worker. It is
+/// overlaid when the UI polls and is never written into durable jobs.json.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BookPipelineOperationProgress {
+    pub stage_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
+    pub completed: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
+    pub unit_kind: String,
+    pub phase: String,
+    pub activity_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -365,6 +391,8 @@ pub struct BookPipelineProgress {
     pub active_stage_id: String,
     #[serde(default)]
     pub unit_summary: Option<BookPipelineUnitSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<BookPipelineOperationProgress>,
     /// Automatic attempts still available on the active stage. The Stages tab
     /// used to label every failure "retryable" with nothing behind it; this is
     /// the number that claim is actually worth.

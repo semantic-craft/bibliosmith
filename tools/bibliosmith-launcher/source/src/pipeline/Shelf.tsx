@@ -1,6 +1,7 @@
 import { Plus } from "lucide-react";
 import type { PipelineCopy } from "./copy";
-import { stepCaption, unitProgress, type BookUnit } from "./model";
+import { stepSummaryCaption, type BookUnit } from "./model";
+import { OperationProgressBar } from "./OperationProgress";
 
 function coverHue(title: string): number {
   let hash = 0;
@@ -31,12 +32,6 @@ function ribbonFor(unit: BookUnit, copy: PipelineCopy): { label: string; cls: st
   return null;
 }
 
-function progressTone(unit: BookUnit): string {
-  if (unit.status === "failed" || unit.status === "partial") return " bad";
-  if (unit.status === "waiting_for_approval" || unit.status === "blocked") return " hot";
-  return "";
-}
-
 export function Shelf({
   copy,
   units,
@@ -54,7 +49,6 @@ export function Shelf({
     <div className="pl-shelf">
       {units.map((unit) => {
         const ribbon = ribbonFor(unit, copy);
-        const progress = unitProgress(unit);
         return (
           <div
             key={unit.key}
@@ -73,13 +67,11 @@ export function Shelf({
             {ribbon && <span className={`pl-ribbon ${ribbon.cls}`}>{ribbon.label}</span>}
             <div className="pl-bmeta">
               <div className="pl-bt">{unit.title}</div>
-              <div className="pl-bs">{stepCaption(unit, copy)}</div>
+              <div className="pl-bs">{stepSummaryCaption(unit, copy)}</div>
             </div>
-            {progress !== null && (
-              <div className={`pl-prog pl-bprog${progressTone(unit)}`}>
-                <i style={{ width: `${Math.round(progress * 100)}%` }} />
-              </div>
-            )}
+            {unit.status === "running" ? (
+              <OperationProgressBar unit={unit} copy={copy} compact />
+            ) : null}
           </div>
         );
       })}

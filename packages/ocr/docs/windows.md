@@ -198,8 +198,9 @@ For scanned books and academic papers, prefer the MinerU Precision Extract API w
 - `is_ocr=true`
 - table and formula recognition enabled
 - local upload batches capped at 50 files per request
-- each source file within the documented Precision API limits: `<=200MB` and `<=200 pages`
+- local PDFs automatically split into page-ordered parts within the Precision API limits: `<=200MB` and `<=200 pages`; the final `full.md` is reassembled after every part succeeds
 - URL inputs selected automatically: one URL uses `/api/v4/extract/task`, multiple URLs use `/api/v4/extract/task/batch`
+- HTML inputs selected automatically use `MinerU-HTML`; mixed local folders are grouped into separate model-compatible upload batches
 
 Project-local single-file CLI:
 
@@ -212,7 +213,7 @@ Examples:
 ```powershell
 python .\mineru.py --self-test
 python .\mineru.py .\编程书 -o .\output\mineru\books
-python .\mineru.py .\paper.pdf --page-ranges 1-200 -o .\output\mineru\paper
+python .\mineru.py .\paper.pdf -o .\output\mineru\paper
 python .\mineru.py https://cdn-mineru.openxlab.org.cn/demo/example.pdf -o .\output\mineru\single-url
 ```
 

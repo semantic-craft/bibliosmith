@@ -225,6 +225,13 @@ export type BookPipelineUnitSummary = {
   failed: number;
   completed: number;
   skipped: number;
+  failures?: BookPipelineUnitFailure[];
+};
+
+export type BookPipelineUnitFailure = {
+  unitId: string;
+  code: string;
+  retryable: boolean;
 };
 
 export type BookPipelineStage = {
@@ -328,9 +335,20 @@ export type BookPipelineProgress = {
   percent: number;
   activeStageId: string;
   unitSummary?: BookPipelineUnitSummary | null;
+  operation?: BookPipelineOperationProgress | null;
   retryAttemptsRemaining?: number;
   nextRetryAt?: string | null;
   giveUpReason?: string | null;
+};
+
+export type BookPipelineOperationProgress = {
+  stageId: string;
+  scopeId?: string | null;
+  completed: number;
+  total?: number | null;
+  unitKind: "pages" | "chapters" | "chunks" | "items" | string;
+  phase: "starting" | "uploading" | "extracting" | "downloading" | "translating" | "reviewing" | "assembling" | string;
+  activityAt: string;
 };
 
 export type BookPipelineNotificationDelivery = {

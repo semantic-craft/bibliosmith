@@ -46,12 +46,36 @@ class RateLimitedProvider:
         raise RateLimitError(retry_after_seconds=120.0)
 
 
+class UnavailableThenValidProvider:
+    profile_id = "unavailable-then-valid-test"
+    config_id = "offline"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def translate(self, request: TranslationRequest) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise ProviderUnavailableError("offline failure")
+        return request.text.upper()
+
+
 class MidWordAlignmentProvider:
     profile_id = "mid-word-alignment-test"
     config_id = "offline"
 
     def translate(self, request: TranslationRequest) -> str:
         return "AB CDEFG"
+
+
+class PromptPlaceholderLeakingProvider:
+    profile_id = "prompt-placeholder-leak-test"
+    config_id = "offline"
+
+    def translate(self, request: TranslationRequest) -> str:
+        if "⟦PH_000000⟧" in request.text:
+            return f"⟦PH_000999⟧{request.text}"
+        return "⟦PH_000999⟧TRANSLATED TEXT"
 
 
 class StructureChangingThenValidProvider:
@@ -103,16 +127,38 @@ class PlaceholderFallbackTests(unittest.TestCase):
         aligned = translate_chunk_with_fallback(
             AlignmentProvider(), request, placeholder_retries=1
         )
-        preserved = translate_chunk_with_fallback(
-            FailingProvider(), request, placeholder_retries=1
-        )
-
         self.assertEqual(retried.degradation, "none")
         self.assertEqual(retried.text, "BEFORE ⟦PH_000000⟧ AFTER")
         self.assertEqual(aligned.degradation, "aligned")
         self.assertEqual(aligned.text.count("⟦PH_000000⟧"), 1)
-        self.assertEqual(preserved.degradation, "source")
-        self.assertEqual(preserved.text, request.text)
+
+    def test_provider_unavailability_propagates_instead_of_degrading_to_source(self) -> None:
+        with self.assertRaises(ProviderUnavailableError):
+            translate_chunk_with_fallback(
+                FailingProvider(),
+                TranslationRequest(
+                    text="before ⟦PH_000000⟧ after",
+                    source_language="auto",
+                    target_language="zh-Hans",
+                    system_instruction="translate",
+                ),
+                placeholder_retries=1,
+            )
+
+    def test_provider_unavailability_stops_fallback_attempts_immediately(self) -> None:
+        provider = UnavailableThenValidProvider()
+        with self.assertRaises(ProviderUnavailableError):
+            translate_chunk_with_fallback(
+                provider,
+                TranslationRequest(
+                    text="source",
+                    source_language="auto",
+                    target_language="zh-Hans",
+                    system_instruction="translate",
+                ),
+                placeholder_retries=1,
+            )
+        self.assertEqual(provider.calls, 1)
 
     def test_alignment_snaps_placeholders_to_the_nearest_word_boundary(self) -> None:
         result = translate_chunk_with_fallback(
@@ -128,6 +174,22 @@ class PlaceholderFallbackTests(unittest.TestCase):
 
         self.assertEqual(result.degradation, "aligned")
         self.assertEqual(result.text, "AB ⟦PH_000000⟧CDEFG")
+
+    def test_plain_fallback_removes_placeholders_leaked_from_the_prompt(self) -> None:
+        result = translate_chunk_with_fallback(
+            PromptPlaceholderLeakingProvider(),
+            TranslationRequest(
+                text="before ⟦PH_000000⟧ after",
+                source_language="auto",
+                target_language="zh-Hans",
+                system_instruction="translate",
+            ),
+            placeholder_retries=0,
+        )
+
+        self.assertEqual(result.degradation, "aligned")
+        self.assertEqual(result.text.count("⟦PH_000000⟧"), 1)
+        self.assertNotIn("⟦PH_000999⟧", result.text)
 
     def test_rate_limit_propagates_instead_of_degrading_to_source(self) -> None:
         with self.assertRaises(RateLimitError):

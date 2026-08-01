@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Plus } from "lucide-react";
 import type {
   BookPipelineCustomInstructions,
@@ -32,7 +32,7 @@ export type PipelineWorkbenchProps = {
   onSearchZotero: (query: string) => void;
   onRetry: (jobId: string) => void;
   onDelete: (jobId: string, childId?: string | null) => void;
-  onAdvance: (jobId: string, childId: string) => void;
+  onAdvance: (jobId: string, childId: string, invalidateDownstream?: boolean) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   onExportDiagnostic: (jobId: string, profile: BookPipelineDiagnosticProfile) => void;
@@ -61,6 +61,19 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
   const { copy, state, busy } = props;
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [drawerPercent, setDrawerPercent] = useState(50);
+  const splitViewRef = useRef<HTMLDivElement>(null);
+  const resizeHandleRef = useRef<HTMLDivElement>(null);
+  const draggedDrawerPercent = useRef(drawerPercent);
+  const resizing = useRef(false);
+
+  const applyDrawerPercent = (value: number) => {
+    const next = Math.max(35, Math.min(70, Math.round(value)));
+    draggedDrawerPercent.current = next;
+    splitViewRef.current?.style.setProperty("--pl-drawer-width", `${next}%`);
+    resizeHandleRef.current?.setAttribute("aria-valuenow", String(next));
+    return next;
+  };
 
   const units = useMemo(() => flattenBookUnits(state.jobs), [state.jobs]);
   const selected = units.find((unit) => unit.key === selectedKey) ?? null;
@@ -120,7 +133,11 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
           <p className="pl-empty-formats">{copy.inboxEmptyFormats}</p>
         </div>
       ) : (
-        <div className="pl-shelfwrap">
+        <div
+          ref={splitViewRef}
+          className="pl-shelfwrap"
+          style={{ "--pl-drawer-width": `${drawerPercent}%` } as CSSProperties}
+        >
           <Shelf
             copy={copy}
             units={units}
@@ -128,6 +145,44 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
             onSelect={setSelectedKey}
             onNewJob={() => setWizardOpen(true)}
           />
+          {selected && (
+            <div
+              ref={resizeHandleRef}
+              className="pl-resizer"
+              role="separator"
+              aria-label={copy.resizeDrawer}
+              aria-orientation="vertical"
+              aria-valuemin={35}
+              aria-valuemax={70}
+              aria-valuenow={drawerPercent}
+              tabIndex={0}
+              onPointerDown={(event) => {
+                resizing.current = true;
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
+              onPointerMove={(event) => {
+                if (!resizing.current || !splitViewRef.current) return;
+                const bounds = splitViewRef.current.getBoundingClientRect();
+                if (bounds.width <= 0) return;
+                applyDrawerPercent(((bounds.right - event.clientX) / bounds.width) * 100);
+              }}
+              onPointerUp={(event) => {
+                if (!resizing.current) return;
+                resizing.current = false;
+                event.currentTarget.releasePointerCapture(event.pointerId);
+                setDrawerPercent(draggedDrawerPercent.current);
+              }}
+              onPointerCancel={() => {
+                resizing.current = false;
+                setDrawerPercent(draggedDrawerPercent.current);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                event.preventDefault();
+                setDrawerPercent((current) => applyDrawerPercent(current + (event.key === "ArrowLeft" ? 5 : -5)));
+              }}
+            />
+          )}
           {selected && (
             <BookDrawer
               // Remount per book: the drawer's local state (delete

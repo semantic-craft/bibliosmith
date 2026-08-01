@@ -19,6 +19,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const LIVE_PROGRESS_SCHEMA: &str = "book-pipeline-progress-v1";
+const LIVE_PROGRESS_FILE: &str = ".book-pipeline-progress";
+const LIVE_PROGRESS_PATH_ENV: &str = "BIBLIOSMITH_PROGRESS_PATH";
+
 mod contract;
 mod domain;
 mod migrate;
@@ -450,9 +454,238 @@ fn derive_job_progress(job: &BookPipelineJob) -> BookPipelineProgress {
             .map(|stage| stage.stage_id.clone())
             .unwrap_or_else(|| job.current_stage_id.clone()),
         unit_summary: active.and_then(|stage| stage.unit_summary.clone()),
+        operation: None,
         retry_attempts_remaining: active.map(stage_attempts_remaining).unwrap_or_default(),
         next_retry_at: active.and_then(|stage| stage.next_retry_at.clone()),
         give_up_reason: active.and_then(|stage| stage.give_up_reason.clone()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LiveWorkerProgress {
+    schema: String,
+    stage_id: String,
+    #[serde(default)]
+    scope_id: Option<String>,
+    completed: u32,
+    #[serde(default)]
+    total: Option<u32>,
+    unit_kind: String,
+    phase: String,
+    activity_at: String,
+}
+
+fn read_live_worker_progress(path: &Path) -> Option<BookPipelineOperationProgress> {
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.len() > 16 * 1024 {
+        return None;
+    }
+    let value: LiveWorkerProgress = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    let valid_unit = matches!(
+        value.unit_kind.as_str(),
+        "pages" | "chapters" | "chunks" | "items"
+    );
+    let valid_phase = matches!(
+        value.phase.as_str(),
+        "starting"
+            | "uploading"
+            | "extracting"
+            | "downloading"
+            | "translating"
+            | "reviewing"
+            | "assembling"
+    );
+    let valid_total = value
+        .total
+        .is_none_or(|total| total > 0 && value.completed <= total);
+    if value.schema != LIVE_PROGRESS_SCHEMA
+        || ordered_stage_index(&value.stage_id).is_none()
+        || !valid_unit
+        || !valid_phase
+        || !valid_total
+        || chrono::DateTime::parse_from_rfc3339(&value.activity_at).is_err()
+        || value.scope_id.as_deref().is_some_and(str::is_empty)
+    {
+        return None;
+    }
+    Some(BookPipelineOperationProgress {
+        stage_id: value.stage_id,
+        scope_id: value.scope_id,
+        completed: value.completed,
+        total: value.total,
+        unit_kind: value.unit_kind,
+        phase: value.phase,
+        activity_at: value.activity_at,
+    })
+}
+
+fn live_progress_paths(store: &dyn BookPipelineStateStore, job: &BookPipelineJob) -> Vec<PathBuf> {
+    let output_root = store.job_output_dir(&job.id);
+    let mut paths = vec![output_root.join(LIVE_PROGRESS_FILE)];
+    if let Some(output_dir) = job.output_dir.as_deref() {
+        paths.push(Path::new(output_dir).join(LIVE_PROGRESS_FILE));
+    }
+    for child in &job.children {
+        if let Some(identity) = &child.source_identity {
+            let component = clean_path_component(&identity.pdf_attachment_key);
+            if !component.is_empty() {
+                paths.push(output_root.join(component).join(LIVE_PROGRESS_FILE));
+            }
+        }
+        if let Some(project_root) = child.local_project_root.as_deref() {
+            paths.push(Path::new(project_root).join(LIVE_PROGRESS_FILE));
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn live_progress_matches_stage(
+    stage: &BookPipelineStage,
+    operation: &BookPipelineOperationProgress,
+) -> bool {
+    if stage.stage_id != operation.stage_id || stage.status != STATUS_RUNNING {
+        return false;
+    }
+    let Some(started_at) = stage.started_at.as_deref() else {
+        return true;
+    };
+    let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(started_at) else {
+        return false;
+    };
+    let Ok(activity_at) = chrono::DateTime::parse_from_rfc3339(&operation.activity_at) else {
+        return false;
+    };
+    activity_at >= started_at
+}
+
+fn overlay_live_progress(job: &mut BookPipelineJob, operation: BookPipelineOperationProgress) {
+    let mut matching_stage = if let Some(scope_id) = operation.scope_id.as_deref() {
+        job.children
+            .iter_mut()
+            .find(|child| child.id == scope_id)
+            .and_then(|child| {
+                child
+                    .stages
+                    .iter_mut()
+                    .find(|stage| live_progress_matches_stage(stage, &operation))
+            })
+    } else {
+        job.children
+            .iter_mut()
+            .flat_map(|child| child.stages.iter_mut())
+            .find(|stage| live_progress_matches_stage(stage, &operation))
+    };
+    if matching_stage.is_none() {
+        matching_stage = job
+            .stages
+            .iter_mut()
+            .find(|stage| live_progress_matches_stage(stage, &operation));
+    }
+    let Some(stage) = matching_stage else {
+        return;
+    };
+    if let Some(total) = operation.total {
+        let running = u32::from(operation.completed < total);
+        let summary = BookPipelineUnitSummary {
+            total,
+            completed: operation.completed,
+            running,
+            pending: total
+                .saturating_sub(operation.completed)
+                .saturating_sub(running),
+            ..BookPipelineUnitSummary::default()
+        };
+        stage.unit_summary = Some(summary.clone());
+        job.progress.unit_summary = Some(summary);
+    }
+    job.progress.active_stage_id = operation.stage_id.clone();
+    job.progress.operation = Some(operation);
+}
+
+fn load_state_with_live_progress(
+    store: &dyn BookPipelineStateStore,
+) -> Result<BookPipelineState, String> {
+    let mut state = store.load()?;
+    for job in &mut state.jobs {
+        overlay_current_mineru_source_evidence(job);
+        let operation = live_progress_paths(store, job)
+            .into_iter()
+            .filter_map(|path| read_live_worker_progress(&path))
+            .max_by(|left, right| left.activity_at.cmp(&right.activity_at));
+        if let Some(operation) = operation {
+            overlay_live_progress(job, operation);
+        }
+    }
+    Ok(state)
+}
+
+/// The route records how extraction originally started, but an explicitly
+/// replaced source can become the authoritative downstream input later. Show
+/// that current provenance only when the local manifest, MinerU manifest, and
+/// source Markdown digest agree; this is a public-state overlay and never
+/// rewrites historical execution evidence on disk.
+fn overlay_current_mineru_source_evidence(job: &mut BookPipelineJob) {
+    for child in &mut job.children {
+        let Some(project_root) = child.local_project_root.as_deref().map(Path::new) else {
+            continue;
+        };
+        let source_path = project_root.join("source/source.md");
+        let manifest_path = project_root.join("metadata/source_manifest.json");
+        let Ok(manifest_text) = fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_text) else {
+            continue;
+        };
+        let Some(engine) = manifest
+            .get("extraction_engine")
+            .and_then(serde_json::Value::as_str)
+            .filter(|engine| engine.starts_with("MinerU Precision"))
+        else {
+            continue;
+        };
+        let Some(expected_sha256) = manifest
+            .get("source_sha256")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        if sha256_file(&source_path).ok().as_deref() != Some(expected_sha256) {
+            continue;
+        }
+        let Some(mineru_manifest) = manifest
+            .get("mineru_manifest_path")
+            .and_then(serde_json::Value::as_str)
+            .map(Path::new)
+            .filter(|path| {
+                !path.is_absolute()
+                    && path.components().all(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::Normal(_) | std::path::Component::CurDir
+                        )
+                    })
+            })
+        else {
+            continue;
+        };
+        if !project_root.join(mineru_manifest).is_file() {
+            continue;
+        }
+        if let Some(route) = child
+            .route
+            .iter_mut()
+            .find(|route| route.route_kind != "translation_handoff")
+        {
+            let original_route = route.route_kind.clone();
+            route.route_kind = "mineru".into();
+            route.summary = format!(
+                "Current translation source verified as {engine} Markdown; the earlier {original_route} extraction output is superseded for downstream work."
+            );
+        }
     }
 }
 
@@ -1818,6 +2051,12 @@ fn terminal_event(job: &BookPipelineJob) -> BookPipelineTerminalEvent {
         "{}\0{}\0{}\0{}",
         TERMINAL_EVENT_SCHEMA_VERSION, job.id, job.kind, job.status,
     );
+    let mut progress = job.progress.clone();
+    if let Some(summary) = progress.unit_summary.as_mut() {
+        // Unit identifiers and failure categories are local diagnostic state.
+        // Terminal webhooks carry only aggregate progress per ADR 0002.
+        summary.failures.clear();
+    }
     BookPipelineTerminalEvent {
         schema_version: TERMINAL_EVENT_SCHEMA_VERSION.into(),
         event_id: sha256_str(&identity),
@@ -1825,7 +2064,7 @@ fn terminal_event(job: &BookPipelineJob) -> BookPipelineTerminalEvent {
         job_kind: job.kind.clone(),
         status: job.status.clone(),
         current_stage_id: job.current_stage_id.clone(),
-        progress: job.progress.clone(),
+        progress,
         summary: job.summary.clone(),
         updated_at: job.updated_at.clone(),
     }
@@ -2024,11 +2263,25 @@ fn is_allowed_stage_transition(previous: &BookPipelineStage, next: &BookPipeline
         previous.status.as_str(),
         STATUS_READY | STATUS_FAILED | STATUS_BLOCKED
     ) && next.status == STATUS_PENDING
-        && next
-            .input_hashes
-            .contains_key("translationApprovalBindingSha256")
     {
-        return previous.input_hashes != next.input_hashes;
+        let stage_order = ordered_stage_index(&next.stage_id);
+        let exact_audit_hash = |key: &str| {
+            (next.input_hashes.len() == 1)
+                .then(|| next.input_hashes.get(key))
+                .flatten()
+        };
+        let approval_invalidation = stage_order
+            .zip(ordered_stage_index("approve_translation"))
+            .is_some_and(|(stage, gate)| stage > gate)
+            && exact_audit_hash("translationApprovalBindingSha256").is_some();
+        let split_policy_invalidation = stage_order
+            .zip(ordered_stage_index("split"))
+            .is_some_and(|(stage, split)| stage > split)
+            && exact_audit_hash("splitPolicyVersion")
+                .is_some_and(|version| version == SPLIT_POLICY_VERSION);
+        if approval_invalidation || split_policy_invalidation {
+            return previous.input_hashes != next.input_hashes;
+        }
     }
     if previous.stage_id == "index"
         && previous.status == STATUS_READY
@@ -2087,7 +2340,11 @@ fn is_allowed_stage_transition(previous: &BookPipelineStage, next: &BookPipeline
 
 #[tauri::command]
 pub async fn get_book_pipeline_state() -> Result<BookPipelineState, String> {
-    crate::run_blocking(move || BookPipelineStore::default()?.load()).await
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        load_state_with_live_progress(&store)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2218,10 +2475,38 @@ pub async fn run_book_pipeline_job(job_id: String) -> Result<BookPipelineJob, St
 pub async fn retry_book_pipeline_job(job_id: String) -> Result<BookPipelineJob, String> {
     crate::run_blocking(move || {
         let store = BookPipelineStore::default()?;
-        let job = retry_job_to_quiescence(&store, &SystemPipelineRunner, &job_id)?;
+        let job = retry_job_from_ui(&store, &SystemPipelineRunner, &job_id)?;
         dispatch_configured_terminal_notification(&store, job)
     })
     .await
+}
+
+fn retry_job_from_ui(
+    store: &dyn BookPipelineStateStore,
+    runner: &dyn PipelineRunner,
+    job_id: &str,
+) -> Result<BookPipelineJob, String> {
+    let state = store.load()?;
+    let job_index = find_job_index(&state, job_id)?;
+    let job = &state.jobs[job_index];
+    let live = live_children(job).collect::<Vec<_>>();
+    let staged_child_id = (live.len() == 1)
+        .then(|| live[0])
+        .filter(|child| {
+            child.local_project_root.is_some()
+                && stage_ref(child, "handoff").is_some_and(|stage| stage.status == STATUS_COMPLETED)
+                && child.stages.iter().any(|stage| {
+                    ordered_stage_index(&stage.stage_id)
+                        .is_some_and(|order| order > ordered_stage_index("handoff").unwrap_or(0))
+                        && stage.status == STATUS_FAILED
+                })
+        })
+        .map(|child| child.id.clone());
+    drop(state);
+    if let Some(child_id) = staged_child_id {
+        return advance_job(store, job_id, Some(&child_id), false);
+    }
+    retry_job_to_quiescence(store, runner, job_id)
 }
 
 /// Remove a job from the shelf. Files on disk (extraction output, the local
@@ -6186,7 +6471,9 @@ fn execute_conversion_command<E: RunnerCommandExecutor>(
     executor: &E,
     mut command: RunnerCommand,
 ) -> Result<RunnerOutput, String> {
-    inject_ocr_credentials(&mut command);
+    if command_uses_ocr_credentials(&command) {
+        inject_ocr_credentials(&mut command);
+    }
     fs::create_dir_all(&command.output_dir).map_err(|err| err.to_string())?;
     let command_result = executor.execute(&command)?;
     let zotero_key = extract_zotero_attachment_key(&command_result);
@@ -6224,6 +6511,13 @@ fn execute_conversion_command<E: RunnerCommandExecutor>(
         output_dir: Some(command.output_dir),
         current_step: None,
     })
+}
+
+fn command_uses_ocr_credentials(command: &RunnerCommand) -> bool {
+    matches!(
+        command.label.as_str(),
+        ZOTERO_CONVERSION_COMMAND_LABEL | "MinerU Precision batch" | "local PDF conversion wrapper"
+    )
 }
 
 fn build_zotero_item_index_command(
@@ -6723,6 +7017,10 @@ fn run_markdown_source_job(
             display_path(&source_path)
         )
     })?;
+    let mineru_source = source_path.with_extension("mineru");
+    if mineru_source.is_dir() {
+        copy_directory_tree(&mineru_source, &copied.with_extension("mineru"))?;
+    }
     let artifacts = scan_artifacts(output_dir)?;
     Ok(RunnerOutput {
         log_summary: vec![format!(
@@ -6805,6 +7103,51 @@ fn build_local_pdf_folder_command_for_root(
         .path
         .as_deref()
         .ok_or_else(|| "Local PDF folder source is missing a path.".to_string())?;
+    let runnable_routes: Vec<&BookPipelineRouteItem> = job
+        .route
+        .iter()
+        .filter(|route| route.can_run && route.route_kind != "translation_handoff")
+        .collect();
+    let mineru_routes = runnable_routes
+        .iter()
+        .filter(|route| route.route_kind == "mineru")
+        .count();
+    if mineru_routes > 0 {
+        if mineru_routes != runnable_routes.len() {
+            return Err(
+                "One local PDF folder job cannot mix MinerU and non-MinerU routes. Split the files into separate jobs so no selected engine is silently ignored."
+                    .into(),
+            );
+        }
+        let script = root.join("mineru.py");
+        if !script.is_file() {
+            return Err(format!(
+                "MinerU Precision client not found at {}",
+                display_path(&script)
+            ));
+        }
+        let mut args = ocr_python_args(&script);
+        args.extend([
+            input_dir.into(),
+            "--output-dir".into(),
+            display_path(output_dir),
+            "--mode".into(),
+            "batch".into(),
+            "--model-version".into(),
+            "vlm".into(),
+        ]);
+        return Ok(RunnerCommand {
+            kind: RunnerCommandKind::Process,
+            label: "MinerU Precision batch".into(),
+            program: PathBuf::from("uv"),
+            args,
+            env: Vec::new(),
+            cwd: Some(root.to_path_buf()),
+            output_dir: output_dir.to_path_buf(),
+            attempts: job.attempts,
+            accepted_exit_codes: vec![0],
+        });
+    }
     let script = root.join("scripts").join("pdf_to_html_paddleocr.py");
     if !script.is_file() {
         return Err(format!(
@@ -6868,6 +7211,9 @@ fn build_zotero_child_conversion_command_for_root(
         root,
     )?;
     command.args.push("--preserve-source".into());
+    command
+        .env
+        .push(("BIBLIOSMITH_PROGRESS_SCOPE".into(), child.id.clone()));
     Ok(command)
 }
 
@@ -6878,9 +7224,6 @@ fn build_zotero_conversion_command_for_source(
     output_dir: &Path,
     root: &Path,
 ) -> Result<RunnerCommand, String> {
-    if route.route_kind == "mineru" {
-        return build_mineru_command_for_root(source, attempts, output_dir, root, route);
-    }
     build_zotero_worker_conversion_command_for_source(source, route, attempts, output_dir, root)
 }
 
@@ -6952,55 +7295,6 @@ fn build_zotero_worker_conversion_command_for_source(
         attempts,
         accepted_exit_codes: vec![0],
     })
-}
-
-fn build_mineru_command_for_root(
-    source: &BookPipelineSource,
-    attempts: u32,
-    output_dir: &Path,
-    root: &Path,
-    route: &BookPipelineRouteItem,
-) -> Result<RunnerCommand, String> {
-    let script = mineru_script_for_root(root)?;
-    let selector = non_empty(source.selector.as_deref())
-        .or_else(|| non_empty(Some(route.id.as_str())))
-        .ok_or_else(|| "MinerU source is missing a selector.".to_string())?;
-    Ok(RunnerCommand {
-        kind: RunnerCommandKind::Process,
-        label: "MinerU extraction wrapper".into(),
-        program: PathBuf::from("uv"),
-        args: {
-            let mut args = ocr_python_args(&script);
-            args.extend([
-                "--attachment-key".into(),
-                selector.to_string(),
-                "--output-dir".into(),
-                display_path(output_dir),
-            ]);
-            args
-        },
-        env: vec![("OCR_OUTPUT_ROOT".into(), display_path(output_dir))],
-        cwd: Some(root.to_path_buf()),
-        output_dir: output_dir.to_path_buf(),
-        attempts,
-        accepted_exit_codes: vec![0],
-    })
-}
-
-fn mineru_script_for_root(root: &Path) -> Result<PathBuf, String> {
-    for candidate in [
-        root.join("mineru.py"),
-        root.join("scripts").join("mineru.py"),
-    ] {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "MinerU wrapper not found at {} or {}",
-        display_path(&root.join("mineru.py")),
-        display_path(&root.join("scripts").join("mineru.py"))
-    ))
 }
 
 fn build_zotero_discovery_command_for_root(
@@ -7575,6 +7869,9 @@ fn run_process_command(command: &RunnerCommand) -> Result<RunnerCommandResult, S
     let program = resolve_runner_program(&command.program);
     let mut process = Command::new(&program);
     process.args(&command.args);
+    let live_progress_path = command.output_dir.join(LIVE_PROGRESS_FILE);
+    let _ = fs::remove_file(&live_progress_path);
+    process.env(LIVE_PROGRESS_PATH_ENV, &live_progress_path);
     if let Some(path_value) = runner_path_env_value() {
         process.env("PATH", path_value);
     }
@@ -8515,6 +8812,12 @@ fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> R
         let entry = entry.map_err(|err| err.to_string())?;
         let path = entry.path();
         if path.is_dir() {
+            // A sibling *.mineru tree is supporting material for its cleaned
+            // Markdown, not a second set of handoff candidates. In particular,
+            // MinerU's per-part Markdown must never outrank the assembled file.
+            if path.extension().and_then(|extension| extension.to_str()) == Some("mineru") {
+                continue;
+            }
             collect_artifacts(&path, artifacts)?;
             continue;
         }
@@ -8576,12 +8879,25 @@ fn create_translation_handoff_project_with_title(
     let source = project_root.join("source").join("source.md");
     fs::copy(&markdown_path, &original).map_err(|err| err.to_string())?;
     fs::copy(&markdown_path, &source).map_err(|err| err.to_string())?;
+    let mineru_source = markdown_path.with_extension("mineru");
+    let source_resources_path = if mineru_source.is_dir() {
+        let directory_name = mineru_source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "MinerU artifact directory has an invalid name.".to_string())?;
+        let target = project_root.join("source").join(directory_name);
+        copy_directory_tree(&mineru_source, &target)?;
+        Some(format!("source/{directory_name}"))
+    } else {
+        None
+    };
     let source_sha256 = sha256_file(&markdown_path)?;
     write_source_manifest(
         &project_root,
         &markdown_path,
         &source_sha256,
         "cleaned_markdown_ready",
+        source_resources_path.as_deref(),
     )?;
     let manifest = project_root.join("metadata").join("source_manifest.json");
     let artifacts = vec![
@@ -8610,6 +8926,46 @@ fn create_translation_handoff_project_with_title(
         log_summary,
         artifacts,
     })
+}
+
+fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source).map_err(|err| err.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Refusing to copy a symlink from the MinerU artifact tree: {}",
+            display_path(source)
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "MinerU artifact path is not a directory: {}",
+            display_path(source)
+        ));
+    }
+    fs::create_dir_all(target).map_err(|err| err.to_string())?;
+    for entry in fs::read_dir(source).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let entry_metadata = fs::symlink_metadata(&source_path).map_err(|err| err.to_string())?;
+        if entry_metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing to copy a symlink from the MinerU artifact tree: {}",
+                display_path(&source_path)
+            ));
+        }
+        if entry_metadata.is_dir() {
+            copy_directory_tree(&source_path, &target_path)?;
+        } else if entry_metadata.is_file() {
+            fs::copy(&source_path, &target_path).map_err(|err| err.to_string())?;
+        } else {
+            return Err(format!(
+                "Unsupported entry in MinerU artifact tree: {}",
+                display_path(&source_path)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn selected_markdown_artifact<'a>(
@@ -8671,8 +9027,9 @@ fn write_source_manifest(
     markdown_path: &Path,
     sha256: &str,
     extraction_status: &str,
+    source_resources_path: Option<&str>,
 ) -> Result<(), String> {
-    let manifest = serde_json::json!({
+    let mut manifest = serde_json::json!({
         "schema": "local-reading-source-manifest-v1",
         "project_type": "book",
         "source_file_name": markdown_path.file_name().and_then(|name| name.to_str()).unwrap_or("source.md"),
@@ -8684,6 +9041,9 @@ fn write_source_manifest(
         "extraction_status": extraction_status,
         "notes": "Created by Book Pipeline translation handoff from a cleaned Markdown artifact.",
     });
+    if let Some(path) = source_resources_path {
+        manifest["source_resources_path"] = serde_json::Value::String(path.to_string());
+    }
     fs::write(
         project_root.join("metadata").join("source_manifest.json"),
         serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())? + "\n",
@@ -9132,18 +9492,62 @@ fn sha256_str(text: &str) -> String {
 /// any leading preamble as a front-matter chapter, and treat a heading-free
 /// document as a single chapter. Fenced code blocks are never scanned for
 /// headings so their `#` lines cannot create phantom chapters.
+const MAX_TRANSLATION_UNIT_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy)]
+struct MarkdownFence {
+    marker: u8,
+    width: usize,
+}
+
+fn update_markdown_fence(line: &str, state: &mut Option<MarkdownFence>) -> bool {
+    let bytes = line.as_bytes();
+    let leading_spaces = bytes.iter().take_while(|byte| **byte == b' ').count();
+    if leading_spaces > 3 || leading_spaces == bytes.len() {
+        return false;
+    }
+    let marker = bytes[leading_spaces];
+    if marker != b'`' && marker != b'~' {
+        return false;
+    }
+    let width = bytes[leading_spaces..]
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count();
+    if width < 3 {
+        return false;
+    }
+
+    if let Some(active) = state {
+        let remainder = &bytes[leading_spaces + width..];
+        if marker == active.marker
+            && width >= active.width
+            && remainder.iter().all(u8::is_ascii_whitespace)
+        {
+            *state = None;
+            return true;
+        }
+        return false;
+    }
+
+    let remainder = &bytes[leading_spaces + width..];
+    if marker == b'`' && remainder.contains(&b'`') {
+        return false;
+    }
+    *state = Some(MarkdownFence { marker, width });
+    true
+}
+
 fn split_source_markdown(text: &str) -> SplitPlan {
     let lines: Vec<&str> = text.lines().collect();
-    let mut in_fence = false;
+    let mut fence = None;
     let heading_levels: Vec<Option<usize>> = lines
         .iter()
         .map(|line| {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-                in_fence = !in_fence;
+            if update_markdown_fence(line, &mut fence) {
                 return None;
             }
-            if in_fence {
+            if fence.is_some() {
                 return None;
             }
             atx_heading_level(line)
@@ -9160,10 +9564,237 @@ fn split_source_markdown(text: &str) -> SplitPlan {
         }
         Some(level) => split_at_headings(&lines, &heading_levels, level),
     };
+    let chapters = bound_oversized_chapters(chapters, &lines, &heading_levels, primary);
     SplitPlan {
         primary_heading_level: primary.unwrap_or(0),
         chapters,
     }
+}
+
+fn bound_oversized_chapters(
+    chapters: Vec<SplitChapter>,
+    lines: &[&str],
+    heading_levels: &[Option<usize>],
+    primary: Option<usize>,
+) -> Vec<SplitChapter> {
+    let mut slices = Vec::new();
+    for chapter in chapters {
+        let start = chapter.start_line.saturating_sub(1);
+        let end = chapter.end_line;
+        if chapter.text.len() <= MAX_TRANSLATION_UNIT_BYTES {
+            slices.push((chapter.title, start, end));
+            continue;
+        }
+        let deeper_level = heading_levels[start..end]
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|level| primary.is_none_or(|primary| *level > primary))
+            .min();
+        let boundaries = if let Some(deeper_level) = deeper_level {
+            heading_levels[start..end]
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, level)| {
+                    (*level == Some(deeper_level)).then_some(start + offset)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            paragraph_start_lines(lines, start, end)
+        };
+        if boundaries.is_empty() {
+            slices.push((chapter.title, start, end));
+            continue;
+        }
+
+        let mut unit_starts = vec![start];
+        unit_starts.extend(boundaries.iter().skip(1).copied());
+        let mut group_start = start;
+        let mut group_title = chapter.title;
+        for (position, &unit_start) in unit_starts.iter().enumerate().skip(1) {
+            let unit_end = unit_starts.get(position + 1).copied().unwrap_or(end);
+            if rendered_slice_len(&lines[group_start..unit_end]) > MAX_TRANSLATION_UNIT_BYTES {
+                slices.push((group_title, group_start, unit_start));
+                group_start = unit_start;
+                let title = heading_levels[unit_start]
+                    .is_some()
+                    .then(|| heading_title(lines[unit_start]))
+                    .filter(|title| !title.is_empty());
+                group_title = title.unwrap_or_else(|| "Continuation".into());
+            }
+        }
+        slices.push((group_title, group_start, end));
+    }
+
+    let chapters = slices
+        .into_iter()
+        .enumerate()
+        .map(|(index, (title, start, end))| {
+            build_chapter(index + 1, &title, start + 1, end, &lines[start..end])
+        })
+        .collect();
+    hard_bound_unstructured_text(chapters)
+}
+
+fn hard_bound_unstructured_text(chapters: Vec<SplitChapter>) -> Vec<SplitChapter> {
+    let mut bounded = Vec::new();
+    for chapter in chapters {
+        let pieces = hard_bound_text(&chapter.text);
+        if pieces.len() == 1 {
+            bounded.push(chapter);
+            continue;
+        }
+
+        let mut start_line = chapter.start_line;
+        for (piece_index, text) in pieces.into_iter().enumerate() {
+            let newline_count = text.bytes().filter(|byte| *byte == b'\n').count();
+            let end_line = if newline_count == 0 {
+                start_line
+            } else {
+                start_line + newline_count - usize::from(text.ends_with('\n'))
+            };
+            let title = if piece_index == 0 {
+                chapter.title.clone()
+            } else {
+                "Continuation".into()
+            };
+            bounded.push(build_chapter_from_text(
+                bounded.len() + 1,
+                &title,
+                start_line,
+                end_line,
+                text,
+            ));
+            start_line += newline_count;
+        }
+    }
+
+    for (index, chapter) in bounded.iter_mut().enumerate() {
+        chapter.ordinal = index + 1;
+        chapter.id = format!("chapter_{:03}", index + 1);
+        chapter.blocks = paragraph_blocks_for_text(&chapter.text, chapter.start_line, &chapter.id);
+    }
+    bounded
+}
+
+fn hard_bound_text(text: &str) -> Vec<String> {
+    if text.len() <= MAX_TRANSLATION_UNIT_BYTES {
+        return vec![text.to_string()];
+    }
+
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    for (atom, splittable) in structural_text_atoms(text) {
+        let atom_pieces = if splittable {
+            hard_bound_plain_text(atom)
+        } else {
+            vec![atom.to_string()]
+        };
+        for piece in atom_pieces {
+            if piece.len() > MAX_TRANSLATION_UNIT_BYTES {
+                if !current.is_empty() {
+                    pieces.push(std::mem::take(&mut current));
+                }
+                pieces.push(piece);
+            } else if current.len() + piece.len() <= MAX_TRANSLATION_UNIT_BYTES {
+                current.push_str(&piece);
+            } else {
+                pieces.push(std::mem::take(&mut current));
+                current = piece;
+            }
+        }
+    }
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+    pieces
+}
+
+fn hard_bound_plain_text(text: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut remaining = text;
+    while remaining.len() > MAX_TRANSLATION_UNIT_BYTES {
+        let mut boundary = MAX_TRANSLATION_UNIT_BYTES;
+        while !remaining.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let preferred = remaining[..boundary]
+            .char_indices()
+            .rev()
+            .find_map(|(index, character)| {
+                character
+                    .is_whitespace()
+                    .then_some(index + character.len_utf8())
+            })
+            .filter(|preferred| *preferred >= MAX_TRANSLATION_UNIT_BYTES / 2);
+        let split_at = preferred.unwrap_or(boundary);
+        pieces.push(remaining[..split_at].to_string());
+        remaining = &remaining[split_at..];
+    }
+    if !remaining.is_empty() {
+        pieces.push(remaining.to_string());
+    }
+    pieces
+}
+
+fn structural_text_atoms(text: &str) -> Vec<(&str, bool)> {
+    let mut atoms = Vec::new();
+    let mut fence = None;
+    let mut plain_start = 0;
+    let mut fence_start = None;
+    let mut offset = 0;
+    for segment in text.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        let before = fence;
+        let fence_line = update_markdown_fence(line, &mut fence);
+        let next_offset = offset + segment.len();
+        if fence_line && before.is_none() && fence.is_some() {
+            if plain_start < offset {
+                atoms.push((&text[plain_start..offset], true));
+            }
+            fence_start = Some(offset);
+        } else if fence_line && before.is_some() && fence.is_none() {
+            let start = fence_start.take().unwrap_or(offset);
+            atoms.push((&text[start..next_offset], false));
+            plain_start = next_offset;
+        }
+        offset = next_offset;
+    }
+    if let Some(start) = fence_start {
+        atoms.push((&text[start..], false));
+    } else if plain_start < text.len() {
+        atoms.push((&text[plain_start..], true));
+    }
+    atoms
+}
+
+fn rendered_slice_len(slice: &[&str]) -> usize {
+    slice.iter().map(|line| line.len() + 1).sum()
+}
+
+fn paragraph_start_lines(lines: &[&str], start: usize, end: usize) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut in_paragraph = false;
+    let mut fence = None;
+    for (index, line) in lines.iter().enumerate().take(end).skip(start) {
+        if update_markdown_fence(line, &mut fence) {
+            if !in_paragraph {
+                starts.push(index);
+                in_paragraph = true;
+            }
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if line.trim().is_empty() {
+            in_paragraph = false;
+        } else if !in_paragraph {
+            starts.push(index);
+            in_paragraph = true;
+        }
+    }
+    starts
 }
 
 fn atx_heading_level(line: &str) -> Option<usize> {
@@ -9251,6 +9882,35 @@ fn build_chapter(
         text,
         blocks,
     }
+}
+
+fn build_chapter_from_text(
+    ordinal: usize,
+    title: &str,
+    start_line: usize,
+    end_line: usize,
+    text: String,
+) -> SplitChapter {
+    let id = format!("chapter_{ordinal:03}");
+    let blocks = paragraph_blocks_for_text(&text, start_line, &id);
+    SplitChapter {
+        ordinal,
+        id,
+        title: title.to_string(),
+        start_line,
+        end_line,
+        text,
+        blocks,
+    }
+}
+
+fn paragraph_blocks_for_text(
+    text: &str,
+    slice_start_line: usize,
+    chapter_id: &str,
+) -> Vec<SplitBlock> {
+    let lines = text.lines().collect::<Vec<_>>();
+    paragraph_blocks(&lines, slice_start_line, chapter_id)
 }
 
 fn paragraph_blocks(slice: &[&str], slice_start_line: usize, chapter_id: &str) -> Vec<SplitBlock> {
@@ -9396,6 +10056,8 @@ fn run_split_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Strin
     let source_text = fs::read_to_string(&source_md)
         .map_err(|_| "Source Markdown is missing; run the handoff stage first.".to_string())?;
     let source_sha256 = sha256_str(&source_text);
+    let source_text =
+        rewrite_mineru_asset_references_for_chapters(&project_root.join("source"), &source_text)?;
     let plan = split_source_markdown(&source_text);
 
     let src_dir = project_root.join("chapters").join("src");
@@ -9477,6 +10139,42 @@ fn run_split_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Strin
         unit_summary: None,
         error: None,
     })
+}
+
+fn rewrite_mineru_asset_references_for_chapters(
+    source_dir: &Path,
+    markdown: &str,
+) -> Result<String, String> {
+    let mut directory_names = fs::read_dir(source_dir)
+        .map_err(|err| err.to_string())?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            name.ends_with(".mineru").then_some(name)
+        })
+        .collect::<Vec<_>>();
+    directory_names.sort();
+    let mut rewritten = markdown.to_string();
+    for name in directory_names {
+        let target = format!("../../source/{name}/");
+        for opening in [format!("]({name}/"), format!("](<{name}/")] {
+            let replacement = if opening.starts_with("](<") {
+                format!("](<{target}")
+            } else {
+                format!("]({target}")
+            };
+            rewritten = rewritten.replace(&opening, &replacement);
+        }
+        for attribute in ["src", "href"] {
+            for quote in ['\"', '\''] {
+                let opening = format!("{attribute}={quote}{name}/");
+                let replacement = format!("{attribute}={quote}{target}");
+                rewritten = rewritten.replace(&opening, &replacement);
+            }
+        }
+    }
+    Ok(rewritten)
 }
 
 /// Prepare stage (order 5): seed glossary/style, per-chapter controls, and
@@ -9637,12 +10335,20 @@ struct TranslationEngineUnitReport {
     status: String,
     #[serde(default)]
     artifact: Option<TranslationEngineArtifactReport>,
+    #[serde(default)]
+    error: Option<TranslationEngineUnitErrorReport>,
     // Terms the engine demanded of the model and did not find in the output. A
     // warning, never a failure: Chinese compounding makes false positives likely
     // enough that rejecting a chapter over one would cost more than it saves.
     // Optional so a report from an older engine still parses.
     #[serde(default)]
     glossary_violations: Vec<TranslationEngineGlossaryViolation>,
+}
+
+#[derive(Deserialize)]
+struct TranslationEngineUnitErrorReport {
+    code: String,
+    retryable: bool,
 }
 
 #[derive(Deserialize)]
@@ -9688,10 +10394,26 @@ struct ValidatedTranslationReport {
     summary: TranslationEngineReportSummary,
     artifacts: Vec<BookPipelineArtifact>,
     failed_unit_ids: BTreeSet<String>,
+    failures: Vec<BookPipelineUnitFailure>,
     // "source -> required translation", deduplicated across units and sorted, so
     // one term missed throughout a book reads as one problem to fix rather than
     // one per chapter.
     glossary_violations: BTreeSet<String>,
+}
+
+fn valid_translation_error_code(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn translation_failure_summary(failures: &[BookPipelineUnitFailure]) -> String {
+    format!(
+        "Translation failed for {} unit(s). See failed-unit details.",
+        failures.len()
+    )
 }
 
 pub(crate) fn translation_engine_repo_root() -> Result<PathBuf, String> {
@@ -9778,7 +10500,7 @@ fn build_translation_engine_command(
             "--manifest".into(),
             display_path(manifest_path),
         ],
-        env: Vec::new(),
+        env: vec![("BIBLIOSMITH_PROGRESS_SCOPE".into(), child.id.clone())],
         cwd: Some(repo_root),
         output_dir: project_root,
         attempts,
@@ -10322,6 +11044,7 @@ fn validate_translation_engine_report(
     let mut reported_ids = BTreeSet::new();
     let mut artifacts = Vec::new();
     let mut failed_unit_ids = BTreeSet::new();
+    let mut failures = Vec::new();
     let mut glossary_violations = BTreeSet::new();
     let mut completed = 0_u32;
     let mut failed = 0_u32;
@@ -10339,6 +11062,12 @@ fn validate_translation_engine_report(
         match unit.status.as_str() {
             "completed" => {
                 completed = completed.saturating_add(1);
+                if unit.error.is_some() {
+                    return Err(format!(
+                        "Completed translation unit {} reported an error",
+                        unit.unit_id
+                    ));
+                }
                 let artifact = unit.artifact.as_ref().ok_or_else(|| {
                     format!(
                         "Completed translation unit {} has no artifact",
@@ -10363,6 +11092,20 @@ fn validate_translation_engine_report(
             "failed" => {
                 failed = failed.saturating_add(1);
                 failed_unit_ids.insert(unit.unit_id.clone());
+                let error = unit.error.as_ref().ok_or_else(|| {
+                    format!("Failed translation unit {} has no error", unit.unit_id)
+                })?;
+                if !valid_translation_error_code(&error.code) {
+                    return Err(format!(
+                        "Failed translation unit {} has an invalid error code",
+                        unit.unit_id
+                    ));
+                }
+                failures.push(BookPipelineUnitFailure {
+                    unit_id: unit.unit_id.clone(),
+                    code: error.code.clone(),
+                    retryable: error.retryable,
+                });
                 if let Some(artifact) = &unit.artifact {
                     let expected_path =
                         format!("chapters/translated/.partial/{}.degraded.md", unit.unit_id);
@@ -10401,6 +11144,7 @@ fn validate_translation_engine_report(
         summary: report.summary,
         artifacts,
         failed_unit_ids,
+        failures,
         glossary_violations,
     })
 }
@@ -10511,6 +11255,7 @@ fn run_translate_stage(
             total: validated.summary.total,
             completed: validated.summary.completed,
             failed: validated.summary.failed,
+            failures: validated.failures.clone(),
             ..BookPipelineUnitSummary::default()
         }
     } else {
@@ -10533,6 +11278,7 @@ fn run_translate_stage(
             total: previous.total,
             completed,
             failed: validated.summary.failed,
+            failures: validated.failures.clone(),
             ..BookPipelineUnitSummary::default()
         }
     };
@@ -10559,6 +11305,9 @@ fn run_translate_stage(
         "Translation engine reported {} completed and {} failed unit(s)",
         validated.summary.completed, validated.summary.failed
     ));
+    if !validated.failures.is_empty() {
+        log_summary.push(translation_failure_summary(&validated.failures));
+    }
     // Without this the check would compute a result the runner parses and then
     // discards -- the report is read from stdout and never written anywhere the
     // reader can open. A log line is the smallest thing that makes drift real;
@@ -10576,12 +11325,8 @@ fn run_translate_stage(
                 .join("; ")
         ));
     }
-    let error = (validated.summary.failed > 0).then(|| {
-        format!(
-            "Translation engine reported {} failed unit(s).",
-            validated.summary.failed
-        )
-    });
+    let error =
+        (!validated.failures.is_empty()).then(|| translation_failure_summary(&validated.failures));
     Ok(StageRunOutput {
         artifacts,
         artifact_kinds: vec![
@@ -10846,7 +11591,13 @@ fn placeholder_tokens(text: &str) -> BTreeMap<String, u32> {
             (None, '{') => start = Some(index),
             (Some(open), '}') => {
                 let token = &text[open..index + character.len_utf8()];
-                if token.len() > 2 && !token.chars().any(char::is_whitespace) {
+                let is_math_superscript = open > 0
+                    && text[..open].ends_with('^')
+                    && is_inside_latex_math(text, open, index + character.len_utf8());
+                if !is_math_superscript
+                    && token.len() > 2
+                    && !token.chars().any(char::is_whitespace)
+                {
                     *tokens.entry(token.to_string()).or_insert(0) += 1;
                 }
                 start = None;
@@ -10855,6 +11606,20 @@ fn placeholder_tokens(text: &str) -> BTreeMap<String, u32> {
         }
     }
     tokens
+}
+
+fn is_inside_latex_math(text: &str, start: usize, end: usize) -> bool {
+    let before = &text[..start];
+    let after = &text[end..];
+    [(r"\(", r"\)"), (r"\[", r"\]")]
+        .into_iter()
+        .any(|(opening, closing)| {
+            let Some(last_opening) = before.rfind(opening) else {
+                return false;
+            };
+            let last_closing = before.rfind(closing);
+            last_closing.is_none_or(|position| position < last_opening) && after.contains(closing)
+        })
 }
 
 fn markdown_heading_shape(text: &str) -> Vec<usize> {
@@ -13008,9 +13773,19 @@ fn write_reading_validation_status(
     let path = project_root.join("qa").join("status.md");
     let existing = fs::read_to_string(&path).unwrap_or_else(|_| "# QA Status\n".into());
     let reading_status = if passed { "passed" } else { "failed" };
+    let status_updates = [
+        ("- split:", "- split: passed".to_string()),
+        ("- translation:", "- translation: passed".to_string()),
+        ("- expert QA:", "- expert QA: passed".to_string()),
+        (
+            "- reading output:",
+            format!("- reading output: {reading_status}"),
+        ),
+        ("- EPUBCheck:", format!("- EPUBCheck: {reading_status}")),
+    ];
+    let mut replaced_statuses = vec![false; status_updates.len()];
     let mut lines = Vec::new();
     let mut in_previous_section = false;
-    let mut replaced_reading_status = false;
     for line in existing.lines() {
         if line == READING_VALIDATION_STATUS_START {
             in_previous_section = true;
@@ -13022,15 +13797,21 @@ fn write_reading_validation_status(
             }
             continue;
         }
-        if line.starts_with("- reading output:") {
-            lines.push(format!("- reading output: {reading_status}"));
-            replaced_reading_status = true;
+        if let Some((index, (_, replacement))) = status_updates
+            .iter()
+            .enumerate()
+            .find(|(_, (prefix, _))| line.starts_with(prefix))
+        {
+            lines.push(replacement.clone());
+            replaced_statuses[index] = true;
         } else {
             lines.push(line.to_string());
         }
     }
-    if !replaced_reading_status {
-        lines.push(format!("- reading output: {reading_status}"));
+    for ((_, replacement), replaced) in status_updates.iter().zip(replaced_statuses) {
+        if !replaced {
+            lines.push(replacement.clone());
+        }
     }
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
@@ -13572,6 +14353,7 @@ enum SplitFreshnessAction {
 struct SplitFreshnessChange {
     action: SplitFreshnessAction,
     new_source_hash: String,
+    policy_changed: bool,
     stop_after: bool,
 }
 
@@ -13597,6 +14379,12 @@ fn evaluate_split_freshness(
         return Ok(None);
     }
     let current = sha256_file(&source_md)?;
+    let policy_changed = split
+        .input_hashes
+        .get("splitPolicyVersion")
+        .map(String::as_str)
+        != Some(SPLIT_POLICY_VERSION);
+    let source_changed = split.input_hashes.get("sourceMarkdownSha256") != Some(&current);
 
     let split_order = ordered_stage_index("split").unwrap_or(0);
     let downstream = || {
@@ -13604,23 +14392,12 @@ fn evaluate_split_freshness(
             ordered_stage_index(&stage.stage_id).is_some_and(|order| order > split_order)
         })
     };
-    let downstream_active = downstream().any(|stage| {
-        let invalidatable_translation_gate = stage.stage_id == "approve_translation"
-            && matches!(
-                stage.status.as_str(),
-                STATUS_READY | STATUS_WAITING_FOR_APPROVAL
-            );
-        !invalidatable_translation_gate
-            && matches!(
-                stage.status.as_str(),
-                STATUS_READY
-                    | STATUS_RUNNING
-                    | STATUS_WAITING_FOR_APPROVAL
-                    | STATUS_FAILED
-                    | STATUS_BLOCKED
-            )
-    });
-    if downstream_active {
+    let downstream_running =
+        downstream().any(|stage| stage.status == STATUS_RUNNING || is_agent_handoff_waiting(stage));
+    if policy_changed && downstream_running {
+        return Ok(None);
+    }
+    if source_changed && downstream_running {
         return Ok(None);
     }
     let downstream_committed = downstream().any(|stage| stage.status == STATUS_COMPLETED);
@@ -13629,13 +14406,15 @@ fn evaluate_split_freshness(
         return Ok(invalidate_downstream.then_some(SplitFreshnessChange {
             action: SplitFreshnessAction::InvalidateDownstreamAndRerun,
             new_source_hash: current,
+            policy_changed,
             stop_after: false,
         }));
     }
-    if split.input_hashes.get("sourceMarkdownSha256") == Some(&current) {
+    if !policy_changed && !source_changed {
         return Ok(None);
     }
-    let action = if invalidate_downstream {
+    let policy_upgrade_only = policy_changed && !source_changed;
+    let action = if policy_upgrade_only || invalidate_downstream {
         SplitFreshnessAction::InvalidateDownstreamAndRerun
     } else if downstream_committed {
         SplitFreshnessAction::Block
@@ -13646,6 +14425,7 @@ fn evaluate_split_freshness(
     Ok(Some(SplitFreshnessChange {
         action,
         new_source_hash: current,
+        policy_changed,
         stop_after,
     }))
 }
@@ -13672,17 +14452,172 @@ fn invalidate_completed_downstream(child: &mut BookPipelineChildJob, after_stage
     }
 }
 
+fn invalidate_all_downstream(child: &mut BookPipelineChildJob, after_stage: &str) {
+    let after_order = ordered_stage_index(after_stage).unwrap_or(0);
+    child.artifacts.retain(|artifact| {
+        let producer_stage = if artifact.producer.stage_id.is_empty() {
+            artifact.producer_stage.as_deref()
+        } else {
+            Some(artifact.producer.stage_id.as_str())
+        };
+        !producer_stage.is_some_and(|stage_id| {
+            ordered_stage_index(stage_id).is_some_and(|order| order > after_order)
+        })
+    });
+    for stage in &mut child.stages {
+        let is_downstream =
+            ordered_stage_index(&stage.stage_id).is_some_and(|order| order > after_order);
+        if is_downstream && stage.status != STATUS_SKIPPED {
+            stage.input_hashes.clear();
+            stage
+                .input_hashes
+                .insert("splitPolicyVersion".into(), SPLIT_POLICY_VERSION.into());
+            stage.status = STATUS_PENDING.into();
+            stage.attempt = 0;
+            stage.error = None;
+            stage.safe_error = None;
+            stage.started_at = None;
+            stage.finished_at = None;
+            stage.artifact_ids.clear();
+            stage.unit_summary = None;
+            stage.approval_id = None;
+            stage.approval_request = None;
+            stage.execution_owner = None;
+            stage.index_evidence = None;
+            stage.give_up_reason = None;
+            stage.next_retry_at = None;
+        }
+    }
+}
+
+/// Repair state written before downstream invalidation cleared unit-scoped
+/// evidence. The prepared task manifests are the active chapter set; records
+/// for any other unit belong to an older split and must not reach QA or build.
+fn reconcile_prepared_unit_scope(child: &mut BookPipelineChildJob) -> bool {
+    let active_unit_ids = child
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "translation_task_manifest")
+        .filter_map(|artifact| {
+            artifact.producer.unit_id.clone().or_else(|| {
+                Path::new(&artifact.path)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_string)
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    if active_unit_ids.is_empty() {
+        return false;
+    }
+    let translate_order = ordered_stage_index("translate").unwrap_or(0);
+    let pending_stages = child
+        .stages
+        .iter()
+        .filter(|stage| {
+            stage.status == STATUS_PENDING
+                && ordered_stage_index(&stage.stage_id)
+                    .is_some_and(|order| order >= translate_order)
+        })
+        .map(|stage| stage.stage_id.clone())
+        .collect::<BTreeSet<_>>();
+    let original_artifact_count = child.artifacts.len();
+    child.artifacts.retain(|artifact| {
+        let producer_stage = if artifact.producer.stage_id.is_empty() {
+            artifact.producer_stage.as_deref()
+        } else {
+            Some(artifact.producer.stage_id.as_str())
+        };
+        if producer_stage.is_some_and(|stage_id| pending_stages.contains(stage_id)) {
+            return false;
+        }
+        if producer_stage == Some("translate") {
+            return artifact
+                .producer
+                .unit_id
+                .as_ref()
+                .cloned()
+                // Compatibility records may predate producer.unitId.
+                // Translation artifact file names still carry the unit id.
+                // Keep the run manifest, which has no unit id.
+                .or_else(|| translation_artifact_unit_id(artifact))
+                .is_none_or(|unit_id| active_unit_ids.contains(&unit_id));
+        }
+        true
+    });
+    let mut changed = child.artifacts.len() != original_artifact_count;
+    for stage in &mut child.stages {
+        if !pending_stages.contains(&stage.stage_id) {
+            continue;
+        }
+        changed |= stage.attempt != 0
+            || stage.input_hashes.len() != 1
+            || stage
+                .input_hashes
+                .get("splitPolicyVersion")
+                .map(String::as_str)
+                != Some(SPLIT_POLICY_VERSION)
+            || stage.error.is_some()
+            || stage.safe_error.is_some()
+            || stage.started_at.is_some()
+            || stage.finished_at.is_some()
+            || !stage.artifact_ids.is_empty()
+            || stage.unit_summary.is_some()
+            || stage.approval_id.is_some()
+            || stage.approval_request.is_some()
+            || stage.execution_owner.is_some()
+            || stage.index_evidence.is_some()
+            || stage.give_up_reason.is_some()
+            || stage.next_retry_at.is_some();
+        stage.input_hashes.clear();
+        stage
+            .input_hashes
+            .insert("splitPolicyVersion".into(), SPLIT_POLICY_VERSION.into());
+        stage.attempt = 0;
+        stage.error = None;
+        stage.safe_error = None;
+        stage.started_at = None;
+        stage.finished_at = None;
+        stage.artifact_ids.clear();
+        stage.unit_summary = None;
+        stage.approval_id = None;
+        stage.approval_request = None;
+        stage.execution_owner = None;
+        stage.index_evidence = None;
+        stage.give_up_reason = None;
+        stage.next_retry_at = None;
+    }
+    changed
+}
+
 fn apply_split_freshness(child: &mut BookPipelineChildJob, change: &SplitFreshnessChange) {
     // Blocking and explicit invalidation both roll back completed downstream
     // stages so the re-blocked/re-readied split stays a valid ordered state; the
     // rollback is a no-op when nothing downstream was committed. Generated files
     // stay on disk and are overwritten only when split actually re-runs.
-    invalidate_completed_downstream(child, "split");
+    if matches!(
+        change.action,
+        SplitFreshnessAction::Block | SplitFreshnessAction::InvalidateDownstreamAndRerun
+    ) {
+        invalidate_all_downstream(child, "split");
+    } else {
+        invalidate_completed_downstream(child, "split");
+    }
     if let Some(split) = stage_mut(child, "split") {
         split.input_hashes.insert(
             "sourceMarkdownSha256".into(),
             change.new_source_hash.clone(),
         );
+        if change.policy_changed
+            && matches!(
+                change.action,
+                SplitFreshnessAction::InvalidateDownstreamAndRerun
+            )
+        {
+            split
+                .input_hashes
+                .insert("splitPolicyVersion".into(), SPLIT_POLICY_VERSION.into());
+        }
     }
     match change.action {
         SplitFreshnessAction::Block => {
@@ -13799,6 +14734,25 @@ fn advance_job_stage(
             if stop_after {
                 return Ok(job);
             }
+        }
+    }
+
+    // Phase 0.125: self-heal legacy jobs whose source was already re-split by a
+    // build that reset statuses but kept old unit evidence. This is intentionally
+    // driven by the prepared task manifests, not by filenames left on disk.
+    if !retrying_stage {
+        let mut state = store.load()?;
+        let job_index = find_job_index(&state, job_id)?;
+        let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
+        if reconcile_prepared_unit_scope(&mut state.jobs[job_index].children[child_index]) {
+            state.jobs[job_index].log_summary.push(
+                "Reconciled downstream records to the prepared translation unit scope".into(),
+            );
+            state.jobs[job_index].log_summary =
+                trim_log_summary(&state.jobs[job_index].log_summary);
+            state.jobs[job_index].updated_at = now_label();
+            derive_job(&mut state.jobs[job_index]);
+            store.save(&state)?;
         }
     }
 

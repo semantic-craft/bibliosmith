@@ -7,6 +7,7 @@ import type {
   BookPipelineSource,
   BookPipelineStage,
   BookPipelineOutputFormat,
+  BookPipelineOperationProgress,
   ModelSlotView,
 } from "../types";
 import type { PipelineCopy } from "./copy";
@@ -34,6 +35,44 @@ export type PipelineBusy =
   | "open"
   | "diagnostic"
   | null;
+
+export function unitFailureLabel(code: string, copy: PipelineCopy): string {
+  switch (code) {
+    case "provider_timeout":
+      return copy.failureProviderTimeout;
+    case "provider_http_5xx":
+      return copy.failureProviderServer;
+    case "provider_rate_limited":
+      return copy.failureProviderRateLimit;
+    case "provider_transient_error":
+    case "provider_unavailable":
+      return copy.failureProviderUnavailable;
+    case "translation_structure_invalid":
+    case "translation_incomplete":
+      return copy.failureStructureInvalid;
+    case "provider_fatal_error":
+      return copy.failureProviderFatal;
+    default:
+      return code;
+  }
+}
+
+export function translationFailureSummary(
+  stage: BookPipelineStage | null | undefined,
+  copy: PipelineCopy,
+): string | null {
+  const failures = stage?.unitSummary?.failures;
+  if (!failures?.length) return null;
+  const counts = new Map<string, number>();
+  for (const failure of failures) {
+    const label = unitFailureLabel(failure.code, copy);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  const reasons = [...counts.entries()]
+    .map(([label, count]) => `${label} ${count}`)
+    .join(copy.failureReasonSeparator);
+  return copy.translationFailureSummary(failures.length, reasons);
+}
 
 /** Conversion route override a user can pick per route item in the wizard. */
 export type RouteOverride = "auto" | "direct" | "paddle" | "mineru" | "keep";
@@ -254,13 +293,8 @@ export function fourStepStates(unit: BookUnit): StepState[] {
     if (members.some((stage) => stage.status === "running")) return "current";
     return "todo";
   });
-  // Promote the first open step to "current" so an idle/queued book still
-  // shows where it stands rather than four grey circles.
-  const active = states.findIndex((state) => state === "current" || state === "gate" || state === "error");
-  if (active === -1 && unit.status !== "completed" && unit.status !== "skipped") {
-    const firstOpen = states.findIndex((state) => state === "todo");
-    if (firstOpen !== -1) states[firstOpen] = "current";
-  }
+  // A pending step stays pending. Highlighting it as current made queued work
+  // look indistinguishable from work the runner had actually started.
   return states;
 }
 
@@ -273,12 +307,56 @@ export function stepName(index: number, copy: PipelineCopy): string {
   return [copy.step1, copy.step2, copy.step3, copy.step4][index] ?? "";
 }
 
+/** Literal status text for one visible step. */
+export function stepStatusCaption(unit: BookUnit, index: number, copy: PipelineCopy): string {
+  const step = FOUR_STEPS[index];
+  if (!step) return copy.stepNotInJob;
+  const members = focusStages(unit).filter((stage) =>
+    (step.stageIds as readonly string[]).includes(stage.stageId),
+  );
+  if (!members.length) return copy.stepNotInJob;
+  if (
+    members.some(
+      (stage) => stage.status === "failed" || (stage.status === "blocked" && !GATE_STAGE_IDS.has(stage.stageId)),
+    )
+  ) {
+    return copy.capNeedsAttention;
+  }
+  if (members.some((stage) => GATE_STAGE_IDS.has(stage.stageId) && GATE_PENDING_STATUSES.has(stage.status))) {
+    return copy.capWaitingConfirmation;
+  }
+  if (members.every((stage) => stage.status === "completed" || stage.status === "skipped")) {
+    return copy.capCompleted;
+  }
+  if (members.some((stage) => stage.status === "running")) return copy.capWorking;
+  return copy.capNotStarted;
+}
+
 /** One beginner-voiced line: "翻译 · 12/26" — drives the strip caption and shelf card. */
 export function stepCaption(unit: BookUnit, copy: PipelineCopy): string {
   const states = fourStepStates(unit);
   const index = activeStepIndex(states);
   if (index === -1) {
     if (unit.status === "completed" || unit.status === "skipped") return copy.capAllDone;
+    const stages = focusStages(unit);
+    if (
+      stages.find((stage) => stage.stageId === "translate")?.status === "completed" &&
+      ["pending", "ready"].includes(
+        stages.find((stage) => stage.stageId === "expert_qa")?.status ?? "",
+      )
+    ) {
+      return copy.capTranslationQaPending;
+    }
+    if (
+      stages.find((stage) => stage.stageId === "approve_promotion")?.status === "completed" &&
+      stages.some(
+        (stage) =>
+          ["promote", "build_reading", "validate_reading"].includes(stage.stageId) &&
+          ["pending", "ready"].includes(stage.status),
+      )
+    ) {
+      return copy.capPromotionApprovedPending;
+    }
     return copy.capQueued;
   }
   const name = stepName(index, copy);
@@ -292,14 +370,60 @@ export function stepCaption(unit: BookUnit, copy: PipelineCopy): string {
   if (state === "error") {
     const stage = currentStage(unit);
     const errorText = stage?.safeError?.summary || stage?.error || unit.child?.lastError || unit.job.lastError;
+    if (sourceChangedRequiresRebuild(unit)) return `${name} · ${copy.sourceChangedTitle}`;
     return errorText ? `${name} · ${errorText}` : `${name} · ${copy.capNeedsAttention}`;
   }
   const stage = currentStage(unit);
   if (stage?.status === "running" && stage.unitSummary && stage.unitSummary.total > 0) {
-    return `${name} · ${stage.unitSummary.completed}/${stage.unitSummary.total}`;
+    const runningName = stageLabel(stage.stageId, copy);
+    const count = `${stage.unitSummary.completed}/${stage.unitSummary.total}`;
+    return runningName === name ? `${name} · ${count}` : `${name} · ${runningName} ${count}`;
   }
   if (unit.status === "running") return `${name} · ${copy.capWorking}`;
   return `${name} · ${copy.capQueued}`;
+}
+
+/**
+ * Beginner summary that makes the handoff between two visible steps explicit.
+ * A checkmark alone made the just-finished step easy to miss, especially when
+ * the next long-running stage immediately took over the main caption.
+ */
+export function stepSummaryCaption(unit: BookUnit, copy: PipelineCopy): string {
+  const states = fourStepStates(unit);
+  const active = activeStepIndex(states);
+  const current = stepCaption(unit, copy);
+  if (active <= 0 || states[active - 1] !== "done") return current;
+  return copy.stepSummaryPair(stepName(active - 1, copy), current);
+}
+
+export function unitOperationProgress(unit: BookUnit): BookPipelineOperationProgress | null {
+  const operation = unit.job.progress.operation;
+  if (!operation || operation.stageId !== currentStage(unit)?.stageId) return null;
+  if (operation.scopeId && operation.scopeId !== unit.child?.id) return null;
+  return operation;
+}
+
+export function operationUnitLabel(unitKind: string, copy: PipelineCopy): string {
+  const labels: Record<string, string> = {
+    pages: copy.progressUnitPages,
+    chapters: copy.progressUnitChapters,
+    chunks: copy.progressUnitChunks,
+    items: copy.progressUnitItems,
+  };
+  return labels[unitKind] ?? copy.progressUnitItems;
+}
+
+export function operationPhaseLabel(phase: string, copy: PipelineCopy): string {
+  const labels: Record<string, string> = {
+    starting: copy.progressStarting,
+    uploading: copy.progressUploading,
+    extracting: copy.progressExtracting,
+    downloading: copy.progressDownloading,
+    translating: copy.progressTranslating,
+    reviewing: copy.progressReviewing,
+    assembling: copy.progressAssembling,
+  };
+  return labels[phase] ?? copy.progressWorking;
 }
 
 /* ---------- Status vocabulary ---------- */
@@ -426,6 +550,18 @@ export function currentStage(unit: BookUnit): BookPipelineStage | null {
   const stages = focusStages(unit);
   const active = stages.find((stage) => stage.status !== "completed" && stage.status !== "skipped");
   return active ?? stages.at(-1) ?? null;
+}
+
+const SOURCE_CHANGED_DOWNSTREAM_EXISTS = "source_changed_downstream_exists";
+
+/** The extracted source changed after downstream artifacts had already been produced. */
+export function sourceChangedRequiresRebuild(unit: BookUnit): boolean {
+  const values = [
+    unit.child?.lastError,
+    unit.job.lastError,
+    ...focusStages(unit).flatMap((stage) => [stage.error, stage.safeError?.code, stage.safeError?.summary]),
+  ];
+  return values.some((value) => value === SOURCE_CHANGED_DOWNSTREAM_EXISTS);
 }
 
 /** Progress in [0,1] for running rows; null when nothing meaningful can be derived. */

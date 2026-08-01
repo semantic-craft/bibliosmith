@@ -10,6 +10,8 @@ import {
   routeKindLabel,
   stageLabel,
   statusLabel,
+  sourceChangedRequiresRebuild,
+  translationFailureSummary,
   unitAdvanceAction,
   unitRoute,
   allArtifacts,
@@ -59,8 +61,21 @@ function StageRail({ unit, copy }: { unit: BookUnit; copy: PipelineCopy }) {
 function ActionCard({ unit, copy, busy, onRetry, onAdvance, onHandoff, onGoApproval, onRouteOverride }: TabProps) {
   const stage = currentStage(unit);
   const errorText =
-    stage?.safeError?.summary || stage?.error || unit.child?.lastError || unit.job.lastError || "";
+    translationFailureSummary(stage, copy) ||
+    stage?.safeError?.summary ||
+    stage?.error ||
+    unit.child?.lastError ||
+    unit.job.lastError ||
+    "";
   const advance = unitAdvanceAction(unit);
+
+  if (sourceChangedRequiresRebuild(unit)) {
+    return (
+      <div className="pl-hintcard blockc">
+        <span>◈ {copy.sourceChangedBody}</span>
+      </div>
+    );
+  }
 
   if (unit.status === "waiting_for_approval" || pendingGates(unit, copy).length > 0) {
     return (

@@ -6,7 +6,7 @@ export type TabProps = {
   copy: PipelineCopy;
   busy: PipelineBusy;
   onRetry: (jobId: string) => void;
-  onAdvance: (jobId: string, childId: string) => void;
+  onAdvance: (jobId: string, childId: string, invalidateDownstream?: boolean) => void;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onOpenOutput: (jobId: string) => void;
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
