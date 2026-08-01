@@ -922,7 +922,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(endpoint.base_url, "https://ark.cn-beijing.volces.com/api/v3");
+        assert_eq!(
+            endpoint.base_url,
+            "https://ark.cn-beijing.volces.com/api/v3"
+        );
     }
 
     #[test]
@@ -1026,13 +1029,9 @@ mod tests {
     #[test]
     fn a_slot_missing_from_the_registry_is_named_rather_than_guessed_at() {
         let chosen = active("nonesuch", "payg", "whatever");
-        let error =
-            openai_compatible_endpoint(&endpoint_slots(), Some(&chosen), |_| None, || None)
-                .unwrap_err();
+        let error = openai_compatible_endpoint(&endpoint_slots(), Some(&chosen), |_| None, || None)
+            .unwrap_err();
 
-        assert!(
-            error.contains("nonesuch/payg"),
-            "unexpected error: {error}"
-        );
+        assert!(error.contains("nonesuch/payg"), "unexpected error: {error}");
     }
 }

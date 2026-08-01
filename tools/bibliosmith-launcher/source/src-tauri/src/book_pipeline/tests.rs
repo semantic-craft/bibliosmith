@@ -13501,7 +13501,11 @@ fn layout_job(route: Vec<BookPipelineRouteItem>) -> BookPipelineJob {
 fn layout_package_root(root: &Path) -> PathBuf {
     let manifest = root.join("packages").join("layout-pdf");
     fs::create_dir_all(&manifest).unwrap();
-    fs::write(manifest.join("pyproject.toml"), "[project]\nname = \"layout-pdf\"\n").unwrap();
+    fs::write(
+        manifest.join("pyproject.toml"),
+        "[project]\nname = \"layout-pdf\"\n",
+    )
+    .unwrap();
     root.to_path_buf()
 }
 
@@ -13685,8 +13689,8 @@ fn the_layout_track_refuses_a_scanned_book() {
         &display_path(&source_pdf),
     )]);
 
-    let error = build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root)
-        .unwrap_err();
+    let error =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap_err();
 
     assert!(
         error.contains("only available for text PDFs"),
@@ -13709,8 +13713,8 @@ fn the_layout_track_refuses_more_than_one_book_at_a_time() {
         layout_route("direct_text", &display_path(&second)),
     ]);
 
-    let error = build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root)
-        .unwrap_err();
+    let error =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap_err();
 
     assert!(
         error.contains("one book at a time"),
@@ -13728,8 +13732,8 @@ fn the_layout_track_refuses_a_source_that_is_not_a_pdf() {
     fs::write(&source, b"PK\x03\x04").unwrap();
     let job = layout_job(vec![layout_route("direct_text", &display_path(&source))]);
 
-    let error = build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root)
-        .unwrap_err();
+    let error =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap_err();
 
     assert!(
         error.contains("only accepts PDFs"),
@@ -13748,8 +13752,8 @@ fn the_layout_track_reports_a_missing_source_before_spawning_anything() {
         &display_path(&root.join("absent.pdf")),
     )]);
 
-    let error = build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root)
-        .unwrap_err();
+    let error =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap_err();
 
     assert!(
         error.contains("Source PDF not found"),
@@ -13811,7 +13815,11 @@ fn the_ocr_workers_page_chunks_are_not_registered_as_artifacts() {
     // as deliverables -- while .state/staging, where the finished Markdown
     // lives, has to keep being scanned.
     let root = temp_root("layout-chunks");
-    let chunks = root.join(".state").join("chunks").join("ATTACH1").join("md5");
+    let chunks = root
+        .join(".state")
+        .join("chunks")
+        .join("ATTACH1")
+        .join("md5");
     let staging = root.join(".state").join("staging").join("ATTACH1");
     fs::create_dir_all(&chunks).unwrap();
     fs::create_dir_all(&staging).unwrap();
