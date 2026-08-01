@@ -377,6 +377,48 @@ class HTTPProviderTests(unittest.TestCase):
 
         self.assertEqual(provider.translate(_translation_request()), "译文章节")
 
+    # The total-deadline guard was written against the chat-completions
+    # transport while the Responses transport posted straight through httpx, so
+    # the two pay-as-you-go routes that speak Responses were the only ones a
+    # hung request could hold open past the configured deadline.
+    def test_responses_provider_enforces_the_configured_total_request_deadline(
+        self,
+    ) -> None:
+        def handle(request: httpx.Request) -> httpx.Response:
+            time.sleep(0.2)
+            return httpx.Response(
+                200,
+                json={
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "迟到的译文"}
+                            ],
+                        }
+                    ]
+                },
+            )
+
+        provider = OpenAIResponsesProvider(
+            config=_provider_config(
+                profile_id="qwen",
+                provider_type="openai-responses",
+                base_url="https://responses.example/v1",
+                model="model-r",
+                timeout_seconds=0.02,
+            ),
+            credential_pool=KeyPool(("fake-key",)),
+            http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+            max_attempts=1,
+        )
+
+        started = time.monotonic()
+        with self.assertRaises(ProviderTimeoutError):
+            provider.translate(_translation_request())
+
+        self.assertLess(time.monotonic() - started, 0.15)
+
     def test_responses_provider_rejects_a_response_without_output_text(self) -> None:
         provider = OpenAIResponsesProvider(
             config=_provider_config(

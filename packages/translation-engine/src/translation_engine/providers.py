@@ -337,20 +337,32 @@ class OpenAIResponsesProvider:
         self.concurrency_limit = config.concurrency_limit
         self.web_search_enabled = config.web_search_enabled
         self.credential_pool = credential_pool
-        self._http_client = http_client or httpx.Client(timeout=self.timeout_seconds)
+        # Left as None when the caller supplies none: _post_with_total_deadline
+        # creates and owns the client in that case, because closing an in-flight
+        # client from the deadline thread is what unbounds the deadline.
+        self._http_client = http_client
         self._max_attempts = max_attempts
         self._sleep = sleep
 
     def translate(self, request: TranslationRequest) -> str:
+        deadline_guard = _RequestDeadlineGuard()
         return _translate_with_retries(
             request=request,
             credential_pool=self.credential_pool,
             max_attempts=self._max_attempts,
             sleep=self._sleep,
-            operation=self._translate_once,
+            operation=lambda active_request, key: self._translate_once(
+                active_request, key, deadline_guard=deadline_guard
+            ),
         )
 
-    def _translate_once(self, request: TranslationRequest, key: str) -> str:
+    def _translate_once(
+        self,
+        request: TranslationRequest,
+        key: str,
+        *,
+        deadline_guard: _RequestDeadlineGuard,
+    ) -> str:
         body: dict[str, object] = {
             "model": self.model,
             "input": [
@@ -365,12 +377,16 @@ class OpenAIResponsesProvider:
         if self.web_search_enabled:
             body["tools"] = [{"type": "web_search"}]
         try:
-            response = self._http_client.post(
+            response = _post_with_total_deadline(
+                self._http_client,
                 f"{self.base_url}/responses",
+                deadline_guard=deadline_guard,
                 headers={"Authorization": f"Bearer {key}"},
                 json=body,
-                timeout=self.timeout_seconds,
+                timeout_seconds=self.timeout_seconds,
             )
+        except httpx.TimeoutException as error:
+            raise ProviderTimeoutError("provider request timed out") from error
         except httpx.TransportError as error:
             raise TransientError("provider request failed transiently") from error
         _raise_for_status(response)
