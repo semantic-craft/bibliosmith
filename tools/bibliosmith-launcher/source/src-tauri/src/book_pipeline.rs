@@ -999,7 +999,7 @@ fn source_reference_sha256(source: &BookPipelineSource) -> String {
 fn artifact_default_stage(kind: &str) -> &'static str {
     match kind {
         "collection_manifest" => "discover",
-        "markdown" | "html" | "epub" | "metadata" | "index" => "extract",
+        "markdown" | "html" | "epub" | "metadata" | "index" | "ocr_sample_report" => "extract",
         "translation_source"
         | "source_manifest"
         | "translation_draft"
@@ -1052,6 +1052,9 @@ fn artifact_privacy(kind: &str) -> &'static str {
             | "chapter_translation"
             | "chapter_final"
             | "translation_sample_report"
+            // Excerpts of the book's own pages, exactly like the translation
+            // sample: shown on screen, never logged.
+            | "ocr_sample_report"
             | "reading_markdown"
             | "reading_html"
             | "reading_epub"
@@ -2991,6 +2994,48 @@ pub async fn read_book_pipeline_artifact_excerpt(
     .await
 }
 
+/// Run both OCR engines over the same sampled interior pages so the conversion
+/// route can be chosen on evidence rather than on a guess about the scan. Like
+/// the translation sample, it changes nothing about the job: adopting a winner
+/// is the separate, explicit route-override action.
+#[tauri::command]
+pub async fn run_book_pipeline_ocr_sample(
+    job_id: String,
+    child_id: String,
+    sample_pages: Option<u32>,
+) -> Result<BookPipelineJob, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        run_ocr_sample_with_executor(
+            &store,
+            &job_id,
+            Some(&child_id),
+            sample_pages.unwrap_or(OCR_SAMPLE_PAGE_COUNT),
+            &SystemCommandExecutor,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn read_book_pipeline_ocr_sample(
+    job_id: String,
+    child_id: String,
+) -> Result<BookPipelineOcrSampleReport, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let state = store.load()?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
+        let sample_dir = ocr_sample_dir(&store, &job_id, &child_id);
+        read_ocr_sample_report(job, &child_id, &sample_dir)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn read_book_pipeline_translation_sample(
     job_id: String,
@@ -3399,6 +3444,28 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
     Ok(())
 }
 
+/// Guards the queue boundary. An unknown mode is refused instead of being given
+/// whichever pipeline shape it happens to miss, and the retired conversion-only
+/// mode is refused by name so the message says why rather than reading as a
+/// typo. Stored jobs are not re-checked: retiring the mode must not stop an
+/// existing library from opening.
+fn validate_enqueue_mode(mode: &str) -> Result<(), String> {
+    if ENQUEUEABLE_MODES.contains(&mode) {
+        return Ok(());
+    }
+    if mode == MODE_CONVERSION_ONLY {
+        return Err(format!(
+            "Book Pipeline mode {MODE_CONVERSION_ONLY} was retired: conversion now always \
+             continues into translation. Enqueue {MODE_CONVERT_THEN_TRANSLATE} instead. Jobs \
+             queued before the retirement keep running and stay readable."
+        ));
+    }
+    Err(format!(
+        "Unknown Book Pipeline mode {mode}. Valid modes: {}.",
+        ENQUEUEABLE_MODES.join(", ")
+    ))
+}
+
 fn queue_job_with_translation_intent(
     store: &dyn BookPipelineStateStore,
     source: BookPipelineSource,
@@ -3406,6 +3473,7 @@ fn queue_job_with_translation_intent(
     translation_intent: BookPipelineTranslationIntent,
     config: BookPipelinePreviewConfig,
 ) -> Result<BookPipelineJob, String> {
+    validate_enqueue_mode(&mode)?;
     queue_job_with_translation_intent_and_executor(
         store,
         &SystemCommandExecutor,
@@ -3416,6 +3484,10 @@ fn queue_job_with_translation_intent(
     )
 }
 
+/// Builds the job for a mode the caller has already cleared. `validate_enqueue_mode`
+/// sits one frame up in `queue_job_with_translation_intent`, which is the path the
+/// Tauri command takes; entering here directly skips that gate and is how tests
+/// reconstruct jobs in the retired conversion-only shape.
 fn queue_job_with_translation_intent_and_executor<E: RunnerCommandExecutor>(
     store: &dyn BookPipelineStateStore,
     executor: &E,
@@ -4058,6 +4130,10 @@ fn collection_snapshot_route(
     })
 }
 
+/// Tests reach the queue through here. The retired conversion-only mode goes
+/// around `validate_enqueue_mode` on purpose: the tests below assert on the
+/// three-stage shape of jobs queued before the retirement, and that shape has to
+/// stay reachable to stay covered. Every other mode goes through the real gate.
 #[cfg(test)]
 fn queue_job(
     store: &dyn BookPipelineStateStore,
@@ -4065,22 +4141,27 @@ fn queue_job(
     mode: String,
     config: BookPipelinePreviewConfig,
 ) -> Result<BookPipelineJob, String> {
-    queue_job_with_translation_intent(
-        store,
-        source,
-        mode,
-        BookPipelineTranslationIntent {
-            translation_mode: TRANSLATION_MODE_FAST.into(),
-            profile_id: "fake-provider-profile".into(),
-            config_id: "fake-provider-config".into(),
-            skill_ids: Vec::new(),
-            second_pass_enabled: false,
-            text_cleanup: false,
-            digest_mode: false,
-            output_formats: default_output_formats(),
-        },
-        config,
-    )
+    let intent = BookPipelineTranslationIntent {
+        translation_mode: TRANSLATION_MODE_FAST.into(),
+        profile_id: "fake-provider-profile".into(),
+        config_id: "fake-provider-config".into(),
+        skill_ids: Vec::new(),
+        second_pass_enabled: false,
+        text_cleanup: false,
+        digest_mode: false,
+        output_formats: default_output_formats(),
+    };
+    if mode == MODE_CONVERSION_ONLY {
+        return queue_job_with_translation_intent_and_executor(
+            store,
+            &SystemCommandExecutor,
+            source,
+            mode,
+            intent,
+            config,
+        );
+    }
+    queue_job_with_translation_intent(store, source, mode, intent, config)
 }
 
 fn handoff_job_markdown(
@@ -6270,8 +6351,13 @@ fn collection_awaits_attachment_routing(job: &BookPipelineJob) -> bool {
         })
 }
 
+/// Every live mode hands off to translation once the run finishes. The retired
+/// conversion-only mode is the single exception, and it is named here rather
+/// than inferred: before it was retired any string that was not one of the two
+/// live modes silently inherited its half pipeline, so a typo in stored state
+/// produced a job that stopped after extraction and looked finished.
 fn should_handoff_after_run(mode: &str) -> bool {
-    mode == MODE_CONVERT_THEN_TRANSLATE || mode == MODE_TRANSLATE_ONLY
+    mode != MODE_CONVERSION_ONLY
 }
 
 impl PipelineRunner for SystemPipelineRunner {
@@ -8818,6 +8904,13 @@ fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> R
             if path.extension().and_then(|extension| extension.to_str()) == Some("mineru") {
                 continue;
             }
+            // The OCR engine comparison is evidence for choosing a route, not
+            // conversion output, and it lands under the same job output root
+            // this scan walks. Registered here, its report would become a
+            // `metadata` artifact of a conversion that never produced it.
+            if path.file_name().and_then(|name| name.to_str()) == Some(OCR_SAMPLE_DIR_NAME) {
+                continue;
+            }
             collect_artifacts(&path, artifacts)?;
             continue;
         }
@@ -10926,6 +11019,397 @@ fn read_translation_sample_report(
             .map_err(|err| format!("Translation sample report is invalid: {err}"))?;
     let units = translation_task_units(child, &project_root)?;
     validate_translation_sample_report(&report, &units)?;
+    Ok(report)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BookPipelineOcrSampleReport {
+    schema: String,
+    total_pages: u32,
+    sampled_pages: Vec<u32>,
+    character_budget: usize,
+    engines: Vec<BookPipelineOcrSampleEngine>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BookPipelineOcrSampleEngine {
+    engine: String,
+    status: String,
+    markdown_excerpt: String,
+    character_count: usize,
+    elapsed_ms: u64,
+    error: Option<String>,
+}
+
+/// The engines a sample always compares, in the order the report lists them.
+fn ocr_sample_engines() -> [&'static str; 2] {
+    [OCR_SAMPLE_ENGINE_PADDLEOCR, OCR_SAMPLE_ENGINE_MINERU]
+}
+
+/// The local file a source reference points at, or None when it names no file
+/// on this disk.
+///
+/// `zotero_source_ref` builds these, and both of its shapes need handling: it
+/// appends `#source_md5=<fingerprint>` to the attachment's storage path, and it
+/// falls back to a `zotero://attachment/<key>` URI when Zotero reported no path
+/// at all. Left alone, the fingerprint becomes part of the file extension --
+/// `book.pdf#source_md5=abc` has extension `pdf#source_md5=abc` -- so every
+/// real Zotero book reads as "not a PDF". Stripped by exact suffix rather than
+/// by splitting on `#`, because `#` is legal in a filename.
+fn ocr_sample_local_path(source_ref: &str) -> Option<PathBuf> {
+    let path = source_ref
+        .rsplit_once("#source_md5=")
+        .map_or(source_ref, |(base, _)| base)
+        .trim();
+    if path.is_empty() || path.starts_with("zotero://") {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+/// The PDF the sample reads. Zotero attachment children carry the storage path
+/// their route was built from, and local-folder route items name the file
+/// directly; nothing here goes looking on disk for a file the state does not
+/// already point at.
+fn ocr_sample_source_pdf(child: &BookPipelineChildJob) -> Result<PathBuf, String> {
+    let references = std::iter::once(child.source.path.as_deref())
+        .chain(
+            child
+                .route
+                .iter()
+                .map(|route| Some(route.source_ref.as_str())),
+        )
+        .flatten()
+        .collect::<Vec<_>>();
+    let path = references
+        .iter()
+        .filter_map(|source_ref| ocr_sample_local_path(source_ref))
+        .find(|path| is_pdf_path(path));
+    let Some(path) = path else {
+        // An attachment Zotero knows about but has no local file for reads as a
+        // sync problem, not as a missing path the user was never shown.
+        if references
+            .iter()
+            .any(|source_ref| source_ref.starts_with("zotero://"))
+        {
+            return Err(
+                "This book's PDF is not stored locally. Sync the Zotero attachment first.".into(),
+            );
+        }
+        return Err("This book has no local PDF to sample.".into());
+    };
+    if !path.is_file() {
+        return Err("The source PDF for this book is missing.".into());
+    }
+    Ok(path)
+}
+
+fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+}
+
+/// Per-child, so two books sampled from one collection cannot overwrite each
+/// other's report or scratch pages.
+fn ocr_sample_dir(store: &dyn BookPipelineStateStore, job_id: &str, child_id: &str) -> PathBuf {
+    store
+        .job_output_dir(job_id)
+        .join(clean_path_component(child_id))
+        .join("qa")
+        .join(OCR_SAMPLE_DIR_NAME)
+}
+
+fn build_ocr_sample_command(
+    manifest_path: &Path,
+    sample_dir: &Path,
+) -> Result<RunnerCommand, String> {
+    let root = book_ocr_conversion_root();
+    let script = root.join("sample_compare.py");
+    if !script.is_file() {
+        return Err(format!(
+            "OCR sample compare client not found at {}",
+            display_path(&script)
+        ));
+    }
+    let mut args = ocr_python_args(&script);
+    args.extend(["--manifest".into(), display_path(manifest_path)]);
+    Ok(RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: OCR_SAMPLE_COMPARE_COMMAND_LABEL.into(),
+        program: PathBuf::from("uv"),
+        args,
+        env: Vec::new(),
+        cwd: Some(root),
+        output_dir: sample_dir.to_path_buf(),
+        // Only the fake-command runner reads this, and the OCR sample is always
+        // a real process.
+        attempts: 0,
+        accepted_exit_codes: vec![0],
+    })
+}
+
+fn validate_ocr_sample_report(
+    report: &BookPipelineOcrSampleReport,
+    requested_pages: u32,
+) -> Result<(), String> {
+    if report.schema != OCR_SAMPLE_COMPARE_REPORT_SCHEMA {
+        return Err("OCR sample report has an unsupported schema.".into());
+    }
+    if report.total_pages < 3 {
+        return Err("OCR sample report claims a book with no interior pages.".into());
+    }
+    if report.sampled_pages.is_empty() || report.sampled_pages.len() > requested_pages as usize {
+        return Err("OCR sample report has an unexpected sampled page count.".into());
+    }
+    let mut previous = 0;
+    for page in &report.sampled_pages {
+        // Strictly increasing, and never the endpoints: a report that showed
+        // the cover would be evidence of the least representative page in the
+        // book, which is the whole reason the sampler skips them.
+        if *page <= previous || *page < 2 || *page >= report.total_pages {
+            return Err("OCR sample report sampled a cover, endpoint or unordered page.".into());
+        }
+        previous = *page;
+    }
+    let expected = ocr_sample_engines();
+    if report.engines.len() != expected.len()
+        || report
+            .engines
+            .iter()
+            .zip(expected)
+            .any(|(result, engine)| result.engine != engine)
+    {
+        return Err("OCR sample report does not compare both engines.".into());
+    }
+    for result in &report.engines {
+        match result.status.as_str() {
+            "ok" => {
+                if result.error.is_some() {
+                    return Err("OCR sample report marked a successful engine as failed.".into());
+                }
+            }
+            "failed" => {
+                if non_empty(result.error.as_deref()).is_none() {
+                    return Err("OCR sample report has a failure with no reason.".into());
+                }
+            }
+            _ => return Err("OCR sample report has an invalid engine status.".into()),
+        }
+        if result.markdown_excerpt.chars().count() > report.character_budget {
+            return Err("OCR sample report exceeded its excerpt budget.".into());
+        }
+    }
+    if report
+        .engines
+        .iter()
+        .all(|result| result.status == "failed")
+    {
+        return Err(format!(
+            "Both OCR engines failed on the sampled pages: {}",
+            report
+                .engines
+                .iter()
+                .filter_map(|result| result
+                    .error
+                    .as_deref()
+                    .map(|error| format!("{}: {error}", result.engine)))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    Ok(())
+}
+
+/// Sample both OCR engines over the same interior pages so the route can be
+/// chosen on evidence. Deliberately free of side effects on the route itself:
+/// picking a winner is a separate, explicit action, exactly as running a
+/// translation sample does not adopt the provider it previewed.
+fn run_ocr_sample_with_executor(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    sample_pages: u32,
+    executor: &dyn RunnerCommandExecutor,
+) -> Result<BookPipelineJob, String> {
+    if !(1..=OCR_SAMPLE_MAX_PAGES).contains(&sample_pages) {
+        return Err(format!(
+            "OCR sampling takes between 1 and {OCR_SAMPLE_MAX_PAGES} pages."
+        ));
+    }
+
+    let mut state = store.load()?;
+    let job_index = find_job_index(&state, job_id)?;
+    let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
+    let child = &state.jobs[job_index].children[child_index];
+    let child_id = child.id.clone();
+    // Sampling is a pre-conversion decision. Once extraction is under way the
+    // engine has already been chosen and the comparison would either race the
+    // runner or answer a question that is no longer open.
+    let extract_status = child
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "extract")
+        .map(|stage| stage.status.clone())
+        .ok_or_else(|| "This book has no extract stage to sample.".to_string())?;
+    if matches!(extract_status.as_str(), STATUS_RUNNING | STATUS_COMPLETED) {
+        return Err("OCR samples run only before conversion starts.".into());
+    }
+    let source_pdf = ocr_sample_source_pdf(child)?;
+
+    let sample_dir = ocr_sample_dir(store, job_id, &child_id);
+    fs::create_dir_all(&sample_dir).map_err(|err| err.to_string())?;
+    // Each run writes its own report file rather than overwriting a fixed name.
+    // A re-sample that fails would otherwise have already clobbered the report
+    // the previous run registered, leaving a good artifact record pointing at
+    // content whose digest no longer matches -- the last working comparison
+    // destroyed by the attempt to replace it.
+    static OCR_SAMPLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let run_tag = format!(
+        "{}-{}",
+        std::process::id(),
+        OCR_SAMPLE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let report_name = format!("report-{run_tag}.json");
+    let report_path = sample_dir.join(&report_name);
+    let manifest = serde_json::json!({
+        "schema": OCR_SAMPLE_COMPARE_SCHEMA,
+        "projectRoot": display_path(&sample_dir),
+        "sourcePdfPath": display_path(&source_pdf),
+        "reportPath": report_name,
+        "workDir": "work",
+        "samplePages": sample_pages,
+        "characterBudget": OCR_SAMPLE_CHARACTER_BUDGET,
+        "engines": ocr_sample_engines(),
+    });
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())? + "\n";
+    let manifest_path = sample_dir.join(format!("manifest-{run_tag}.json"));
+    fs::write(&manifest_path, manifest_json).map_err(|err| err.to_string())?;
+
+    let mut command = build_ocr_sample_command(&manifest_path, &sample_dir)?;
+    inject_ocr_credentials(&mut command);
+    let command_result = match executor.execute(&command) {
+        Ok(result) => {
+            fs::remove_file(&manifest_path).map_err(|err| {
+                format!("Failed to remove the temporary OCR sample manifest: {err}")
+            })?;
+            result
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&manifest_path);
+            return Err(err);
+        }
+    };
+    // Read from disk rather than stdout: the report is a durable artifact the
+    // UI reads back long after this process is gone, so the file is the source
+    // of truth and stdout is only progress.
+    //
+    // A report this run wrote but cannot register is deleted on the way out.
+    // The names are per-run, so leaving them would pile up one file per failed
+    // attempt -- and "both engines failed" is the ordinary first-run outcome on
+    // a machine with no tokens configured yet.
+    let report_json = fs::read_to_string(&report_path)
+        .map_err(|err| format!("OCR sample report was not written: {err}"))?;
+    let accept = || -> Result<BookPipelineOcrSampleReport, String> {
+        let report: BookPipelineOcrSampleReport = serde_json::from_str(&report_json)
+            .map_err(|err| format!("OCR sample compare returned invalid report JSON: {err}"))?;
+        validate_ocr_sample_report(&report, sample_pages)?;
+        Ok(report)
+    };
+    let report = match accept() {
+        Ok(report) => report,
+        Err(err) => {
+            let _ = fs::remove_file(&report_path);
+            return Err(err);
+        }
+    };
+    let report_sha256 = sha256_str(&report_json);
+
+    let job = &mut state.jobs[job_index];
+    let previous_report_path = job.children[child_index]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "ocr_sample_report")
+        .map(|artifact| PathBuf::from(&artifact.path));
+    replace_stage_artifacts(
+        &mut job.children[child_index].artifacts,
+        &["ocr_sample_report"],
+        vec![BookPipelineArtifact {
+            kind: "ocr_sample_report".into(),
+            path: display_path(&report_path),
+            sha256: Some(report_sha256),
+            producer_stage: Some("extract".into()),
+            ..BookPipelineArtifact::default()
+        }],
+    );
+    job.current_step = "Compared OCR engines on sampled pages".into();
+    job.log_summary
+        .extend(redact_log_lines(&command_result.log_summary));
+    job.log_summary.push(format!(
+        "Sampled {} page(s) through {}",
+        report.sampled_pages.len(),
+        report
+            .engines
+            .iter()
+            .map(|result| format!("{} ({})", result.engine, result.status))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    ));
+    job.log_summary = trim_log_summary(&job.log_summary);
+    job.updated_at = now_label();
+    derive_job(job);
+    let result = job.clone();
+    store.save(&state)?;
+    // Only now that the new report is the registered one. Confined to this
+    // child's own sample directory so a hand-edited artifact path cannot turn
+    // a re-sample into a delete somewhere else.
+    if let Some(previous_path) = previous_report_path.filter(|previous_path| {
+        previous_path != &report_path && previous_path.parent() == Some(sample_dir.as_path())
+    }) {
+        let _ = fs::remove_file(previous_path);
+    }
+    Ok(result)
+}
+
+fn read_ocr_sample_report(
+    job: &BookPipelineJob,
+    child_id: &str,
+    sample_dir: &Path,
+) -> Result<BookPipelineOcrSampleReport, String> {
+    let child = job
+        .children
+        .iter()
+        .find(|child| child.id == child_id)
+        .ok_or_else(|| "Book Pipeline child job not found.".to_string())?;
+    let artifact = child
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "ocr_sample_report")
+        .ok_or_else(|| "OCR sample report is not registered.".to_string())?;
+    let path = fs::canonicalize(&artifact.path)
+        .map_err(|_| "OCR sample report file is missing.".to_string())?;
+    // The state file names the path, so the read is confined to the directory
+    // this child's samples are written to. Without it a tampered artifact
+    // record would make the reader hand any readable file to the UI.
+    let canonical_sample_dir =
+        fs::canonicalize(sample_dir).map_err(|_| "OCR sample directory is missing.".to_string())?;
+    if !path.starts_with(&canonical_sample_dir) {
+        return Err("OCR sample report is outside the job's sample directory.".into());
+    }
+    let expected_sha256 = artifact
+        .sha256
+        .as_deref()
+        .ok_or_else(|| "OCR sample report has no SHA-256.".to_string())?;
+    if sha256_file(&path)? != expected_sha256 {
+        return Err("OCR sample report changed after registration.".into());
+    }
+    let report: BookPipelineOcrSampleReport =
+        serde_json::from_str(&fs::read_to_string(path).map_err(|err| err.to_string())?)
+            .map_err(|err| format!("OCR sample report is invalid: {err}"))?;
+    validate_ocr_sample_report(&report, OCR_SAMPLE_MAX_PAGES)?;
     Ok(report)
 }
 

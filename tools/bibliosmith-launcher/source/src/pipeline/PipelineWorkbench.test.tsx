@@ -10,6 +10,7 @@ import { PipelineWorkbench, type PipelineWorkbenchProps } from "./PipelineWorkbe
 vi.mock("../api", () => ({
   readBookPipelineArtifactExcerpt: vi.fn(() => Promise.reject(new Error("desktop only"))),
   readBookPipelineTranslationSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
+  readBookPipelineOcrSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
   // The input island only registers the native drag-drop listener under Tauri.
   isTauriRuntime: () => false,
 }));
@@ -45,6 +46,7 @@ function workbenchProps(
     onSaveCustomInstructions: vi.fn(),
     onApproveGate: vi.fn(),
     onRouteOverride: vi.fn(),
+    onSampleOcr: vi.fn(),
     onOpenOutput: vi.fn(),
     routeOverrides: {},
     onRouteOverrideChange: vi.fn(),

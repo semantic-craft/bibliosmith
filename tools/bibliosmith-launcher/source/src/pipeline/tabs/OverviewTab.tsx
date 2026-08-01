@@ -18,6 +18,7 @@ import {
   type BookUnit,
 } from "../model";
 import type { TabProps } from "./tabProps";
+import { OcrCompareCard, canCompareOcrEngines } from "../OcrCompareCard";
 
 function railNodeClass(status: string): string {
   switch (status) {
@@ -268,11 +269,23 @@ function ArtifactDigestCard({ unit, copy }: { unit: BookUnit; copy: PipelineCopy
 }
 
 export function OverviewTab(props: TabProps) {
-  const { unit, copy } = props;
+  const { unit, copy, busy, onSampleOcr, onRouteOverride } = props;
   return (
     <>
       <StageRail unit={unit} copy={copy} />
       <ActionCard {...props} />
+      {/* Only while the engine is still an open question — the backend refuses
+          a sample once extraction has started, so an always-visible card would
+          offer a button that errors. */}
+      {canCompareOcrEngines(unit) && (
+        <OcrCompareCard
+          unit={unit}
+          copy={copy}
+          busy={busy}
+          onSampleOcr={onSampleOcr}
+          onRouteOverride={onRouteOverride}
+        />
+      )}
       <div className="pl-det-cards">
         <EvidenceCard unit={unit} copy={copy} />
         <ArtifactDigestCard unit={unit} copy={copy} />

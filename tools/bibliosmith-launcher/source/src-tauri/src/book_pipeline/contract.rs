@@ -14,6 +14,14 @@ pub(crate) const STATUS_HANDOFF_RUNNING: &str = "handoff_running";
 pub(crate) const STATUS_TRANSLATION_READY: &str = "translation_ready";
 pub(crate) const MODE_CONVERT_THEN_TRANSLATE: &str = "convert_then_translate";
 pub(crate) const MODE_TRANSLATE_ONLY: &str = "translate_only";
+/// Retired: conversion always continues into translation now, so nothing may be
+/// enqueued with this mode. It stays spelled out because jobs stored before the
+/// retirement still carry it, and reading them must not fall through to a
+/// pipeline shape nobody named.
+pub(crate) const MODE_CONVERSION_ONLY: &str = "conversion_only";
+/// The modes a caller may enqueue. Anything else is refused at the queue
+/// boundary rather than silently given a shape.
+pub(crate) const ENQUEUEABLE_MODES: [&str; 2] = [MODE_CONVERT_THEN_TRANSLATE, MODE_TRANSLATE_ONLY];
 pub(crate) const TRANSLATION_MODE_FAST: &str = "fast";
 pub(crate) const TRANSLATION_MODE_EXPERT: &str = "expert";
 pub(crate) const STATE_SCHEMA_VERSION: &str = "book-pipeline-state-v5";
@@ -46,6 +54,26 @@ pub(crate) const TRANSLATION_ENGINE_SAMPLE_REPORT_SCHEMA: &str =
 pub(crate) const TRANSLATION_ENGINE_SAMPLE_COMMAND_LABEL: &str = "translation engine sample";
 pub(crate) const TRANSLATION_SAMPLE_COUNT: usize = 3;
 pub(crate) const TRANSLATION_SAMPLE_CHARACTER_BUDGET: usize = 800;
+/// Directory holding one child's engine comparison, under the job output root.
+/// `collect_artifacts` skips it by this name: the comparison is evidence for a
+/// routing decision, not conversion output, and the scan that walks the job
+/// output tree would otherwise register it as the book's own artifacts.
+pub(crate) const OCR_SAMPLE_DIR_NAME: &str = "ocr-sample";
+pub(crate) const OCR_SAMPLE_COMPARE_SCHEMA: &str = "ocr-sample-compare-v1";
+pub(crate) const OCR_SAMPLE_COMPARE_REPORT_SCHEMA: &str = "ocr-sample-compare-report-v1";
+pub(crate) const OCR_SAMPLE_COMPARE_COMMAND_LABEL: &str = "OCR sample compare";
+pub(crate) const OCR_SAMPLE_ENGINE_PADDLEOCR: &str = "paddleocr";
+pub(crate) const OCR_SAMPLE_ENGINE_MINERU: &str = "mineru";
+/// How many interior pages each engine gets by default. Every sampled page is
+/// a paid remote call against both engines, so the default stays small and the
+/// caller raises it deliberately.
+pub(crate) const OCR_SAMPLE_PAGE_COUNT: u32 = 3;
+/// Mirrors MAX_SAMPLE_PAGES in packages/ocr/sample_compare.py. Both ends
+/// enforce it: the UI cannot spend an unbounded amount by asking for more.
+pub(crate) const OCR_SAMPLE_MAX_PAGES: u32 = 10;
+/// Characters of Markdown kept per engine. Enough to judge layout handling in
+/// a side-by-side panel without storing the sampled pages in full.
+pub(crate) const OCR_SAMPLE_CHARACTER_BUDGET: usize = 4000;
 pub(crate) const TRANSLATION_POLICY_VERSION: &str = "translation-policy-v10";
 pub(crate) const TRANSLATION_ENGINE_MAX_TOKENS: u32 = 2_048;
 pub(crate) const TRANSLATION_ENGINE_PLACEHOLDER_RETRIES: u32 = 1;

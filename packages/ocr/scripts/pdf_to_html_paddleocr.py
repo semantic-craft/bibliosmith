@@ -7,6 +7,7 @@ Standalone PDF -> HTML converter using Baidu AI Studio PaddleOCR-VL-1.6.
 - Polls for completion, downloads JSONL results
 - Extracts markdown text + images
 - Downloads images locally, renders markdown to standalone HTML
+- Writes the assembled markdown next to the HTML as <book>/<book>.md
 
 Usage:
     /opt/homebrew/bin/python3.11 scripts/pdf_to_html_paddleocr.py \
@@ -545,7 +546,7 @@ def process_book(
     operation_progress: OperationProgress,
     output_name: str | None = None,
 ) -> Path:
-    """Convert a single PDF to standalone HTML. Returns path to HTML file.
+    """Convert a single PDF to markdown plus standalone HTML. Returns path to HTML file.
 
     ``output_name`` is the directory name to write under. main() passes the
     collision-free name from assign_output_names(); it falls back to the plain
@@ -558,6 +559,7 @@ def process_book(
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     html_path = book_output_dir / f"{safe_name}.html"
+    md_path = book_output_dir / f"{safe_name}.md"
     state_path = book_output_dir / "_state.json"
 
     # Load existing state, but only if it was written for this same PDF. Chunks
@@ -714,11 +716,15 @@ def process_book(
             md_sections.append(f"\n<div class=\"page-break\">— Page {page_no} —</div>\n\n{text}")
 
     full_md = f"# {book_name}\n\n" + "\n\n".join(md_sections)
+    # The translation handoff reads this file, so it has to land on disk
+    md_path.write_text(full_md, encoding="utf-8")
     body_html = md_to_html(full_md)
     html = build_html(title=book_name, body_html=body_html)
     html_path.write_text(html, encoding="utf-8")
 
+    logging.info("[%s] Markdown saved: %s", book_name, md_path)
     logging.info("[%s] HTML saved: %s", book_name, html_path)
+    state["markdown_path"] = str(md_path)
     state["html_path"] = str(html_path)
     state["assets_dir"] = str(assets_dir)
     state["image_count"] = len(image_map)

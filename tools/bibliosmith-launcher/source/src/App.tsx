@@ -24,6 +24,7 @@ import {
   queueBookPipelineJob,
   recordFrontendActivity,
   retryBookPipelineJob,
+  runBookPipelineOcrSample,
   runBookPipelineTranslationSample,
   setBookPipelineTranslationProvider,
   runBookPipelineJob,
@@ -444,6 +445,29 @@ export default function App() {
     }
   }, [addActivity, bookPipelineCopy.sampleReady, showFloatingToast]);
 
+  // Run both OCR engines over the same sampled pages. Like the translation
+  // sample it adopts nothing: the user picks a side afterwards, which goes
+  // through the ordinary route override.
+  const samplePipelineOcr = useCallback(async (jobId: string, childId: string, samplePages: number) => {
+    setPipelineBusy("sample");
+    try {
+      const job = await runBookPipelineOcrSample(jobId, childId, samplePages);
+      setPipelineState((current) => upsertPipelineJob(current, job));
+      // "requested", not "sampled": a book with fewer interior pages than asked
+      // for yields fewer, and the count that was actually compared is in the
+      // job's own log summary. Claiming ten pages here when four were sampled
+      // would misstate what the run spent.
+      addActivity("success", `OCR sample ready; requested up to ${samplePages} page(s)`);
+      showFloatingToast(bookPipelineCopy.ocrCompareReady, "success");
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+    } finally {
+      setPipelineBusy(null);
+    }
+  }, [addActivity, bookPipelineCopy.ocrCompareReady, showFloatingToast]);
+
   // The explicit half of the sample flow: adopt the slot the sample was run with
   // as the book's own, which is what the full run uses.
   const applyPipelineTranslationProvider = useCallback(async (
@@ -853,6 +877,9 @@ export default function App() {
               onApproveGate={(jobId, childId, stageId) => void approvePipelineGate(jobId, childId, stageId)}
               onRouteOverride={(jobId, childId, routeItemId, routeOverride) =>
                 void overridePipelineRoute(jobId, childId, routeItemId, routeOverride)
+              }
+              onSampleOcr={(jobId, childId, samplePages) =>
+                void samplePipelineOcr(jobId, childId, samplePages)
               }
               onOpenOutput={(jobId) => void openPipelineOutput(jobId)}
               routeOverrides={pipelineRouteOverrides}

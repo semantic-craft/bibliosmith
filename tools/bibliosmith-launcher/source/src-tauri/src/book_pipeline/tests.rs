@@ -641,6 +641,44 @@ impl RunnerCommandExecutor for LocalPdfFixtureExecutor {
     }
 }
 
+// Shaped like the real wrapper output, page-break div included, so the handoff
+// is checked against what pdf_to_html_paddleocr.py actually assembles.
+const PADDLE_WRAPPER_MARKDOWN: &str =
+    "# Sample Book\n\n\n<div class=\"page-break\">— Page 1 —</div>\n\nChapter One\n";
+
+/// Mirrors the on-disk layout of `packages/ocr/scripts/pdf_to_html_paddleocr.py`.
+struct PaddleWrapperLayoutExecutor;
+
+impl RunnerCommandExecutor for PaddleWrapperLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.kind, RunnerCommandKind::Process);
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        let assets_dir = book_dir.join("Sample_Book_assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(book_dir.join("Sample_Book.md"), PADDLE_WRAPPER_MARKDOWN).unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        fs::write(
+            book_dir.join("_state.json"),
+            "{\"markdown_path\":\"Sample_Book.md\"}\n",
+        )
+        .unwrap();
+        fs::write(assets_dir.join("img_1.png"), "png bytes").unwrap();
+        let chunks = command
+            .output_dir
+            .join(".temp")
+            .join("Sample_Book")
+            .join("chunks");
+        fs::create_dir_all(&chunks).unwrap();
+        fs::write(chunks.join("pages-0001-0002.jsonl"), "{\"page\":1}\n").unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Paddle wrapper completed".into()],
+        })
+    }
+}
+
 struct LocalPdfFailingExecutor;
 
 impl RunnerCommandExecutor for LocalPdfFailingExecutor {
@@ -1801,6 +1839,20 @@ fn fake_source(behavior: Option<&str>) -> BookPipelineSource {
     }
 }
 
+/// A valid intent, so that a queue refusal can only have come from the mode.
+fn fake_translation_intent() -> BookPipelineTranslationIntent {
+    BookPipelineTranslationIntent {
+        translation_mode: TRANSLATION_MODE_FAST.into(),
+        profile_id: "fake-provider-profile".into(),
+        config_id: "fake-provider-config".into(),
+        skill_ids: Vec::new(),
+        second_pass_enabled: false,
+        text_cleanup: false,
+        digest_mode: false,
+        output_formats: default_output_formats(),
+    }
+}
+
 fn local_pdf_source(input: &Path) -> BookPipelineSource {
     BookPipelineSource {
         kind: "local_pdf_folder".into(),
@@ -2947,6 +2999,137 @@ fn legacy_jobs_migrate_to_versioned_parent_child_stage_state() {
         .as_deref()
         .unwrap()
         .contains("interrupted"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn retired_conversion_only_mode_is_refused_at_the_queue() {
+    let root = temp_root("retired-mode-enqueue");
+    let store = BookPipelineStore::for_test(&root);
+
+    let error = queue_job_with_translation_intent(
+        &store,
+        fake_source(None),
+        MODE_CONVERSION_ONLY.into(),
+        fake_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("retired") && error.contains(MODE_CONVERT_THEN_TRANSLATE),
+        "the refusal must say the mode is retired and name the replacement, got {error}"
+    );
+    assert!(
+        store.load().unwrap().jobs.is_empty(),
+        "a refused enqueue must not leave a job behind"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unknown_mode_is_refused_instead_of_inheriting_a_truncated_pipeline() {
+    let root = temp_root("unknown-mode-enqueue");
+    let store = BookPipelineStore::for_test(&root);
+
+    let error = queue_job_with_translation_intent(
+        &store,
+        fake_source(None),
+        "convert_then_translat".into(),
+        fake_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("convert_then_translat") && error.contains(MODE_TRANSLATE_ONLY),
+        "the refusal must quote the rejected mode and list the valid ones, got {error}"
+    );
+    assert!(store.load().unwrap().jobs.is_empty());
+
+    // The retirement's point: a mode that is merely unrecognised must no longer
+    // fall through to the conversion-only shape and stop short of translation.
+    assert!(
+        should_handoff_after_run("convert_then_translat"),
+        "only the named retired mode may skip the translation handoff"
+    );
+    assert!(
+        ordered_child_stage_ids("convert_then_translat", false).contains(&"handoff"),
+        "an unrecognised mode must not be given the truncated stage list"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn stored_conversion_only_jobs_still_open_and_keep_their_three_stage_shape() {
+    let root = temp_root("retired-mode-stored-state");
+    let store = BookPipelineStore::for_test(&root);
+    fs::create_dir_all(store.state_path.parent().unwrap()).unwrap();
+    // A checkpoint written before the mode was retired. Retiring it closed the
+    // queue, not the library: this file still has to open.
+    let legacy = serde_json::json!({
+        "jobs": [{
+            "id": "stored-conversion-only",
+            "mode": MODE_CONVERSION_ONLY,
+            "source": {
+                "kind": "zotero_attachment",
+                "title": "Fabricated source",
+                "path": "zotero://attachment/FAKEPDF",
+                "selector": "FAKEPDF",
+                "runnerBehavior": null,
+                "adapterCommand": null,
+                "fakeZoteroItems": null
+            },
+            "route": [{
+                "id": "FAKEPDF",
+                "title": "Fabricated source",
+                "sourceKind": "zotero_attachment",
+                "sourceRef": "zotero://attachment/FAKEPDF",
+                "routeKind": "direct_text",
+                "canRun": true,
+                "blockedReason": null,
+                "summary": "Fabricated route"
+            }],
+            "status": STATUS_ROUTED,
+            "currentStep": "Legacy conversion-only state",
+            "lastError": null,
+            "logSummary": ["preserved log"],
+            "artifacts": [],
+            "collectionItems": [],
+            "outputDir": "/tmp/fabricated-output",
+            "attempts": 1,
+            "createdAt": "2026-07-10T09:00:00+08:00",
+            "updatedAt": "2026-07-10T09:05:00+08:00"
+        }]
+    });
+    fs::write(
+        &store.state_path,
+        serde_json::to_string_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let state = store.load().unwrap();
+
+    let stored = &state.jobs[0];
+    assert_eq!(
+        stored.mode, MODE_CONVERSION_ONLY,
+        "the stored mode must be preserved, not rewritten to a live one"
+    );
+    assert_eq!(
+        stored.children[0]
+            .stages
+            .iter()
+            .map(|stage| stage.stage_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["route", "extract", "index"],
+        "migration must not graft translation stages onto a finished conversion-only job"
+    );
+    assert!(!should_handoff_after_run(&stored.mode));
+
+    // Reload proves the migrated file it just wrote is itself still loadable.
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded.jobs[0].mode, MODE_CONVERSION_ONLY);
+    assert_eq!(reloaded.jobs[0].children[0].stages.len(), 3);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6013,6 +6196,73 @@ fn local_pdf_runner_contract_records_wrapper_artifacts() {
     assert!(log.contains("Runner command prepared: local PDF conversion wrapper"));
     assert!(log.contains("Local PDF fixture wrapper completed"));
     assert!(!log.contains("DONE: sample.pdf -> sample.html"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn local_pdf_paddle_layout_hands_the_wrapper_markdown_to_translation() {
+    let root = temp_root("local-pdf-paddle-handoff");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("Sample Book.pdf"), "%PDF fixture").unwrap();
+    let repo_root = root.join("repo");
+    fs::create_dir_all(repo_root.join("tools")).unwrap();
+    fs::write(repo_root.join("AGENTS.md"), "fixture").unwrap();
+    fs::write(
+        repo_root.join("tools").join("create_local_book_project.py"),
+        "fixture",
+    )
+    .unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    assert!(job
+        .route
+        .iter()
+        .any(|item| item.route_kind == "remote_paddleocr"));
+
+    let completed = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            PaddleWrapperLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo_root),
+    )
+    .unwrap();
+
+    assert_eq!(completed.status, STATUS_READY);
+    assert_eq!(completed.current_step, "Translation handoff ready");
+    assert!(completed.last_error.is_none());
+    let markdown = completed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "markdown")
+        .expect("the wrapper Markdown is registered as a markdown artifact");
+    assert!(
+        markdown.path.ends_with("Sample_Book.md"),
+        "{}",
+        markdown.path
+    );
+    let project_root = PathBuf::from(
+        completed
+            .children
+            .iter()
+            .find_map(|child| child.local_project_root.as_deref())
+            .expect("registered local project root"),
+    );
+    assert_eq!(
+        fs::read_to_string(project_root.join("source").join("source.md")).unwrap(),
+        PADDLE_WRAPPER_MARKDOWN
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -12458,4 +12708,1005 @@ fn artifact_excerpt_rejects_paths_outside_allowlist_and_unknown_artifacts() {
 
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(elsewhere);
+}
+
+// ---- OCR dual-engine sampling (issue #97) ---------------------------------
+
+/// Stands in for `packages/ocr/sample_compare.py`. It writes the report to the
+/// path the manifest names rather than returning it on stdout, because that
+/// on-disk hand-off is the contract under test: unlike the conversion workers,
+/// this report has to outlive the process that produced it.
+struct OcrSampleFixtureExecutor {
+    manifests: Mutex<Vec<serde_json::Value>>,
+    paddle_markdown: String,
+    mineru_markdown: String,
+    paddle_error: Option<String>,
+    total_pages: u32,
+}
+
+impl Default for OcrSampleFixtureExecutor {
+    fn default() -> Self {
+        Self {
+            manifests: Mutex::new(Vec::new()),
+            paddle_markdown: "# Paddle heading\n\nPaddle body.".into(),
+            mineru_markdown: "# MinerU heading\n\nMinerU body.".into(),
+            paddle_error: None,
+            total_pages: 40,
+        }
+    }
+}
+
+impl OcrSampleFixtureExecutor {
+    fn manifests(&self) -> Vec<serde_json::Value> {
+        self.manifests.lock().unwrap().clone()
+    }
+
+    fn engine_entry(&self, engine: &str, markdown: &str, budget: usize) -> serde_json::Value {
+        if engine == OCR_SAMPLE_ENGINE_PADDLEOCR {
+            if let Some(error) = &self.paddle_error {
+                return serde_json::json!({
+                    "engine": engine,
+                    "status": "failed",
+                    "markdownExcerpt": "",
+                    "characterCount": 0,
+                    "elapsedMs": 12,
+                    "error": error,
+                });
+            }
+        }
+        serde_json::json!({
+            "engine": engine,
+            "status": "ok",
+            "markdownExcerpt": markdown.chars().take(budget).collect::<String>(),
+            "characterCount": markdown.chars().count(),
+            "elapsedMs": 34,
+            "error": serde_json::Value::Null,
+        })
+    }
+}
+
+impl RunnerCommandExecutor for OcrSampleFixtureExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.kind, RunnerCommandKind::Process);
+        assert_eq!(command.label, OCR_SAMPLE_COMPARE_COMMAND_LABEL);
+        assert_eq!(command.program, PathBuf::from("uv"));
+        assert_eq!(command.accepted_exit_codes, vec![0]);
+        assert_eq!(command.args[0..4], ["run", "--package", "ocr", "python"]);
+        assert!(
+            command.args[4].ends_with("sample_compare.py"),
+            "unexpected script: {}",
+            command.args[4]
+        );
+        assert_eq!(command.args[5], "--manifest");
+        // `uv run --package ocr` resolves the workspace from the OCR root, and
+        // the script imports its sibling engine clients by bare name. Without
+        // this the subprocess fails only against a real install.
+        assert_eq!(
+            command.cwd.as_deref(),
+            Some(book_ocr_conversion_root().as_path())
+        );
+        // Whatever the Keychain holds is what the engines authenticate with;
+        // dropping inject_ocr_credentials would otherwise fail nothing here and
+        // report "not configured" for both engines on a configured machine.
+        let injected = command
+            .env
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<BTreeSet<_>>();
+        for (key, _) in crate::ocr_settings::resolve_credential_env() {
+            assert!(
+                injected.contains(key.as_str()),
+                "credential {key} was not injected"
+            );
+        }
+
+        let manifest_path = PathBuf::from(&command.args[6]);
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["schema"], OCR_SAMPLE_COMPARE_SCHEMA);
+        assert_eq!(
+            manifest["characterBudget"],
+            serde_json::json!(OCR_SAMPLE_CHARACTER_BUDGET)
+        );
+        assert_eq!(
+            manifest["engines"],
+            serde_json::json!([OCR_SAMPLE_ENGINE_PADDLEOCR, OCR_SAMPLE_ENGINE_MINERU])
+        );
+        // Every key run_sample_manifest in packages/ocr/sample_compare.py
+        // requires. Renaming or dropping one here fails nothing on this side
+        // until a real book is sampled, where Python rejects the manifest.
+        assert_eq!(
+            manifest
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "characterBudget",
+                "engines",
+                "projectRoot",
+                "reportPath",
+                "samplePages",
+                "schema",
+                "sourcePdfPath",
+                "workDir",
+            ])
+        );
+        // Python rejects a bool for these, and serde_json would happily make
+        // one out of a mistyped Rust field.
+        assert!(manifest["samplePages"].is_u64());
+        assert!(manifest["characterBudget"].is_u64());
+        // Relative to projectRoot; an absolute path here would let the report
+        // escape the child's own sample directory.
+        assert!(!Path::new(manifest["reportPath"].as_str().unwrap()).is_absolute());
+        assert!(!Path::new(manifest["workDir"].as_str().unwrap()).is_absolute());
+        self.manifests.lock().unwrap().push(manifest.clone());
+
+        let project_root = PathBuf::from(manifest["projectRoot"].as_str().unwrap());
+        let sample_pages = manifest["samplePages"].as_u64().unwrap() as u32;
+        let budget = manifest["characterBudget"].as_u64().unwrap() as usize;
+        let sampled: Vec<u32> = (1..=sample_pages)
+            .map(|index| index * (self.total_pages / (sample_pages + 1)))
+            .collect();
+        let report = serde_json::json!({
+            "schema": OCR_SAMPLE_COMPARE_REPORT_SCHEMA,
+            "totalPages": self.total_pages,
+            "sampledPages": sampled,
+            "characterBudget": budget,
+            "engines": [
+                self.engine_entry(OCR_SAMPLE_ENGINE_PADDLEOCR, &self.paddle_markdown, budget),
+                self.engine_entry(OCR_SAMPLE_ENGINE_MINERU, &self.mineru_markdown, budget),
+            ],
+        });
+        let report_path = project_root.join(manifest["reportPath"].as_str().unwrap());
+        fs::create_dir_all(report_path.parent().unwrap()).unwrap();
+        fs::write(
+            &report_path,
+            serde_json::to_string_pretty(&report).unwrap() + "\n",
+        )
+        .unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["OCR sample fixture completed".into()],
+        })
+    }
+}
+
+fn ocr_sample_ready_job(root: &Path, store: &MemoryStateStore) -> (String, String, PathBuf) {
+    fs::create_dir_all(root).unwrap();
+    let source_pdf = root.join("scanned.pdf");
+    fs::write(&source_pdf, "%PDF fixture").unwrap();
+    let job = queue_job(
+        store,
+        fake_direct_zotero_source(),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let child_id = job.children[0].id.clone();
+    let mut state = store.load().unwrap();
+    let stored = state.jobs.iter_mut().find(|it| it.id == job.id).unwrap();
+    stored.children[0].source.path = Some(display_path(&source_pdf));
+    store.save(&state).unwrap();
+    (job.id, child_id, source_pdf)
+}
+
+#[test]
+fn ocr_sample_registers_a_report_both_engines_answered() {
+    let root = temp_root("ocr-sample-compare");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+    let executor = OcrSampleFixtureExecutor::default();
+
+    let job = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &executor,
+    )
+    .unwrap();
+
+    let manifests = executor.manifests();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0]["samplePages"], OCR_SAMPLE_PAGE_COUNT);
+    assert!(manifests[0]["sourcePdfPath"]
+        .as_str()
+        .unwrap()
+        .ends_with("scanned.pdf"));
+
+    let artifact = job.children[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "ocr_sample_report")
+        .expect("the sample report should be registered");
+    assert!(Path::new(&artifact.path).is_file());
+    assert_eq!(
+        artifact.sha256.as_deref(),
+        Some(sha256_file(Path::new(&artifact.path)).unwrap().as_str())
+    );
+
+    let report =
+        read_ocr_sample_report(&job, &child_id, &ocr_sample_dir(&store, &job_id, &child_id))
+            .unwrap();
+    assert_eq!(report.schema, OCR_SAMPLE_COMPARE_REPORT_SCHEMA);
+    assert_eq!(report.sampled_pages.len(), OCR_SAMPLE_PAGE_COUNT as usize);
+    assert_eq!(
+        report
+            .engines
+            .iter()
+            .map(|engine| engine.engine.as_str())
+            .collect::<Vec<_>>(),
+        vec![OCR_SAMPLE_ENGINE_PADDLEOCR, OCR_SAMPLE_ENGINE_MINERU]
+    );
+    assert!(report.engines.iter().all(|engine| engine.status == "ok"));
+    assert!(report.engines[0].markdown_excerpt.contains("Paddle"));
+    assert!(report.engines[1].markdown_excerpt.contains("MinerU"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+// A sample the user cannot compare is worse than none: it costs the same API
+// calls and leaves the route decision exactly where it was.
+#[test]
+fn ocr_sample_never_reports_a_cover_or_endpoint_page() {
+    let root = temp_root("ocr-sample-endpoints");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+
+    let job = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &OcrSampleFixtureExecutor::default(),
+    )
+    .unwrap();
+    let report =
+        read_ocr_sample_report(&job, &child_id, &ocr_sample_dir(&store, &job_id, &child_id))
+            .unwrap();
+    for page in &report.sampled_pages {
+        assert!(
+            *page >= 2 && *page < report.total_pages,
+            "sampled an endpoint page: {page} of {}",
+            report.total_pages
+        );
+    }
+
+    // And the validator refuses one that did.
+    let mut cover = report.clone();
+    cover.sampled_pages = vec![1, 20, 30];
+    assert!(validate_ocr_sample_report(&cover, OCR_SAMPLE_PAGE_COUNT)
+        .unwrap_err()
+        .contains("cover"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+// One engine down should not throw away the other's answer -- the sampled
+// pages were already paid for, and half a comparison still decides the route.
+#[test]
+fn ocr_sample_keeps_the_surviving_engine_when_the_other_fails() {
+    let root = temp_root("ocr-sample-one-engine");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+    let executor = OcrSampleFixtureExecutor {
+        paddle_error: Some("BAIDU_PADDLEOCR_TOKEN is not configured".into()),
+        ..OcrSampleFixtureExecutor::default()
+    };
+
+    let job = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &executor,
+    )
+    .unwrap();
+    let report =
+        read_ocr_sample_report(&job, &child_id, &ocr_sample_dir(&store, &job_id, &child_id))
+            .unwrap();
+    assert_eq!(report.engines[0].status, "failed");
+    assert!(report.engines[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("BAIDU_PADDLEOCR_TOKEN"));
+    assert_eq!(report.engines[1].status, "ok");
+
+    // Both failing is a real failure, not an empty panel.
+    let mut both_failed = report.clone();
+    both_failed.engines[1].status = "failed".into();
+    both_failed.engines[1].error = Some("MinerU quota exhausted".into());
+    let err = validate_ocr_sample_report(&both_failed, OCR_SAMPLE_PAGE_COUNT).unwrap_err();
+    assert!(err.contains("Both OCR engines failed"), "{err}");
+    assert!(err.contains("MinerU quota exhausted"), "{err}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_replaces_the_previous_report_and_re_reads_it() {
+    let root = temp_root("ocr-sample-resample");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+
+    let first = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &OcrSampleFixtureExecutor::default(),
+    )
+    .unwrap();
+    let first_report = read_ocr_sample_report(
+        &first,
+        &child_id,
+        &ocr_sample_dir(&store, &job_id, &child_id),
+    )
+    .unwrap();
+
+    let executor = OcrSampleFixtureExecutor {
+        mineru_markdown: "# Second pass\n\nRe-sampled body.".into(),
+        ..OcrSampleFixtureExecutor::default()
+    };
+    let second =
+        run_ocr_sample_with_executor(&store, &job_id, Some(&child_id), 5, &executor).unwrap();
+
+    assert_eq!(executor.manifests()[0]["samplePages"], 5);
+    assert_eq!(
+        second.children[0]
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "ocr_sample_report")
+            .count(),
+        1,
+        "re-sampling should replace the report, not accumulate reports"
+    );
+    let second_report = read_ocr_sample_report(
+        &second,
+        &child_id,
+        &ocr_sample_dir(&store, &job_id, &child_id),
+    )
+    .unwrap();
+    assert_ne!(first_report, second_report);
+    assert_eq!(second_report.sampled_pages.len(), 5);
+    assert!(second_report.engines[1]
+        .markdown_excerpt
+        .contains("Second pass"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_refuses_once_conversion_is_under_way() {
+    let root = temp_root("ocr-sample-too-late");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+
+    for status in [STATUS_RUNNING, STATUS_COMPLETED] {
+        let mut state = store.load().unwrap();
+        let stored = state.jobs.iter_mut().find(|it| it.id == job_id).unwrap();
+        stage_mut(&mut stored.children[0], "extract")
+            .unwrap()
+            .status = status.into();
+        store.save(&state).unwrap();
+
+        let err = run_ocr_sample_with_executor(
+            &store,
+            &job_id,
+            Some(&child_id),
+            OCR_SAMPLE_PAGE_COUNT,
+            &OcrSampleFixtureExecutor::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("before conversion starts"), "{status}: {err}");
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_rejects_unusable_inputs() {
+    let root = temp_root("ocr-sample-inputs");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, source_pdf) = ocr_sample_ready_job(&root, &store);
+    let executor = OcrSampleFixtureExecutor::default();
+
+    for pages in [0, OCR_SAMPLE_MAX_PAGES + 1] {
+        let err = run_ocr_sample_with_executor(&store, &job_id, Some(&child_id), pages, &executor)
+            .unwrap_err();
+        assert!(err.contains("between 1 and"), "{pages}: {err}");
+    }
+
+    fs::remove_file(&source_pdf).unwrap();
+    let err = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &executor,
+    )
+    .unwrap_err();
+    assert!(err.contains("source PDF"), "{err}");
+
+    let mut state = store.load().unwrap();
+    let stored = state.jobs.iter_mut().find(|it| it.id == job_id).unwrap();
+    stored.children[0].source.path = None;
+    stored.children[0].route.clear();
+    store.save(&state).unwrap();
+    let err = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &executor,
+    )
+    .unwrap_err();
+    assert!(err.contains("no local PDF to sample"), "{err}");
+
+    assert!(
+        executor.manifests().is_empty(),
+        "a rejected sample must not spend an API call"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_report_is_refused_when_it_changed_after_registration() {
+    let root = temp_root("ocr-sample-tamper");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+    let job = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &OcrSampleFixtureExecutor::default(),
+    )
+    .unwrap();
+    let path = job.children[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "ocr_sample_report")
+        .unwrap()
+        .path
+        .clone();
+
+    fs::write(&path, "{\"schema\":\"ocr-sample-compare-report-v1\"}\n").unwrap();
+    let err = read_ocr_sample_report(&job, &child_id, &ocr_sample_dir(&store, &job_id, &child_id))
+        .unwrap_err();
+    assert!(err.contains("changed after registration"), "{err}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_report_excerpts_stay_out_of_the_log() {
+    let root = temp_root("ocr-sample-privacy");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+    let executor = OcrSampleFixtureExecutor {
+        paddle_markdown: "Confidential page body from the scan.".into(),
+        ..OcrSampleFixtureExecutor::default()
+    };
+
+    let job = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &executor,
+    )
+    .unwrap();
+
+    assert_eq!(artifact_privacy("ocr_sample_report"), "private_text");
+    assert_eq!(artifact_default_stage("ocr_sample_report"), "extract");
+    for line in &job.log_summary {
+        assert!(
+            !line.contains("Confidential page body"),
+            "the sampled text leaked into the log: {line}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_report_rejects_a_drifted_shape() {
+    let base = BookPipelineOcrSampleReport {
+        schema: OCR_SAMPLE_COMPARE_REPORT_SCHEMA.into(),
+        total_pages: 40,
+        sampled_pages: vec![10, 20, 30],
+        character_budget: OCR_SAMPLE_CHARACTER_BUDGET,
+        engines: vec![
+            BookPipelineOcrSampleEngine {
+                engine: OCR_SAMPLE_ENGINE_PADDLEOCR.into(),
+                status: "ok".into(),
+                markdown_excerpt: "paddle".into(),
+                character_count: 6,
+                elapsed_ms: 1,
+                error: None,
+            },
+            BookPipelineOcrSampleEngine {
+                engine: OCR_SAMPLE_ENGINE_MINERU.into(),
+                status: "ok".into(),
+                markdown_excerpt: "mineru".into(),
+                character_count: 6,
+                elapsed_ms: 1,
+                error: None,
+            },
+        ],
+    };
+    assert!(validate_ocr_sample_report(&base, OCR_SAMPLE_PAGE_COUNT).is_ok());
+
+    let mut wrong_schema = base.clone();
+    wrong_schema.schema = "ocr-sample-compare-report-v0".into();
+    assert!(validate_ocr_sample_report(&wrong_schema, OCR_SAMPLE_PAGE_COUNT).is_err());
+
+    let mut unordered = base.clone();
+    unordered.sampled_pages = vec![20, 10, 30];
+    assert!(validate_ocr_sample_report(&unordered, OCR_SAMPLE_PAGE_COUNT).is_err());
+
+    let mut too_many = base.clone();
+    too_many.sampled_pages = vec![10, 15, 20, 25];
+    assert!(validate_ocr_sample_report(&too_many, OCR_SAMPLE_PAGE_COUNT).is_err());
+
+    let mut one_engine = base.clone();
+    one_engine.engines.truncate(1);
+    assert!(
+        validate_ocr_sample_report(&one_engine, OCR_SAMPLE_PAGE_COUNT)
+            .unwrap_err()
+            .contains("both engines")
+    );
+
+    let mut swapped = base.clone();
+    swapped.engines.reverse();
+    assert!(validate_ocr_sample_report(&swapped, OCR_SAMPLE_PAGE_COUNT).is_err());
+
+    let mut silent_failure = base.clone();
+    silent_failure.engines[0].status = "failed".into();
+    assert!(
+        validate_ocr_sample_report(&silent_failure, OCR_SAMPLE_PAGE_COUNT)
+            .unwrap_err()
+            .contains("no reason")
+    );
+
+    let mut over_budget = base.clone();
+    over_budget.character_budget = 3;
+    assert!(
+        validate_ocr_sample_report(&over_budget, OCR_SAMPLE_PAGE_COUNT)
+            .unwrap_err()
+            .contains("excerpt budget")
+    );
+
+    // deny_unknown_fields keeps a future engine field from being read as valid.
+    let drifted = serde_json::to_value(&base)
+        .map(|mut value| {
+            value["engines"][0]["confidence"] = serde_json::json!(0.9);
+            value
+        })
+        .unwrap();
+    assert!(serde_json::from_value::<BookPipelineOcrSampleReport>(drifted).is_err());
+}
+
+/// Captured verbatim from a real run of `packages/ocr/sample_compare.py` with
+/// stubbed engines. The fixture executor above writes a report of its own
+/// shape, so without a sample of the real writer nothing here would notice the
+/// two drifting apart.
+///
+/// What this catches is Rust-side drift against a known-good payload: a renamed
+/// or newly required field, or a narrowed type. It cannot catch Python-side
+/// drift -- it is a frozen literal, and nothing regenerates it. That direction
+/// is covered by `ReportContractTests` in
+/// packages/ocr/tests/test_sample_compare.py, which asserts the field set and
+/// the value types of both the success and the failure branch against this same
+/// struct.
+// r##"..."## rather than r#"..."#: the captured Markdown starts with a heading,
+// so the payload contains the sequence that would close the shorter delimiter.
+const REAL_OCR_SAMPLE_REPORT: &str = r##"{
+  "schema": "ocr-sample-compare-report-v1",
+  "totalPages": 40,
+  "sampledPages": [11, 21, 30],
+  "characterBudget": 4000,
+  "engines": [
+    {
+      "engine": "paddleocr",
+      "status": "ok",
+      "markdownExcerpt": "# Paddle heading\n\nPaddle body.",
+      "characterCount": 30,
+      "elapsedMs": 0,
+      "error": null
+    },
+    {
+      "engine": "mineru",
+      "status": "failed",
+      "markdownExcerpt": "",
+      "characterCount": 0,
+      "elapsedMs": 0,
+      "error": "RuntimeError: MINERU_API_TOKEN is not configured"
+    }
+  ]
+}"##;
+
+#[test]
+fn a_real_python_sample_report_deserializes_and_validates() {
+    let report: BookPipelineOcrSampleReport =
+        serde_json::from_str(REAL_OCR_SAMPLE_REPORT).expect("the Python writer's own output");
+    assert_eq!(report.schema, OCR_SAMPLE_COMPARE_REPORT_SCHEMA);
+    assert_eq!(report.sampled_pages, vec![11, 21, 30]);
+    assert_eq!(report.engines[0].engine, OCR_SAMPLE_ENGINE_PADDLEOCR);
+    assert_eq!(report.engines[1].engine, OCR_SAMPLE_ENGINE_MINERU);
+    validate_ocr_sample_report(&report, OCR_SAMPLE_PAGE_COUNT).unwrap();
+}
+
+/// A failing re-sample used to overwrite the report the previous run had
+/// registered, so one bad retry destroyed the last working comparison and left
+/// the artifact record pointing at content whose digest no longer matched.
+#[test]
+fn a_failed_resample_leaves_the_previous_comparison_readable() {
+    let root = temp_root("ocr-sample-failed-retry");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+    let sample_dir = ocr_sample_dir(&store, &job_id, &child_id);
+
+    let good = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &OcrSampleFixtureExecutor::default(),
+    )
+    .unwrap();
+    let good_report = read_ocr_sample_report(&good, &child_id, &sample_dir).unwrap();
+
+    struct FailingExecutor;
+    impl RunnerCommandExecutor for FailingExecutor {
+        fn execute(&self, _command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+            Err("MinerU quota exhausted".into())
+        }
+    }
+    let err = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &FailingExecutor,
+    )
+    .unwrap_err();
+    assert!(err.contains("quota exhausted"), "{err}");
+
+    let after = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    assert_eq!(
+        read_ocr_sample_report(&after, &child_id, &sample_dir).unwrap(),
+        good_report,
+        "a failed retry must not invalidate the comparison already on screen"
+    );
+
+    // No manifest is left behind for either the successful or the failed run.
+    let leftovers: Vec<_> = fs::read_dir(&sample_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("manifest-"))
+        .collect();
+    assert!(leftovers.is_empty(), "stale manifests: {leftovers:?}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_successful_resample_does_not_accumulate_report_files() {
+    let root = temp_root("ocr-sample-no-accumulate");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+    let sample_dir = ocr_sample_dir(&store, &job_id, &child_id);
+
+    for _ in 0..3 {
+        run_ocr_sample_with_executor(
+            &store,
+            &job_id,
+            Some(&child_id),
+            OCR_SAMPLE_PAGE_COUNT,
+            &OcrSampleFixtureExecutor::default(),
+        )
+        .unwrap();
+    }
+
+    let reports: Vec<_> = fs::read_dir(&sample_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("report-"))
+        .collect();
+    assert_eq!(
+        reports.len(),
+        1,
+        "superseded reports were kept: {reports:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The report path comes out of the state file, so a tampered artifact record
+/// must not be able to make the reader hand the UI any file it can read.
+#[test]
+fn ocr_sample_read_refuses_a_report_outside_the_sample_directory() {
+    let root = temp_root("ocr-sample-escape");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+    let sample_dir = ocr_sample_dir(&store, &job_id, &child_id);
+    let job = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &OcrSampleFixtureExecutor::default(),
+    )
+    .unwrap();
+
+    let elsewhere = root.join("elsewhere.json");
+    let smuggled = fs::read_to_string(
+        job.children[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "ocr_sample_report")
+            .unwrap()
+            .path
+            .clone(),
+    )
+    .unwrap();
+    fs::write(&elsewhere, &smuggled).unwrap();
+
+    let mut tampered = job.clone();
+    let artifact = tampered.children[0]
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.kind == "ocr_sample_report")
+        .unwrap();
+    artifact.path = display_path(&elsewhere);
+    // Same bytes, so the digest still matches: only the containment check can
+    // catch this one.
+    let err = read_ocr_sample_report(&tampered, &child_id, &sample_dir).unwrap_err();
+    assert!(err.contains("outside the job's sample directory"), "{err}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The shape zotero_source_ref actually produces. Before this, the fingerprint
+/// rode along as part of the file extension, so `is_pdf_path` was false for
+/// every real Zotero attachment and the feature refused its main input.
+#[test]
+fn ocr_sample_resolves_a_zotero_source_ref_with_its_fingerprint() {
+    let root = temp_root("ocr-sample-zotero-ref");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, source_pdf) = ocr_sample_ready_job(&root, &store);
+
+    let mut state = store.load().unwrap();
+    let stored = state.jobs.iter_mut().find(|it| it.id == job_id).unwrap();
+    stored.children[0].source.path = Some(zotero_source_ref(
+        "ABCD1234",
+        Some("d41d8cd98f00b204e9800998ecf8427e"),
+        Some(&display_path(&source_pdf)),
+    ));
+    store.save(&state).unwrap();
+
+    let executor = OcrSampleFixtureExecutor::default();
+    run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &executor,
+    )
+    .unwrap();
+
+    // The manifest must name the real file, fingerprint stripped.
+    assert_eq!(
+        executor.manifests()[0]["sourcePdfPath"],
+        serde_json::json!(display_path(&source_pdf))
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_names_an_unsynced_zotero_attachment_as_such() {
+    let root = temp_root("ocr-sample-unsynced");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+
+    let mut state = store.load().unwrap();
+    let stored = state.jobs.iter_mut().find(|it| it.id == job_id).unwrap();
+    // What zotero_source_ref returns when Zotero reported no output path.
+    stored.children[0].source.path = Some(zotero_source_ref("ABCD1234", Some("d41d8c"), None));
+    stored.children[0].route.clear();
+    store.save(&state).unwrap();
+
+    let err = run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &OcrSampleFixtureExecutor::default(),
+    )
+    .unwrap_err();
+    assert!(err.contains("not stored locally"), "{err}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ocr_sample_local_path_strips_only_the_fingerprint_suffix() {
+    assert_eq!(
+        ocr_sample_local_path("/books/a.pdf#source_md5=abc"),
+        Some(PathBuf::from("/books/a.pdf"))
+    );
+    // `#` is legal in a filename, so only the exact producer suffix comes off.
+    assert_eq!(
+        ocr_sample_local_path("/books/draft#2.pdf"),
+        Some(PathBuf::from("/books/draft#2.pdf"))
+    );
+    assert_eq!(
+        ocr_sample_local_path("/books/draft#2.pdf#source_md5=abc"),
+        Some(PathBuf::from("/books/draft#2.pdf"))
+    );
+    assert_eq!(ocr_sample_local_path("zotero://attachment/KEY"), None);
+    assert_eq!(
+        ocr_sample_local_path("zotero://attachment/KEY#source_md5=abc"),
+        None
+    );
+    assert_eq!(ocr_sample_local_path(""), None);
+}
+
+/// The worker exits 0 but the report is unusable. These are the likeliest real
+/// failures -- a manifest whose reportPath the Python side resolved elsewhere,
+/// or an engine response that did not survive validation -- and each has to
+/// surface as its own message rather than as a panic or a silent success.
+#[test]
+fn ocr_sample_reports_a_worker_that_produced_no_usable_report() {
+    /// What the stand-in worker does with the report path the manifest names.
+    type ReportWriter = Box<dyn Fn(&Path) + Send + Sync>;
+
+    struct WritingExecutor(ReportWriter);
+    impl RunnerCommandExecutor for WritingExecutor {
+        fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+            let manifest: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&command.args[6]).unwrap()).unwrap();
+            let report_path = PathBuf::from(manifest["projectRoot"].as_str().unwrap())
+                .join(manifest["reportPath"].as_str().unwrap());
+            (self.0)(&report_path);
+            Ok(RunnerCommandResult::default())
+        }
+    }
+
+    let cases: Vec<(&str, ReportWriter)> = vec![
+        ("was not written", Box::new(|_: &Path| {})),
+        (
+            "invalid report JSON",
+            Box::new(|path: &Path| fs::write(path, "not json").unwrap()),
+        ),
+        (
+            "unsupported schema",
+            Box::new(|path: &Path| {
+                let report = serde_json::json!({
+                    "schema": "ocr-sample-compare-report-v0",
+                            "totalPages": 40,
+                    "sampledPages": [11, 21, 30],
+                    "characterBudget": OCR_SAMPLE_CHARACTER_BUDGET,
+                    "engines": [],
+                });
+                fs::write(path, serde_json::to_string(&report).unwrap()).unwrap();
+            }),
+        ),
+    ];
+
+    for (expected, writer) in cases {
+        let root = temp_root(&format!("ocr-sample-bad-{}", expected.replace(' ', "-")));
+        let store = MemoryStateStore::new(&root);
+        let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+        let err = run_ocr_sample_with_executor(
+            &store,
+            &job_id,
+            Some(&child_id),
+            OCR_SAMPLE_PAGE_COUNT,
+            &WritingExecutor(writer),
+        )
+        .unwrap_err();
+        assert!(err.contains(expected), "expected {expected:?}, got {err}");
+        // Nothing half-registered: a bad report must not become an artifact.
+        let after = store
+            .load()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        assert!(!after.children[0]
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "ocr_sample_report"));
+        // Nor left on disk: names are per-run, so an unregisterable report
+        // would otherwise accumulate one file per failed attempt.
+        let sample_dir = ocr_sample_dir(&store, &job_id, &child_id);
+        let leftovers: Vec<_> = fs::read_dir(&sample_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("report-") || name.starts_with("manifest-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "{expected}: left behind {leftovers:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// The conversion stage scans the whole job output root recursively, and the
+/// engine comparison lands inside it. Left visible, MinerU's sampled `part.md`
+/// registers as the book's `markdown` artifact -- and for a route whose
+/// converter emits no Markdown at all it becomes the *only* one, so the
+/// translation project is built from three sampled pages instead of the book,
+/// with a valid digest and no error anywhere.
+#[test]
+fn a_conversion_scan_ignores_the_ocr_sample_directory() {
+    let root = temp_root("ocr-sample-scan-isolation");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+    run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &OcrSampleFixtureExecutor::default(),
+    )
+    .unwrap();
+
+    let job_output = store.job_output_dir(&job_id);
+    // The real conversion output, so the scan has something legitimate to find.
+    let converted = job_output.join("book.md");
+    fs::write(&converted, "# The actual book\n").unwrap();
+    // What MinerU leaves behind mid-sample, if the scratch tree ever survives.
+    let strays = ocr_sample_dir(&store, &job_id, &child_id)
+        .join("work")
+        .join("mineru");
+    fs::create_dir_all(&strays).unwrap();
+    fs::write(strays.join("part.md"), "three sampled pages\n").unwrap();
+
+    let scanned = scan_artifacts(&job_output).unwrap();
+    let markdown: Vec<_> = scanned
+        .iter()
+        .filter(|artifact| artifact.kind == "markdown")
+        .map(|artifact| artifact.path.clone())
+        .collect();
+    assert_eq!(
+        markdown,
+        vec![display_path(&converted)],
+        "the sample tree leaked into the conversion's artifacts"
+    );
+    // The report itself is registered by the sample command, not by this scan.
+    // Compared against the real sample directory rather than by substring: the
+    // temp root's own name contains "ocr-sample" and would match either way.
+    let sample_dir = ocr_sample_dir(&store, &job_id, &child_id);
+    assert!(
+        !scanned
+            .iter()
+            .any(|artifact| Path::new(&artifact.path).starts_with(&sample_dir)),
+        "sample files were scanned as conversion output: {:?}",
+        scanned
+            .iter()
+            .map(|artifact| artifact.path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let _ = fs::remove_dir_all(root);
 }
