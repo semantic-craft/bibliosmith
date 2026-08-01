@@ -1,14 +1,71 @@
-/* Settings page — System Settings style grouped inset lists. Prefix: st-. */
+/* Settings — an overlay above the shelf, grouped inset lists. Prefix: st-.
+ * The only surface in the app besides the drawer that is allowed a shadow. */
 
-.st-page {
+.st-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.st-scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+}
+
+.st-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 100%);
+  max-height: 100%;
+  min-height: 0;
+  border-radius: var(--radius-lg);
+  background: var(--canvas);
+  box-shadow: var(--shadow-overlay);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .st-panel { animation: st-panel-in 0.18s ease-out; }
+  @keyframes st-panel-in {
+    from { opacity: 0; transform: translateY(8px); }
+  }
+}
+
+.st-panel-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px 12px;
+}
+
+.st-panel-body {
   display: grid;
   align-content: start;
   gap: 18px;
-  max-width: 760px;
-  width: 100%;
-  margin: 0 auto;
-  padding: 2px 2px 24px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 20px 20px;
 }
+
+.st-close {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+}
+
+.st-close:hover { background: var(--sub); color: var(--ink); }
 
 .st-title {
   margin: 0;
@@ -183,13 +240,6 @@
   background: var(--sub);
 }
 
-.st-title-line {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
 .st-select {
   flex: 0 0 auto;
   height: 28px;
@@ -256,40 +306,6 @@
   overflow: hidden;
   max-width: min(420px, 100%);
   text-overflow: ellipsis;
-}
-
-.st-code-lines {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.st-code-lines code {
-  overflow: hidden;
-  color: var(--muted);
-  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-  font-size: var(--fs-callout);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.st-progress {
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--sub);
-}
-
-.st-progress-detail {
-  color: var(--muted);
-  font-size: var(--fs-callout);
-}
-
-.st-progress-actions {
-  display: flex;
-  gap: 8px;
 }
 
 /* Models settings panel */

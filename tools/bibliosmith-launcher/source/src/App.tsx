@@ -50,7 +50,7 @@ import {
   ProxyTestResult,
 } from "./types";
 import { copies, detectLocale, type LanguageSetting, type Locale } from "./i18n";
-import { SettingsPage } from "./pages/settings";
+import { SettingsOverlay } from "./pages/settings";
 import { pipelineJobOutcomeSucceeded, translationHandoffReady } from "./lib/pipeline-status";
 import { FloatingFeedback, Titlebar, type FloatingToast, type ToastTone } from "./shell";
 import launcherVersionManifest from "../launcher-version.json";
@@ -152,10 +152,10 @@ export default function App() {
       })
       .catch(() => undefined);
   }, []);
-  // Seed the wizard's OCR-credential chips from what is actually configured
-  // (Keychain or repo-root .env) instead of hard-coded defaults. The chips
-  // stay clickable as manual overrides for the route preview.
-  useEffect(() => {
+  // What is actually configured (Keychain or repo-root .env) drives the input
+  // island's OCR chips and, through the preview config, the routes the backend
+  // hands back.
+  const refreshOcrCredentialStatus = useCallback(() => {
     void getOcrCredentialsStatus()
       .then((status) => {
         setPipelineDraft((draft) => ({
@@ -166,6 +166,13 @@ export default function App() {
       })
       .catch(() => undefined);
   }, []);
+  useEffect(() => refreshOcrCredentialStatus(), [refreshOcrCredentialStatus]);
+  // Settings is the only place OCR keys can be entered, so closing it is the
+  // moment the chips (and the preflight they feed) can be stale.
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    refreshOcrCredentialStatus();
+  }, [refreshOcrCredentialStatus]);
   const [pipelinePreview, setPipelinePreview] = useState<BookPipelineRouteItem[]>([]);
   const [pipelineRouteOverrides, setPipelineRouteOverrides] = useState<Record<string, RouteOverride>>({});
   const [pipelineZoteroSources, setPipelineZoteroSources] = useState<BookPipelineSource[]>([]);
@@ -856,14 +863,14 @@ export default function App() {
         version={LAUNCHER_VERSION}
         settingsLabel={copy.settingsTitle}
         settingsActive={settingsOpen}
-        onToggleSettings={() => setSettingsOpen((value) => !value)}
+        onToggleSettings={() => (settingsOpen ? closeSettings() : setSettingsOpen(true))}
       />
 
       <main className="app-shell">
-        <section className="workspace">
+        <section className={settingsOpen ? "workspace settings-open" : "workspace"}>
           <FloatingFeedback toast={floatingToast} />
 
-          {!settingsOpen && (
+          {(
             <PipelineWorkbench
               copy={bookPipelineCopy}
               state={pipelineState}
@@ -910,7 +917,7 @@ export default function App() {
           )}
 
           {settingsOpen && (
-            <SettingsPage
+            <SettingsOverlay
               copy={copy}
               locale={locale}
               languageSetting={languageSetting}
@@ -923,6 +930,7 @@ export default function App() {
               onProxyChange={updateProxySettingsDraft}
               onProxyTest={() => void doTestProxySettings()}
               onProxyAutoDetect={() => void doAutoDetectProxySettings(true, false)}
+              onClose={closeSettings}
             />
           )}
         </section>

@@ -261,9 +261,16 @@ select:focus-visible,
   height: 100%;
   min-height: 0;
   min-width: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 0 var(--gutter) var(--gutter);
   background: var(--canvas);
+}
+
+/* Everything under the settings overlay recedes, drawer included: the overlay
+ * is the foreground while it is open. */
+.workspace.settings-open > .pl-island,
+.workspace.settings-open > .pl-hero {
+  opacity: var(--island-inactive);
 }
 
 /* ---------- Floating feedback ---------- */

@@ -1,1 +1,1 @@
-export { SettingsPage } from "./SettingsPage";
+export { SettingsOverlay } from "./SettingsOverlay";
