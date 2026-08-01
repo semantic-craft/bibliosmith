@@ -7252,9 +7252,12 @@ fn layout_pdf_repo_root() -> Result<PathBuf, String> {
 /// `.pdf`. Every real Zotero attachment arrives this way; only hand-built
 /// fixtures come through clean, which is exactly why this is easy to get wrong.
 fn layout_pdf_source_path(route: &BookPipelineRouteItem) -> Result<PathBuf, String> {
+    // Split on the exact marker from the right, never on a bare `#`: `#` is a
+    // legal filename character, and `draft#2.pdf` would otherwise be truncated
+    // to `draft`. Taking the last occurrence keeps the one this code appended.
     let raw = route
         .source_ref
-        .split_once("#source_md5=")
+        .rsplit_once("#source_md5=")
         .map(|(path, _)| path)
         .unwrap_or(&route.source_ref)
         .trim();

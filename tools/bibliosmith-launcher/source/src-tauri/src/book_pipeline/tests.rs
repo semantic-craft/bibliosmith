@@ -12648,6 +12648,32 @@ fn the_layout_command_strips_the_worker_fingerprint_from_the_source_path() {
 }
 
 #[test]
+fn a_hash_in_the_filename_survives_fingerprint_stripping() {
+    // `#` is legal in a filename. Splitting on a bare `#` -- or on the first
+    // occurrence of the marker -- would truncate `draft#2.pdf` to `draft` and
+    // report the book as missing.
+    let root = temp_root("layout-hash-name");
+    let repo_root = layout_package_root(&root);
+    let source_pdf = root.join("draft#2.pdf");
+    fs::write(&source_pdf, b"%PDF-1.7\n").unwrap();
+    let source_ref = format!(
+        "{}#source_md5=0123456789abcdef0123456789abcdef",
+        display_path(&source_pdf)
+    );
+    let job = layout_job(vec![layout_route("direct_text", &source_ref)]);
+
+    let command =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap();
+
+    assert!(command
+        .args
+        .windows(2)
+        .any(|pair| pair[0] == "--input" && pair[1] == display_path(&source_pdf)));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn the_layout_track_refuses_a_scanned_book() {
     let root = temp_root("layout-scanned");
     let repo_root = layout_package_root(&root);
