@@ -1801,6 +1801,20 @@ fn fake_source(behavior: Option<&str>) -> BookPipelineSource {
     }
 }
 
+/// A valid intent, so that a queue refusal can only have come from the mode.
+fn fake_translation_intent() -> BookPipelineTranslationIntent {
+    BookPipelineTranslationIntent {
+        translation_mode: TRANSLATION_MODE_FAST.into(),
+        profile_id: "fake-provider-profile".into(),
+        config_id: "fake-provider-config".into(),
+        skill_ids: Vec::new(),
+        second_pass_enabled: false,
+        text_cleanup: false,
+        digest_mode: false,
+        output_formats: default_output_formats(),
+    }
+}
+
 fn local_pdf_source(input: &Path) -> BookPipelineSource {
     BookPipelineSource {
         kind: "local_pdf_folder".into(),
@@ -2947,6 +2961,137 @@ fn legacy_jobs_migrate_to_versioned_parent_child_stage_state() {
         .as_deref()
         .unwrap()
         .contains("interrupted"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn retired_conversion_only_mode_is_refused_at_the_queue() {
+    let root = temp_root("retired-mode-enqueue");
+    let store = BookPipelineStore::for_test(&root);
+
+    let error = queue_job_with_translation_intent(
+        &store,
+        fake_source(None),
+        MODE_CONVERSION_ONLY.into(),
+        fake_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("retired") && error.contains(MODE_CONVERT_THEN_TRANSLATE),
+        "the refusal must say the mode is retired and name the replacement, got {error}"
+    );
+    assert!(
+        store.load().unwrap().jobs.is_empty(),
+        "a refused enqueue must not leave a job behind"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unknown_mode_is_refused_instead_of_inheriting_a_truncated_pipeline() {
+    let root = temp_root("unknown-mode-enqueue");
+    let store = BookPipelineStore::for_test(&root);
+
+    let error = queue_job_with_translation_intent(
+        &store,
+        fake_source(None),
+        "convert_then_translat".into(),
+        fake_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("convert_then_translat") && error.contains(MODE_TRANSLATE_ONLY),
+        "the refusal must quote the rejected mode and list the valid ones, got {error}"
+    );
+    assert!(store.load().unwrap().jobs.is_empty());
+
+    // The retirement's point: a mode that is merely unrecognised must no longer
+    // fall through to the conversion-only shape and stop short of translation.
+    assert!(
+        should_handoff_after_run("convert_then_translat"),
+        "only the named retired mode may skip the translation handoff"
+    );
+    assert!(
+        ordered_child_stage_ids("convert_then_translat", false).contains(&"handoff"),
+        "an unrecognised mode must not be given the truncated stage list"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn stored_conversion_only_jobs_still_open_and_keep_their_three_stage_shape() {
+    let root = temp_root("retired-mode-stored-state");
+    let store = BookPipelineStore::for_test(&root);
+    fs::create_dir_all(store.state_path.parent().unwrap()).unwrap();
+    // A checkpoint written before the mode was retired. Retiring it closed the
+    // queue, not the library: this file still has to open.
+    let legacy = serde_json::json!({
+        "jobs": [{
+            "id": "stored-conversion-only",
+            "mode": MODE_CONVERSION_ONLY,
+            "source": {
+                "kind": "zotero_attachment",
+                "title": "Fabricated source",
+                "path": "zotero://attachment/FAKEPDF",
+                "selector": "FAKEPDF",
+                "runnerBehavior": null,
+                "adapterCommand": null,
+                "fakeZoteroItems": null
+            },
+            "route": [{
+                "id": "FAKEPDF",
+                "title": "Fabricated source",
+                "sourceKind": "zotero_attachment",
+                "sourceRef": "zotero://attachment/FAKEPDF",
+                "routeKind": "direct_text",
+                "canRun": true,
+                "blockedReason": null,
+                "summary": "Fabricated route"
+            }],
+            "status": STATUS_ROUTED,
+            "currentStep": "Legacy conversion-only state",
+            "lastError": null,
+            "logSummary": ["preserved log"],
+            "artifacts": [],
+            "collectionItems": [],
+            "outputDir": "/tmp/fabricated-output",
+            "attempts": 1,
+            "createdAt": "2026-07-10T09:00:00+08:00",
+            "updatedAt": "2026-07-10T09:05:00+08:00"
+        }]
+    });
+    fs::write(
+        &store.state_path,
+        serde_json::to_string_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let state = store.load().unwrap();
+
+    let stored = &state.jobs[0];
+    assert_eq!(
+        stored.mode, MODE_CONVERSION_ONLY,
+        "the stored mode must be preserved, not rewritten to a live one"
+    );
+    assert_eq!(
+        stored.children[0]
+            .stages
+            .iter()
+            .map(|stage| stage.stage_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["route", "extract", "index"],
+        "migration must not graft translation stages onto a finished conversion-only job"
+    );
+    assert!(!should_handoff_after_run(&stored.mode));
+
+    // Reload proves the migrated file it just wrote is itself still loadable.
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded.jobs[0].mode, MODE_CONVERSION_ONLY);
+    assert_eq!(reloaded.jobs[0].children[0].stages.len(), 3);
     let _ = fs::remove_dir_all(root);
 }
 
