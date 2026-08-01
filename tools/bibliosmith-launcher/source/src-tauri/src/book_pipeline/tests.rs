@@ -641,6 +641,44 @@ impl RunnerCommandExecutor for LocalPdfFixtureExecutor {
     }
 }
 
+// Shaped like the real wrapper output, page-break div included, so the handoff
+// is checked against what pdf_to_html_paddleocr.py actually assembles.
+const PADDLE_WRAPPER_MARKDOWN: &str =
+    "# Sample Book\n\n\n<div class=\"page-break\">— Page 1 —</div>\n\nChapter One\n";
+
+/// Mirrors the on-disk layout of `packages/ocr/scripts/pdf_to_html_paddleocr.py`.
+struct PaddleWrapperLayoutExecutor;
+
+impl RunnerCommandExecutor for PaddleWrapperLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.kind, RunnerCommandKind::Process);
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        let assets_dir = book_dir.join("Sample_Book_assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(book_dir.join("Sample_Book.md"), PADDLE_WRAPPER_MARKDOWN).unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        fs::write(
+            book_dir.join("_state.json"),
+            "{\"markdown_path\":\"Sample_Book.md\"}\n",
+        )
+        .unwrap();
+        fs::write(assets_dir.join("img_1.png"), "png bytes").unwrap();
+        let chunks = command
+            .output_dir
+            .join(".temp")
+            .join("Sample_Book")
+            .join("chunks");
+        fs::create_dir_all(&chunks).unwrap();
+        fs::write(chunks.join("pages-0001-0002.jsonl"), "{\"page\":1}\n").unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Paddle wrapper completed".into()],
+        })
+    }
+}
+
 struct LocalPdfFailingExecutor;
 
 impl RunnerCommandExecutor for LocalPdfFailingExecutor {
@@ -1801,6 +1839,20 @@ fn fake_source(behavior: Option<&str>) -> BookPipelineSource {
     }
 }
 
+/// A valid intent, so that a queue refusal can only have come from the mode.
+fn fake_translation_intent() -> BookPipelineTranslationIntent {
+    BookPipelineTranslationIntent {
+        translation_mode: TRANSLATION_MODE_FAST.into(),
+        profile_id: "fake-provider-profile".into(),
+        config_id: "fake-provider-config".into(),
+        skill_ids: Vec::new(),
+        second_pass_enabled: false,
+        text_cleanup: false,
+        digest_mode: false,
+        output_formats: default_output_formats(),
+    }
+}
+
 fn local_pdf_source(input: &Path) -> BookPipelineSource {
     BookPipelineSource {
         kind: "local_pdf_folder".into(),
@@ -2947,6 +2999,137 @@ fn legacy_jobs_migrate_to_versioned_parent_child_stage_state() {
         .as_deref()
         .unwrap()
         .contains("interrupted"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn retired_conversion_only_mode_is_refused_at_the_queue() {
+    let root = temp_root("retired-mode-enqueue");
+    let store = BookPipelineStore::for_test(&root);
+
+    let error = queue_job_with_translation_intent(
+        &store,
+        fake_source(None),
+        MODE_CONVERSION_ONLY.into(),
+        fake_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("retired") && error.contains(MODE_CONVERT_THEN_TRANSLATE),
+        "the refusal must say the mode is retired and name the replacement, got {error}"
+    );
+    assert!(
+        store.load().unwrap().jobs.is_empty(),
+        "a refused enqueue must not leave a job behind"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unknown_mode_is_refused_instead_of_inheriting_a_truncated_pipeline() {
+    let root = temp_root("unknown-mode-enqueue");
+    let store = BookPipelineStore::for_test(&root);
+
+    let error = queue_job_with_translation_intent(
+        &store,
+        fake_source(None),
+        "convert_then_translat".into(),
+        fake_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("convert_then_translat") && error.contains(MODE_TRANSLATE_ONLY),
+        "the refusal must quote the rejected mode and list the valid ones, got {error}"
+    );
+    assert!(store.load().unwrap().jobs.is_empty());
+
+    // The retirement's point: a mode that is merely unrecognised must no longer
+    // fall through to the conversion-only shape and stop short of translation.
+    assert!(
+        should_handoff_after_run("convert_then_translat"),
+        "only the named retired mode may skip the translation handoff"
+    );
+    assert!(
+        ordered_child_stage_ids("convert_then_translat", false).contains(&"handoff"),
+        "an unrecognised mode must not be given the truncated stage list"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn stored_conversion_only_jobs_still_open_and_keep_their_three_stage_shape() {
+    let root = temp_root("retired-mode-stored-state");
+    let store = BookPipelineStore::for_test(&root);
+    fs::create_dir_all(store.state_path.parent().unwrap()).unwrap();
+    // A checkpoint written before the mode was retired. Retiring it closed the
+    // queue, not the library: this file still has to open.
+    let legacy = serde_json::json!({
+        "jobs": [{
+            "id": "stored-conversion-only",
+            "mode": MODE_CONVERSION_ONLY,
+            "source": {
+                "kind": "zotero_attachment",
+                "title": "Fabricated source",
+                "path": "zotero://attachment/FAKEPDF",
+                "selector": "FAKEPDF",
+                "runnerBehavior": null,
+                "adapterCommand": null,
+                "fakeZoteroItems": null
+            },
+            "route": [{
+                "id": "FAKEPDF",
+                "title": "Fabricated source",
+                "sourceKind": "zotero_attachment",
+                "sourceRef": "zotero://attachment/FAKEPDF",
+                "routeKind": "direct_text",
+                "canRun": true,
+                "blockedReason": null,
+                "summary": "Fabricated route"
+            }],
+            "status": STATUS_ROUTED,
+            "currentStep": "Legacy conversion-only state",
+            "lastError": null,
+            "logSummary": ["preserved log"],
+            "artifacts": [],
+            "collectionItems": [],
+            "outputDir": "/tmp/fabricated-output",
+            "attempts": 1,
+            "createdAt": "2026-07-10T09:00:00+08:00",
+            "updatedAt": "2026-07-10T09:05:00+08:00"
+        }]
+    });
+    fs::write(
+        &store.state_path,
+        serde_json::to_string_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let state = store.load().unwrap();
+
+    let stored = &state.jobs[0];
+    assert_eq!(
+        stored.mode, MODE_CONVERSION_ONLY,
+        "the stored mode must be preserved, not rewritten to a live one"
+    );
+    assert_eq!(
+        stored.children[0]
+            .stages
+            .iter()
+            .map(|stage| stage.stage_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["route", "extract", "index"],
+        "migration must not graft translation stages onto a finished conversion-only job"
+    );
+    assert!(!should_handoff_after_run(&stored.mode));
+
+    // Reload proves the migrated file it just wrote is itself still loadable.
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded.jobs[0].mode, MODE_CONVERSION_ONLY);
+    assert_eq!(reloaded.jobs[0].children[0].stages.len(), 3);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6017,6 +6200,73 @@ fn local_pdf_runner_contract_records_wrapper_artifacts() {
 }
 
 #[test]
+fn local_pdf_paddle_layout_hands_the_wrapper_markdown_to_translation() {
+    let root = temp_root("local-pdf-paddle-handoff");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("Sample Book.pdf"), "%PDF fixture").unwrap();
+    let repo_root = root.join("repo");
+    fs::create_dir_all(repo_root.join("tools")).unwrap();
+    fs::write(repo_root.join("AGENTS.md"), "fixture").unwrap();
+    fs::write(
+        repo_root.join("tools").join("create_local_book_project.py"),
+        "fixture",
+    )
+    .unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    assert!(job
+        .route
+        .iter()
+        .any(|item| item.route_kind == "remote_paddleocr"));
+
+    let completed = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            PaddleWrapperLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo_root),
+    )
+    .unwrap();
+
+    assert_eq!(completed.status, STATUS_READY);
+    assert_eq!(completed.current_step, "Translation handoff ready");
+    assert!(completed.last_error.is_none());
+    let markdown = completed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "markdown")
+        .expect("the wrapper Markdown is registered as a markdown artifact");
+    assert!(
+        markdown.path.ends_with("Sample_Book.md"),
+        "{}",
+        markdown.path
+    );
+    let project_root = PathBuf::from(
+        completed
+            .children
+            .iter()
+            .find_map(|child| child.local_project_root.as_deref())
+            .expect("registered local project root"),
+    );
+    assert_eq!(
+        fs::read_to_string(project_root.join("source").join("source.md")).unwrap(),
+        PADDLE_WRAPPER_MARKDOWN
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn local_pdf_runner_contract_records_wrapper_failure() {
     let root = temp_root("local-pdf-wrapper-failure");
     let input = root.join("input");
@@ -8304,6 +8554,92 @@ fn mineru_handoff_preserves_assets_and_split_keeps_links_resolvable() {
             .canonicalize()
             .unwrap(),
         copied_asset.canonicalize().unwrap()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+const PADDLE_ASSET_MARKDOWN: &str =
+    "# Sample Book\n\nChapter One\n\n![Figure](Sample_Book_assets/figure.png)\n";
+
+/// Writes the layout `packages/ocr/scripts/pdf_to_html_paddleocr.py` produces:
+/// the cleaned Markdown beside its `<stem>_assets` directory, with the image
+/// references inside the Markdown pointing at that directory relatively.
+struct PaddleAssetsLayoutExecutor;
+
+impl RunnerCommandExecutor for PaddleAssetsLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        let assets_dir = book_dir.join("Sample_Book_assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(book_dir.join("Sample_Book.md"), PADDLE_ASSET_MARKDOWN).unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        fs::write(assets_dir.join("figure.png"), b"png-fixture").unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Paddle wrapper completed".into()],
+        })
+    }
+}
+
+#[test]
+fn paddle_handoff_copies_the_assets_directory_and_keeps_links_resolvable() {
+    let root = temp_root("paddle-handoff-assets");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("Sample Book.pdf"), "%PDF fixture").unwrap();
+    let repo = handoff_repo_fixture(&root);
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let handed_off = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            PaddleAssetsLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo),
+    )
+    .unwrap();
+
+    assert_eq!(handed_off.status, STATUS_READY);
+    let project_root = child_project_root(&handed_off);
+
+    // The directory keeps its name, because the Markdown references it by that
+    // exact relative path.
+    let copied_asset = project_root.join("source/Sample_Book_assets/figure.png");
+    assert_eq!(
+        fs::read(&copied_asset).unwrap(),
+        b"png-fixture",
+        "the assets directory must travel with the Markdown"
+    );
+
+    // The decisive check: the link inside the handed-off source resolves.
+    let source_md = project_root.join("source/source.md");
+    let referenced = source_md
+        .parent()
+        .unwrap()
+        .join("Sample_Book_assets/figure.png");
+    assert_eq!(
+        referenced.canonicalize().unwrap(),
+        copied_asset.canonicalize().unwrap()
+    );
+
+    let manifest =
+        fs::read_to_string(project_root.join("metadata").join("source_manifest.json")).unwrap();
+    assert!(
+        manifest.contains("source/Sample_Book_assets"),
+        "the manifest must record where the resources landed: {manifest}"
     );
     let _ = fs::remove_dir_all(root);
 }
