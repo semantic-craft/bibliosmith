@@ -66,6 +66,26 @@ pub(crate) const TRANSLATION_ENGINE_SAMPLE_REPORT_SCHEMA: &str =
 pub(crate) const TRANSLATION_ENGINE_SAMPLE_COMMAND_LABEL: &str = "translation engine sample";
 pub(crate) const TRANSLATION_SAMPLE_COUNT: usize = 3;
 pub(crate) const TRANSLATION_SAMPLE_CHARACTER_BUDGET: usize = 800;
+/// Directory holding one child's engine comparison, under the job output root.
+/// `collect_artifacts` skips it by this name: the comparison is evidence for a
+/// routing decision, not conversion output, and the scan that walks the job
+/// output tree would otherwise register it as the book's own artifacts.
+pub(crate) const OCR_SAMPLE_DIR_NAME: &str = "ocr-sample";
+pub(crate) const OCR_SAMPLE_COMPARE_SCHEMA: &str = "ocr-sample-compare-v1";
+pub(crate) const OCR_SAMPLE_COMPARE_REPORT_SCHEMA: &str = "ocr-sample-compare-report-v1";
+pub(crate) const OCR_SAMPLE_COMPARE_COMMAND_LABEL: &str = "OCR sample compare";
+pub(crate) const OCR_SAMPLE_ENGINE_PADDLEOCR: &str = "paddleocr";
+pub(crate) const OCR_SAMPLE_ENGINE_MINERU: &str = "mineru";
+/// How many interior pages each engine gets by default. Every sampled page is
+/// a paid remote call against both engines, so the default stays small and the
+/// caller raises it deliberately.
+pub(crate) const OCR_SAMPLE_PAGE_COUNT: u32 = 3;
+/// Mirrors MAX_SAMPLE_PAGES in packages/ocr/sample_compare.py. Both ends
+/// enforce it: the UI cannot spend an unbounded amount by asking for more.
+pub(crate) const OCR_SAMPLE_MAX_PAGES: u32 = 10;
+/// Characters of Markdown kept per engine. Enough to judge layout handling in
+/// a side-by-side panel without storing the sampled pages in full.
+pub(crate) const OCR_SAMPLE_CHARACTER_BUDGET: usize = 4000;
 pub(crate) const TRANSLATION_POLICY_VERSION: &str = "translation-policy-v10";
 pub(crate) const TRANSLATION_ENGINE_MAX_TOKENS: u32 = 2_048;
 pub(crate) const TRANSLATION_ENGINE_PLACEHOLDER_RETRIES: u32 = 1;

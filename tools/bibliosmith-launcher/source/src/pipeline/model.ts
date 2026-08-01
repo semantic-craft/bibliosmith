@@ -466,6 +466,11 @@ export function statusLabel(status: string, copy: PipelineCopy): string {
   return labels[status] ?? status;
 }
 
+/** The live artifact of a kind — the one not superseded by a later run. */
+export function currentArtifact(unit: BookUnit, kind: string): BookPipelineArtifact | null {
+  return allArtifacts(unit).find((artifact) => artifact.kind === kind && !artifact.supersededBy) ?? null;
+}
+
 export function routeKindLabel(routeKind: string, copy: PipelineCopy): string {
   const labels: Record<string, string> = {
     direct_text: copy.routeDirectText,

@@ -15,6 +15,7 @@ import { approvalRef, artifact, bookUnit, stage, unitSummary } from "../test/fix
 vi.mock("../api", () => ({
   readBookPipelineArtifactExcerpt: vi.fn(() => Promise.reject(new Error("desktop only"))),
   readBookPipelineTranslationSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
+  readBookPipelineOcrSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
 }));
 
 const copy = pipelineCopy("en");
@@ -35,6 +36,7 @@ function drawerProps(unit: BookUnit, over: Partial<BookDrawerProps> = {}): BookD
     onSaveCustomInstructions: vi.fn(),
     onApproveGate: vi.fn(),
     onRouteOverride: vi.fn(),
+    onSampleOcr: vi.fn(),
     onOpenOutput: vi.fn(),
     onHandoff: vi.fn(),
     ...over,

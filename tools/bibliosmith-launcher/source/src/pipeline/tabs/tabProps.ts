@@ -11,5 +11,8 @@ export type TabProps = {
   onOpenOutput: (jobId: string) => void;
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
+  // Comparing the two OCR engines over sampled pages. Separate from
+  // onRouteOverride because a comparison decides nothing on its own.
+  onSampleOcr: (jobId: string, childId: string, samplePages: number) => void;
   onGoApproval: () => void;
 };
