@@ -14,6 +14,11 @@ pub(crate) const STATUS_HANDOFF_RUNNING: &str = "handoff_running";
 pub(crate) const STATUS_TRANSLATION_READY: &str = "translation_ready";
 pub(crate) const MODE_CONVERT_THEN_TRANSLATE: &str = "convert_then_translate";
 pub(crate) const MODE_TRANSLATE_ONLY: &str = "translate_only";
+/// Retired: jobs that stopped after extraction instead of handing off to
+/// translation. New jobs are rejected with this mode, but it stays in the wire
+/// vocabulary because stored jobs from before the retirement still carry it and
+/// must keep loading with their shorter stage plan.
+pub(crate) const MODE_CONVERSION_ONLY: &str = "conversion_only";
 pub(crate) const TRANSLATION_MODE_FAST: &str = "fast";
 pub(crate) const TRANSLATION_MODE_EXPERT: &str = "expert";
 pub(crate) const STATE_SCHEMA_VERSION: &str = "book-pipeline-state-v5";

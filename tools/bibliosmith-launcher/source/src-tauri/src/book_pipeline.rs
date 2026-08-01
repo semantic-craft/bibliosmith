@@ -3354,6 +3354,23 @@ pub async fn approve_book_pipeline_cleanup(
     .await
 }
 
+// The mode used to be accepted verbatim: anything that was not one of the two
+// translating modes fell through to the conversion-only stage plan, so both a
+// retired mode and a misspelled one produced a job that stopped after
+// extraction without saying why.
+fn validate_pipeline_mode(mode: &str) -> Result<(), String> {
+    match mode {
+        MODE_CONVERT_THEN_TRANSLATE | MODE_TRANSLATE_ONLY => Ok(()),
+        MODE_CONVERSION_ONLY => Err(
+            "Conversion-only mode is retired: every book now converts and translates in one pipeline. Existing conversion-only jobs still open, but new ones cannot be queued."
+                .into(),
+        ),
+        other => Err(format!(
+            "Unknown pipeline mode {other:?}. Expected {MODE_CONVERT_THEN_TRANSLATE} or {MODE_TRANSLATE_ONLY}."
+        )),
+    }
+}
+
 fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result<(), String> {
     if !matches!(
         intent.translation_mode.as_str(),
@@ -3478,6 +3495,7 @@ fn queue_standard_job_for_root<E: RunnerCommandExecutor>(
     config: BookPipelinePreviewConfig,
     root: &Path,
 ) -> Result<BookPipelineJob, String> {
+    validate_pipeline_mode(&mode)?;
     validate_translation_intent(&translation_intent)?;
     let output_formats = normalize_output_formats(&translation_intent.output_formats)?;
     // A live Zotero source must queue the same worker-discovered route the
@@ -3548,6 +3566,7 @@ fn queue_zotero_collection_snapshot_job<E: RunnerCommandExecutor>(
     mode: String,
     translation_intent: BookPipelineTranslationIntent,
 ) -> Result<BookPipelineJob, String> {
+    validate_pipeline_mode(&mode)?;
     validate_translation_intent(&translation_intent)?;
     let output_formats = normalize_output_formats(&translation_intent.output_formats)?;
     let collection_key = non_empty(source.selector.as_deref())
@@ -6270,8 +6289,16 @@ fn collection_awaits_attachment_routing(job: &BookPipelineJob) -> bool {
         })
 }
 
+// Every accepted mode hands off; only the retired conversion-only jobs stop
+// after extraction. This used to be written as "not one of the two translating
+// modes", which silently gave any unrecognized string the conversion-only stage
+// plan -- a typo in the wire value produced a job that quietly never reached
+// translation. New jobs cannot carry an unknown mode any more
+// (`validate_pipeline_mode` at enqueue), so an unknown value here can only come
+// from a hand-edited state file; it gets the full plan rather than a silent
+// truncation.
 fn should_handoff_after_run(mode: &str) -> bool {
-    mode == MODE_CONVERT_THEN_TRANSLATE || mode == MODE_TRANSLATE_ONLY
+    mode != MODE_CONVERSION_ONLY
 }
 
 impl PipelineRunner for SystemPipelineRunner {

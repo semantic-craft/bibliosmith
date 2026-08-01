@@ -1788,6 +1788,86 @@ fn temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("book-pipeline-{name}-{suffix}"))
 }
 
+// Conversion is no longer where a job ends: with conversion-only retired, every
+// run continues into the translation handoff. Tests that are about what the
+// conversion produced call this instead of `run_job`, which would hand off with
+// the real runner into the repository's own `books/` directory -- test runs used
+// to leave numbered reading projects there. The handoff lands in a temp root
+// instead, so a test only ever writes inside its own directory.
+// Conversion no longer ends a job, so a run alone never reaches a terminal
+// status. Tests whose subject is the terminal outcome itself -- the webhook
+// contract, cleanup evidence -- complete every stage so the store derives the
+// same terminal status it derives in production.
+fn complete_every_stage(store: &dyn BookPipelineStateStore, job_id: &str) {
+    complete_stages_where(store, job_id, |_| true)
+}
+
+fn complete_stages_where(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    keep: impl Fn(&BookPipelineChildJob) -> bool,
+) {
+    // The store validates transitions and prerequisites, so this walks each
+    // child's plan one stage at a time along the legal path
+    // (pending -> ready -> running -> completed) rather than stamping the end
+    // state, which the store rejects.
+    let owner = store.execution_owner().unwrap().to_string();
+    // Bounded: the store re-derives some statuses on save, so an unexpected
+    // plan shape must fail the test rather than spin here.
+    for _ in 0..200 {
+        let mut state = store.load().unwrap();
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|job| job.id == job_id)
+            .expect("fixture job");
+        let mut changed = false;
+        for child in job.children.iter_mut().filter(|child| keep(child)) {
+            let Some(stage) = child.stages.iter_mut().find(|stage| {
+                !matches!(
+                    stage.status.as_str(),
+                    STATUS_COMPLETED | STATUS_SKIPPED | STATUS_FAILED
+                )
+            }) else {
+                continue;
+            };
+            match stage.status.as_str() {
+                STATUS_RUNNING => {
+                    stage.status = STATUS_COMPLETED.into();
+                    stage.execution_owner = None;
+                }
+                STATUS_READY => {
+                    // A running stage must name its owner, as the runner records it.
+                    stage.status = STATUS_RUNNING.into();
+                    stage.execution_owner = Some(owner.clone());
+                }
+                _ => stage.status = STATUS_READY.into(),
+            }
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
+        store.save(&state).unwrap();
+    }
+    panic!("stage completion did not converge for {job_id}");
+}
+
+fn run_conversion(
+    store: &dyn BookPipelineStateStore,
+    runner: &dyn PipelineRunner,
+    job_id: &str,
+) -> Result<BookPipelineJob, String> {
+    let handoff_root = temp_root(&format!("handoff-{job_id}"));
+    run_job_with_handoff(
+        store,
+        runner,
+        &FakeTranslationHandoffRunner,
+        job_id,
+        Some(&handoff_root),
+    )
+}
+
 fn fake_source(behavior: Option<&str>) -> BookPipelineSource {
     BookPipelineSource {
         kind: "fake".into(),
@@ -2597,7 +2677,7 @@ fn cleanup_fixture_job(
     let job = queue_job(
         store,
         source,
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -2640,7 +2720,7 @@ fn delete_job_removes_a_queued_job_and_persists() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -2664,7 +2744,7 @@ fn dropping_one_book_of_a_batch_keeps_the_rest_and_the_frozen_membership() {
     let job = queue_job(
         &store,
         fake_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -2726,7 +2806,7 @@ fn dropping_the_only_book_removes_the_job() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -2745,7 +2825,7 @@ fn delete_job_requires_explicit_approval_and_a_known_job() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -2766,7 +2846,7 @@ fn a_job_with_a_running_stage_counts_as_actively_running() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -3252,7 +3332,7 @@ fn collection_parent_derives_partial_status_from_durable_children() {
     let job = queue_job(
         &store,
         fake_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -3312,6 +3392,11 @@ fn collection_parent_derives_partial_status_from_durable_children() {
         }
     }
     store.save(&state).unwrap();
+    // Conversion is no longer the end of a child's plan, so the child that
+    // should read as completed has to finish its translation stages too.
+    complete_stages_where(&store, &job.id, |child| {
+        child.source.selector.as_deref() == Some("DIRECT")
+    });
 
     let recovered = store.load().unwrap();
     let parent = recovered
@@ -3444,7 +3529,7 @@ fn foreign_running_stage_recovers_as_retryable_failure_after_restart() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -3507,7 +3592,7 @@ fn live_foreign_execution_owner_is_not_mistaken_for_restart() {
     let job = queue_job(
         &writer,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -3571,7 +3656,7 @@ fn live_unrelated_pid_without_matching_lease_is_interrupted() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -3616,7 +3701,7 @@ fn reused_current_pid_does_not_keep_stale_owner_alive() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -3658,7 +3743,7 @@ fn ownerless_running_stage_recovers_as_interrupted() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -3701,7 +3786,7 @@ fn frozen_collection_membership_rejects_child_drift() {
     let job = queue_job(
         &store,
         fake_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -3746,7 +3831,7 @@ fn real_collection_discovery_atomically_freezes_durable_attachment_children() {
         &store,
         &executor,
         real_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         fast_translation_intent(),
         BookPipelinePreviewConfig::default(),
     )
@@ -3818,7 +3903,7 @@ fn identical_collection_snapshot_is_idempotent_and_changed_snapshot_revises() {
         &store,
         &first_executor,
         real_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         fast_translation_intent(),
         BookPipelinePreviewConfig::default(),
     )
@@ -3829,7 +3914,7 @@ fn identical_collection_snapshot_is_idempotent_and_changed_snapshot_revises() {
         &store,
         &same_executor,
         real_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         fast_translation_intent(),
         BookPipelinePreviewConfig::default(),
     )
@@ -3844,7 +3929,7 @@ fn identical_collection_snapshot_is_idempotent_and_changed_snapshot_revises() {
         &store,
         &changed_executor,
         real_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         fast_translation_intent(),
         BookPipelinePreviewConfig::default(),
     )
@@ -3877,7 +3962,7 @@ fn rejected_state_save_publishes_neither_membership_nor_children() {
         &store,
         &executor,
         real_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         fast_translation_intent(),
         BookPipelinePreviewConfig::default(),
     )
@@ -3898,7 +3983,7 @@ fn collection_snapshot_without_eligible_pdf_is_durably_explainable() {
         &store,
         &executor,
         real_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         fast_translation_intent(),
         BookPipelinePreviewConfig::default(),
     )
@@ -3950,7 +4035,7 @@ fn collection_snapshot_rejects_inconsistent_eligible_file_evidence() {
             &store,
             &executor,
             real_collection_source(),
-            "conversion_only".into(),
+            "convert_then_translate".into(),
             fast_translation_intent(),
             BookPipelinePreviewConfig::default(),
         )
@@ -4011,13 +4096,13 @@ fn durable_collection_run_claims_route_without_invoking_batch_runner() {
         &store,
         &executor,
         real_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         fast_translation_intent(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
 
-    let routed = run_job(&store, &PanicPipelineRunner, &queued.id).unwrap();
+    let routed = run_conversion(&store, &PanicPipelineRunner, &queued.id).unwrap();
 
     assert_eq!(routed.id, queued.id);
     assert!(routed
@@ -5260,7 +5345,7 @@ fn store_rejects_completed_stage_regression_without_invalidation() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -5360,7 +5445,7 @@ fn public_state_reports_stage_and_unit_progress() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -5373,13 +5458,13 @@ fn public_state_reports_stage_and_unit_progress() {
         .find(|stored| stored.id == job.id)
         .unwrap();
 
-    assert_eq!(queued.progress.stage_total, 3);
-    assert_eq!(queued.progress.stage_completed, 2);
-    assert_eq!(queued.progress.percent, 66);
+    assert_eq!(queued.progress.stage_total, 14);
+    assert_eq!(queued.progress.stage_completed, 3);
+    assert_eq!(queued.progress.percent, 21);
     assert_eq!(queued.progress.active_stage_id, "extract");
     assert!(queued.progress.unit_summary.is_none());
     let serialized = serde_json::to_value(&queued).unwrap();
-    assert_eq!(serialized["progress"]["stageTotal"], 3);
+    assert_eq!(serialized["progress"]["stageTotal"], 14);
     assert_eq!(serialized["progress"]["activeStageId"], "extract");
     let _ = fs::remove_dir_all(root);
 }
@@ -5391,7 +5476,7 @@ fn public_state_overlays_live_worker_progress_without_persisting_it() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -5476,11 +5561,12 @@ fn terminal_webhook_is_safe_deterministic_and_idempotent() {
     let job = queue_job(
         &store,
         source,
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
-    run_job(&store, &SystemPipelineRunner, &job.id).unwrap();
+    run_conversion(&store, &SystemPipelineRunner, &job.id).unwrap();
+    complete_every_stage(&store, &job.id);
     let sink = RecordingNotificationSink::default();
 
     let first = dispatch_terminal_notification(&store, &sink, &job.id).unwrap();
@@ -5509,7 +5595,7 @@ fn terminal_webhook_progress_excludes_local_unit_failure_details() {
     let mut job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -5552,11 +5638,21 @@ fn reaching_the_same_terminal_status_again_delivers_one_webhook() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
-    run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
+    run_conversion(&store, &ArtifactFixtureRunner, &job.id).unwrap();
+    // Conversion is no longer terminal, and this memory store keeps whatever
+    // status it is given, so the terminal outcome under test is stated here.
+    let mut state = store.load().unwrap();
+    state
+        .jobs
+        .iter_mut()
+        .find(|stored| stored.id == job.id)
+        .unwrap()
+        .status = STATUS_COMPLETED.into();
+    store.save(&state).unwrap();
     let sink = RecordingNotificationSink::default();
 
     dispatch_terminal_notification(&store, &sink, &job.id).unwrap();
@@ -5621,7 +5717,7 @@ fn concurrent_saves_reject_one_stale_revision_and_keep_valid_json() {
     let job = queue_job(
         store.as_ref(),
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -5678,17 +5774,17 @@ fn fake_job_records_failure_and_retry_success() {
     let job = queue_job(
         &store,
         source,
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
-    let failed = run_job(&store, &SystemPipelineRunner, &job.id).unwrap();
+    let failed = run_conversion(&store, &SystemPipelineRunner, &job.id).unwrap();
     assert_eq!(failed.status, STATUS_FAILED);
     assert!(failed.last_error.is_some());
     assert_eq!(failed.attempts, 1);
 
-    let completed = run_job(&store, &SystemPipelineRunner, &job.id).unwrap();
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    let completed = run_conversion(&store, &SystemPipelineRunner, &job.id).unwrap();
+    assert_eq!(completed.status, STATUS_READY);
     assert_eq!(completed.attempts, 2);
     assert!(completed
         .artifacts
@@ -5696,7 +5792,7 @@ fn fake_job_records_failure_and_retry_success() {
         .any(|artifact| artifact.kind == "markdown" && artifact.sha256.is_some()));
 
     let recovered = store.load().unwrap();
-    assert_eq!(recovered.jobs[0].status, STATUS_COMPLETED);
+    assert_eq!(recovered.jobs[0].status, STATUS_READY);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -5707,14 +5803,14 @@ fn completed_job_rejects_duplicate_runner_execution() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
-    let completed = run_job(&store, &SystemPipelineRunner, &job.id).unwrap();
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    let completed = run_conversion(&store, &SystemPipelineRunner, &job.id).unwrap();
+    assert_eq!(completed.status, STATUS_READY);
 
-    let error = run_job(&store, &SystemPipelineRunner, &job.id).unwrap_err();
+    let error = run_conversion(&store, &SystemPipelineRunner, &job.id).unwrap_err();
 
     assert!(error.contains("No eligible extraction stage"));
     let recovered = store.load().unwrap();
@@ -5724,7 +5820,7 @@ fn completed_job_rejects_duplicate_runner_execution() {
         .find(|stored| stored.id == job.id)
         .unwrap();
     assert_eq!(recovered.attempts, 1);
-    assert_eq!(recovered.status, STATUS_COMPLETED);
+    assert_eq!(recovered.status, STATUS_READY);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -5782,7 +5878,7 @@ fn every_ocr_entry_point_runs_through_the_workspace_venv() {
     let job = queue_job(
         &store,
         local_pdf_source(&input),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -5856,7 +5952,7 @@ fn local_pdf_runner_command_uses_existing_wrapper_contract() {
     let job = queue_job(
         &store,
         source,
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -5906,7 +6002,7 @@ fn local_pdf_folder_forced_to_mineru_uses_precision_batch_client() {
     let job = queue_job(
         &store,
         local_pdf_source(&input),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: false,
             has_mineru_credentials: true,
@@ -5947,7 +6043,7 @@ fn local_pdf_folder_rejects_a_mixed_mineru_and_paddle_batch() {
     let job = queue_job(
         &store,
         local_pdf_source(&input),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -5976,12 +6072,12 @@ fn local_pdf_runner_contract_records_wrapper_artifacts() {
     let job = queue_job(
         &store,
         local_pdf_source(&input),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
 
-    let completed = run_job(
+    let completed = run_conversion(
         &store,
         &CommandPipelineRunner::with_book_ocr_conversion_root(
             LocalPdfFixtureExecutor,
@@ -5991,8 +6087,8 @@ fn local_pdf_runner_contract_records_wrapper_artifacts() {
     )
     .unwrap();
 
-    assert_eq!(completed.status, STATUS_COMPLETED);
-    assert_eq!(completed.current_step, "Completed");
+    assert_eq!(completed.status, STATUS_READY);
+    assert_eq!(completed.current_step, "Translation handoff ready");
     assert!(completed.last_error.is_none());
     assert!(completed.output_dir.is_some());
     for kind in ["markdown", "html", "epub", "metadata", "index"] {
@@ -6027,12 +6123,12 @@ fn local_pdf_runner_contract_records_wrapper_failure() {
     let job = queue_job(
         &store,
         local_pdf_source(&input),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
 
-    let failed = run_job(
+    let failed = run_conversion(
         &store,
         &CommandPipelineRunner::with_book_ocr_conversion_root(
             LocalPdfFailingExecutor,
@@ -6043,7 +6139,7 @@ fn local_pdf_runner_contract_records_wrapper_failure() {
     .unwrap();
 
     assert_eq!(failed.status, STATUS_FAILED);
-    assert_eq!(failed.current_step, "Failed");
+    assert_eq!(failed.current_step, "Conversion failed");
     assert_eq!(failed.attempts, 1);
     assert_eq!(
         failed.last_error.as_deref(),
@@ -6148,7 +6244,7 @@ fn mineru_runner_command_records_artifacts() {
     let job = queue_job(
         &store,
         fake_mineru_zotero_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: false,
             has_mineru_credentials: true,
@@ -6157,14 +6253,14 @@ fn mineru_runner_command_records_artifacts() {
     )
     .unwrap();
 
-    let completed = run_job(
+    let completed = run_conversion(
         &store,
         &CommandPipelineRunner::with_book_ocr_conversion_root(MineruFixtureExecutor, worker_root),
         &job.id,
     )
     .unwrap();
 
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert_eq!(completed.status, STATUS_READY);
     assert!(completed
         .route
         .iter()
@@ -6202,19 +6298,19 @@ fn external_adapter_route_normalizes_outputs() {
     let job = queue_job(
         &store,
         source,
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
 
-    let completed = run_job(
+    let completed = run_conversion(
         &store,
         &CommandPipelineRunner::new(ExternalAdapterFixtureExecutor),
         &job.id,
     )
     .unwrap();
 
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert_eq!(completed.status, STATUS_READY);
     assert!(completed
         .route
         .iter()
@@ -6238,7 +6334,7 @@ fn zotero_collection_runs_direct_ocr_and_mineru_items_independently() {
     let job = queue_job(
         &store,
         fake_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -6247,7 +6343,7 @@ fn zotero_collection_runs_direct_ocr_and_mineru_items_independently() {
     )
     .unwrap();
 
-    let completed = run_job(
+    let completed = run_conversion(
         &store,
         &CommandPipelineRunner::with_book_ocr_conversion_root(
             ZoteroBatchFixtureExecutor,
@@ -6257,7 +6353,7 @@ fn zotero_collection_runs_direct_ocr_and_mineru_items_independently() {
     )
     .unwrap();
 
-    assert_eq!(completed.status, STATUS_PARTIAL);
+    assert_eq!(completed.status, STATUS_READY);
     assert_eq!(
         completed
             .collection_items
@@ -6273,9 +6369,16 @@ fn zotero_collection_runs_direct_ocr_and_mineru_items_independently() {
         .collection_items
         .iter()
         .any(|item| item.id == "DONE" && item.status == "skipped"));
-    assert!(completed.current_step.contains("completed=3"));
-    assert!(completed.current_step.contains("blocked=1"));
-    assert!(completed.current_step.contains("skipped=1"));
+    let item_count = |status: &str| {
+        completed
+            .collection_items
+            .iter()
+            .filter(|item| item.status == status)
+            .count()
+    };
+    assert_eq!(item_count(STATUS_COMPLETED), 3);
+    assert_eq!(item_count(STATUS_BLOCKED), 1);
+    assert_eq!(item_count(STATUS_SKIPPED), 1);
     assert!(completed.artifacts.iter().any(|artifact| {
         artifact.kind == "markdown" && artifact.zotero_key.as_deref() == Some("DIRECTMD")
     }));
@@ -6355,7 +6458,7 @@ fn zotero_collection_retry_targets_failed_items_only() {
     let job = queue_job(
         &store,
         source,
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -6363,14 +6466,14 @@ fn zotero_collection_retry_targets_failed_items_only() {
         fail_once: std::sync::Mutex::new(true),
     };
 
-    let partial = run_job(
+    let partial = run_conversion(
         &store,
         &CommandPipelineRunner::with_book_ocr_conversion_root(executor, worker_root.clone()),
         &job.id,
     )
     .unwrap();
 
-    assert_eq!(partial.status, STATUS_PARTIAL);
+    assert_eq!(partial.status, STATUS_READY);
     assert!(partial.collection_items.iter().any(|item| {
         item.id == "OK"
             && item.status == STATUS_COMPLETED
@@ -6391,14 +6494,14 @@ fn zotero_collection_retry_targets_failed_items_only() {
         fail_once: std::sync::Mutex::new(false),
     };
 
-    let completed = run_job(
+    let completed = run_conversion(
         &store,
         &CommandPipelineRunner::with_book_ocr_conversion_root(executor, worker_root),
         &job.id,
     )
     .unwrap();
 
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert_eq!(completed.status, STATUS_READY);
     assert!(completed
         .collection_items
         .iter()
@@ -6406,7 +6509,14 @@ fn zotero_collection_retry_targets_failed_items_only() {
     assert!(completed.collection_items.iter().any(|item| {
         item.id == "FAIL" && item.status == STATUS_COMPLETED && item.attempts == 2
     }));
-    assert!(completed.current_step.contains("failed=0"));
+    assert_eq!(
+        completed
+            .collection_items
+            .iter()
+            .filter(|item| item.status == STATUS_FAILED)
+            .count(),
+        0
+    );
     assert!(completed
         .artifacts
         .iter()
@@ -6584,6 +6694,76 @@ fn zotero_discovery_failure_is_redacted() {
 }
 
 #[test]
+fn queueing_rejects_the_retired_conversion_only_mode() {
+    let root = temp_root("mode-retired-conversion-only");
+    let store = MemoryStateStore::new(&root);
+
+    let error = queue_job(
+        &store,
+        fake_direct_zotero_source(),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("retired"),
+        "the error should name the retirement, got {error:?}"
+    );
+    assert!(
+        store.load().unwrap().jobs.is_empty(),
+        "a rejected mode must not leave a job behind"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+// An unrecognized mode used to be accepted and silently given the
+// conversion-only stage plan, so a typo produced a job that never reached
+// translation and never said why.
+#[test]
+fn queueing_rejects_an_unknown_mode() {
+    let root = temp_root("mode-unknown");
+    let store = MemoryStateStore::new(&root);
+
+    let error = queue_job(
+        &store,
+        fake_direct_zotero_source(),
+        "convert_then_translat".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("Unknown pipeline mode"),
+        "the error should name the unknown mode, got {error:?}"
+    );
+    assert!(store.load().unwrap().jobs.is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+// Jobs queued before the retirement keep their shorter plan: the mode stays in
+// the wire vocabulary precisely so stored state still loads and still stops
+// after extraction instead of growing translation stages it never ran.
+#[test]
+fn a_stored_conversion_only_job_keeps_its_short_stage_plan() {
+    assert!(!should_handoff_after_run(MODE_CONVERSION_ONLY));
+    assert!(should_handoff_after_run(MODE_CONVERT_THEN_TRANSLATE));
+    assert!(should_handoff_after_run(MODE_TRANSLATE_ONLY));
+
+    assert_eq!(
+        ordered_child_stage_ids(MODE_CONVERSION_ONLY, false),
+        vec!["route", "extract", "index"]
+    );
+    // A legacy job that already reached translation keeps the full plan: the
+    // legacy flag, not the mode, decides that case.
+    assert_eq!(
+        ordered_child_stage_ids(MODE_CONVERSION_ONLY, true).first().copied(),
+        Some("route")
+    );
+    assert_eq!(ordered_child_stage_ids(MODE_CONVERSION_ONLY, true).len(), 14);
+}
+
+#[test]
 fn zotero_worker_route_carries_the_handoff_row_like_every_other_source_kind() {
     let root = temp_root("zotero-route-handoff");
     let worker_root = fake_zotero_worker_root(&root);
@@ -6748,7 +6928,7 @@ fn zotero_filter_queue_discovers_real_children_from_worker() {
         &store,
         &ZoteroRoutePreviewExecutor,
         zotero_query_filter_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         fast_translation_intent(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: false,
@@ -6762,7 +6942,7 @@ fn zotero_filter_queue_discovers_real_children_from_worker() {
     assert_eq!(job.kind, "collection");
     assert_eq!(job.status, STATUS_READY);
     let route_ids: Vec<&str> = job.route.iter().map(|item| item.id.as_str()).collect();
-    assert_eq!(route_ids, ["DIRECT", "SCAN", "MINERU", "DIRTY", "DONE"]);
+    assert_eq!(route_ids, ["DIRECT", "SCAN", "MINERU", "DIRTY", "DONE", "translation-handoff"]);
     assert!(job.route.iter().all(|item| !item.id.contains("query=")));
     let scan = job.route.iter().find(|item| item.id == "SCAN").unwrap();
     assert_eq!(scan.route_kind, "direct_text");
@@ -6801,7 +6981,7 @@ fn zotero_filter_queue_with_no_matches_blocks_without_demo_children() {
         &store,
         &ZoteroEmptyDiscoveryExecutor,
         zotero_query_filter_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         fast_translation_intent(),
         BookPipelinePreviewConfig::default(),
         &worker_root,
@@ -6831,13 +7011,13 @@ fn zotero_conversion_records_markdown_artifact_and_upload_key() {
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
     assert_eq!(job.status, STATUS_READY);
 
-    let completed = run_job(
+    let completed = run_conversion(
         &store,
         &CommandPipelineRunner::with_book_ocr_conversion_root(
             ZoteroConversionExecutor,
@@ -6847,8 +7027,8 @@ fn zotero_conversion_records_markdown_artifact_and_upload_key() {
     )
     .unwrap();
 
-    assert_eq!(completed.status, STATUS_COMPLETED);
-    assert_eq!(completed.current_step, "Completed");
+    assert_eq!(completed.status, STATUS_READY);
+    assert_eq!(completed.current_step, "Translation handoff ready");
     let markdown = completed
         .artifacts
         .iter()
@@ -6879,7 +7059,7 @@ fn zotero_extraction_runs_item_scoped_index_before_completion() {
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -6888,11 +7068,11 @@ fn zotero_extraction_runs_item_scoped_index_before_completion() {
         worker_root,
     );
 
-    let completed = run_job(&store, &runner, &job.id).unwrap();
+    let completed = run_conversion(&store, &runner, &job.id).unwrap();
 
     assert_eq!(child_stage_status(&completed, "extract"), STATUS_COMPLETED);
     assert_eq!(child_stage_status(&completed, "index"), STATUS_COMPLETED);
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert_eq!(completed.status, STATUS_READY);
     assert_eq!(
         runner.executor.command_labels(),
         vec![
@@ -6950,7 +7130,7 @@ fn item_scoped_index_persists_safe_evidence_without_chunk_text() {
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -6959,7 +7139,7 @@ fn item_scoped_index_persists_safe_evidence_without_chunk_text() {
         worker_root,
     );
 
-    let completed = run_job(&store, &runner, &job.id).unwrap();
+    let completed = run_conversion(&store, &runner, &job.id).unwrap();
 
     let index_stage = completed.children[0]
         .stages
@@ -6998,7 +7178,7 @@ fn zotero_extraction_without_markdown_attachment_key_does_not_start_index() {
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -7007,7 +7187,7 @@ fn zotero_extraction_without_markdown_attachment_key_does_not_start_index() {
         worker_root,
     );
 
-    let failed = run_job(&store, &runner, &job.id).unwrap();
+    let failed = run_conversion(&store, &runner, &job.id).unwrap();
 
     assert_eq!(child_stage_status(&failed, "extract"), STATUS_FAILED);
     assert_eq!(child_stage_status(&failed, "index"), STATUS_PENDING);
@@ -7026,7 +7206,7 @@ fn completed_item_index_requires_matching_persisted_evidence() {
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -7034,7 +7214,7 @@ fn completed_item_index_requires_matching_persisted_evidence() {
         ZoteroExtractIndexExecutor::succeeding(),
         worker_root,
     );
-    run_job(&store, &runner, &job.id).unwrap();
+    run_conversion(&store, &runner, &job.id).unwrap();
     let mut state = store.load().unwrap();
     stage_mut(&mut state.jobs[0].children[0], "index")
         .unwrap()
@@ -7071,12 +7251,12 @@ fn missing_markdown_is_persisted_as_an_index_failure() {
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
 
-    let failed = run_job(&store, &MissingMarkdownRunner, &job.id).unwrap();
+    let failed = run_conversion(&store, &MissingMarkdownRunner, &job.id).unwrap();
 
     assert_eq!(child_stage_status(&failed, "extract"), STATUS_COMPLETED);
     assert_eq!(child_stage_status(&failed, "index"), STATUS_FAILED);
@@ -7101,7 +7281,7 @@ fn item_scoped_index_retry_does_not_rerun_extraction() {
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -7110,7 +7290,7 @@ fn item_scoped_index_retry_does_not_rerun_extraction() {
         worker_root,
     );
 
-    let failed = run_job(&store, &runner, &job.id).unwrap();
+    let failed = run_conversion(&store, &runner, &job.id).unwrap();
 
     assert_eq!(child_stage_status(&failed, "extract"), STATUS_COMPLETED);
     assert_eq!(child_stage_status(&failed, "index"), STATUS_FAILED);
@@ -7137,11 +7317,11 @@ fn item_scoped_index_retry_does_not_rerun_extraction() {
         .iter()
         .any(|artifact| artifact.kind == "markdown" && artifact.validation.hash_matches));
 
-    let completed = run_job(&store, &runner, &job.id).unwrap();
+    let completed = run_conversion(&store, &runner, &job.id).unwrap();
 
     assert_eq!(child_stage_status(&completed, "extract"), STATUS_COMPLETED);
     assert_eq!(child_stage_status(&completed, "index"), STATUS_COMPLETED);
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert_eq!(completed.status, STATUS_READY);
     assert_eq!(
         runner.executor.command_labels(),
         vec![
@@ -7224,12 +7404,12 @@ fn zotero_conversion_retry_preserves_failure_diagnosis_in_logs() {
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
 
-    let failed = run_job(
+    let failed = run_conversion(
         &store,
         &CommandPipelineRunner::with_book_ocr_conversion_root(
             ZoteroConversionFailingExecutor,
@@ -7244,7 +7424,7 @@ fn zotero_conversion_retry_preserves_failure_diagnosis_in_logs() {
         Some("Zotero conversion fixture failed: diagnosis preserved")
     );
 
-    let completed = run_job(
+    let completed = run_conversion(
         &store,
         &CommandPipelineRunner::with_book_ocr_conversion_root(
             ZoteroConversionExecutor,
@@ -7253,7 +7433,7 @@ fn zotero_conversion_retry_preserves_failure_diagnosis_in_logs() {
         &job.id,
     )
     .unwrap();
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert_eq!(completed.status, STATUS_READY);
     assert!(completed.log_summary.iter().any(|line| {
         line.contains("Runner failed: Zotero conversion fixture failed: diagnosis preserved")
     }));
@@ -7298,7 +7478,7 @@ fn zotero_mixed_blocked_route_keeps_runnable_items_available() {
     let job = queue_job(
         &store,
         source,
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: false,
             has_mineru_credentials: false,
@@ -7358,7 +7538,7 @@ fn route_override_forces_mineru_over_automatic_direct_text() {
     let job = queue_job(
         &store,
         override_route_source(BTreeMap::new()),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -7384,7 +7564,7 @@ fn route_override_keep_marks_item_already_converted_and_not_runnable() {
     let job = queue_job(
         &store,
         override_route_source(BTreeMap::new()),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -7407,7 +7587,7 @@ fn route_override_cannot_bypass_missing_credentials() {
     let job = queue_job(
         &store,
         override_route_source(BTreeMap::new()),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: false,
             has_mineru_credentials: false,
@@ -7432,7 +7612,7 @@ fn route_override_is_persisted_on_the_queued_source() {
     let job = queue_job(
         &store,
         override_route_source(BTreeMap::new()),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -7457,12 +7637,12 @@ fn runner_failure_records_redacted_error_for_retry() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
 
-    let failed = run_job(
+    let failed = run_conversion(
         &store,
         &CommandPipelineRunner::new(SecretFailingExecutor),
         &job.id,
@@ -7470,7 +7650,7 @@ fn runner_failure_records_redacted_error_for_retry() {
     .unwrap();
 
     assert_eq!(failed.status, STATUS_FAILED);
-    assert_eq!(failed.current_step, "Failed");
+    assert_eq!(failed.current_step, "Conversion failed");
     assert_eq!(failed.attempts, 1);
     assert_eq!(
         failed.last_error.as_deref(),
@@ -7514,19 +7694,19 @@ fn runner_success_redacts_secret_streams_and_preserves_artifacts() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
 
-    let completed = run_job(
+    let completed = run_conversion(
         &store,
         &CommandPipelineRunner::new(SecretLoggingExecutor),
         &job.id,
     )
     .unwrap();
 
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert_eq!(completed.status, STATUS_READY);
     assert!(completed
         .artifacts
         .iter()
@@ -7565,15 +7745,15 @@ fn local_pdf_folder_runner_registers_artifact_checksums() {
     let job = queue_job(
         &store,
         source,
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
-    assert_eq!(job.route.len(), 1);
+    assert_eq!(job.route.len(), 2);
     assert_eq!(job.route[0].route_kind, "remote_paddleocr");
 
-    let completed = run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    let completed = run_conversion(&store, &ArtifactFixtureRunner, &job.id).unwrap();
+    assert_eq!(completed.status, STATUS_READY);
     for kind in ["markdown", "html", "epub"] {
         assert!(completed
             .artifacts
@@ -7599,14 +7779,21 @@ fn markdown_artifact_handoff_creates_translation_ready_project() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
-    let completed = run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
-    assert_eq!(completed.status, STATUS_COMPLETED);
+    let handed_off = run_job_with_handoff(
+        &store,
+        &ArtifactFixtureRunner,
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo_root),
+    )
+    .unwrap();
 
-    let handed_off = handoff_job_markdown(&store, &job.id, None, &repo_root).unwrap();
+
+
 
     assert_eq!(handed_off.status, STATUS_READY);
     assert_eq!(handed_off.current_stage_id, "split");
@@ -7650,7 +7837,7 @@ fn markdown_artifact_handoff_rejects_missing_extraction_prerequisite() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -7858,7 +8045,7 @@ fn cleanup_ready_job(root: &Path, store: &MemoryStateStore) -> BookPipelineJob {
     let job = queue_job(
         store,
         source,
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -7996,7 +8183,7 @@ fn queued_collection_with_a_held_book(
     let job = queue_job(
         store,
         fake_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
@@ -11832,7 +12019,7 @@ fn split_policy_invalidation_marker_cannot_authorize_unrelated_stage_regressions
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -11970,12 +12157,12 @@ fn persisted_file_artifacts_have_complete_immutable_provenance() {
     let job = queue_job(
         &store,
         local_pdf_source(&input),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
 
-    let completed = run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
+    let completed = run_conversion(&store, &ArtifactFixtureRunner, &job.id).unwrap();
     let markdown = completed
         .artifacts
         .iter()
@@ -12023,11 +12210,11 @@ fn persisted_artifact_identity_rejects_producer_mutation() {
     let queued = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
-    let completed = run_job(&store, &ArtifactFixtureRunner, &queued.id).unwrap();
+    let completed = run_conversion(&store, &ArtifactFixtureRunner, &queued.id).unwrap();
     let artifact_id = completed
         .artifacts
         .iter()
@@ -12133,11 +12320,11 @@ fn diagnostic_profiles_have_monotonic_disclosure() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
-    let completed = run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
+    let completed = run_conversion(&store, &ArtifactFixtureRunner, &job.id).unwrap();
 
     let local =
         serde_json::to_string(&build_book_pipeline_diagnostic(&completed, "local-full").unwrap())
@@ -12177,11 +12364,11 @@ fn diagnostic_bundle_lands_in_the_chosen_folder_under_a_contained_name() {
     let job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
-    let completed = run_job(&store, &ArtifactFixtureRunner, &job.id).unwrap();
+    let completed = run_conversion(&store, &ArtifactFixtureRunner, &job.id).unwrap();
     let out = root.join("export");
     fs::create_dir_all(&out).unwrap();
 
@@ -12222,7 +12409,7 @@ fn open_target_fixture(
     let mut job = queue_job(
         &store,
         fake_source(None),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -12320,7 +12507,7 @@ fn skipped_collection_opens_its_hashed_manifest_as_verified_evidence() {
     let mut job = queue_job(
         &store,
         fake_collection_source(),
-        "conversion_only".into(),
+        "convert_then_translate".into(),
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
