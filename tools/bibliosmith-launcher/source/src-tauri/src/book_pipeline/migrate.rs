@@ -279,8 +279,8 @@ pub(crate) fn ordered_child_stage_ids(
 ) -> Vec<&'static str> {
     // Ahead of the legacy check on purpose: this mode postdates every state file
     // a legacy flag can describe, so a job carrying it is never mid-translation.
-    // Spelled out rather than left to fall through the `else` below, which is
-    // the retiring `conversion_only` hole and is not a contract to build on.
+    // Spelled out rather than left to fall through the `else` below, which now
+    // exists only to keep pre-retirement `conversion_only` jobs readable.
     if mode == MODE_LAYOUT_PRESERVING {
         return vec!["route", "extract"];
     }
@@ -302,6 +302,9 @@ pub(crate) fn ordered_child_stage_ids(
             "build_digest",
         ]
     } else {
+        // The retired conversion-only shape. Only jobs stored before the mode
+        // was retired reach this arm; enqueue refuses the mode outright, so no
+        // new job is given a pipeline that stops short of translation.
         vec!["route", "extract", "index"]
     }
 }

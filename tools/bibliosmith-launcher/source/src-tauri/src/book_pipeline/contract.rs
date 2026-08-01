@@ -34,6 +34,18 @@ pub(crate) const LAYOUT_PDF_WARNING_KINDS: [&str; 2] = ["large_page", "other"];
 /// merged into one paragraph.
 pub(crate) const LAYOUT_PDF_REFERENCE_LIMITATION: &str =
     "BabelDOC known limitation: author and reference sections may come back with their paragraphs merged.";
+/// Retired: conversion always continues into translation now, so nothing may be
+/// enqueued with this mode. It stays spelled out because jobs stored before the
+/// retirement still carry it, and reading them must not fall through to a
+/// pipeline shape nobody named.
+pub(crate) const MODE_CONVERSION_ONLY: &str = "conversion_only";
+/// The modes a caller may enqueue. Anything else is refused at the queue
+/// boundary rather than silently given a shape.
+pub(crate) const ENQUEUEABLE_MODES: [&str; 3] = [
+    MODE_CONVERT_THEN_TRANSLATE,
+    MODE_TRANSLATE_ONLY,
+    MODE_LAYOUT_PRESERVING,
+];
 pub(crate) const TRANSLATION_MODE_FAST: &str = "fast";
 pub(crate) const TRANSLATION_MODE_EXPERT: &str = "expert";
 pub(crate) const STATE_SCHEMA_VERSION: &str = "book-pipeline-state-v5";

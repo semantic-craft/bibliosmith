@@ -3467,6 +3467,28 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
     Ok(())
 }
 
+/// Guards the queue boundary. An unknown mode is refused instead of being given
+/// whichever pipeline shape it happens to miss, and the retired conversion-only
+/// mode is refused by name so the message says why rather than reading as a
+/// typo. Stored jobs are not re-checked: retiring the mode must not stop an
+/// existing library from opening.
+fn validate_enqueue_mode(mode: &str) -> Result<(), String> {
+    if ENQUEUEABLE_MODES.contains(&mode) {
+        return Ok(());
+    }
+    if mode == MODE_CONVERSION_ONLY {
+        return Err(format!(
+            "Book Pipeline mode {MODE_CONVERSION_ONLY} was retired: conversion now always \
+             continues into translation. Enqueue {MODE_CONVERT_THEN_TRANSLATE} instead. Jobs \
+             queued before the retirement keep running and stay readable."
+        ));
+    }
+    Err(format!(
+        "Unknown Book Pipeline mode {mode}. Valid modes: {}.",
+        ENQUEUEABLE_MODES.join(", ")
+    ))
+}
+
 fn queue_job_with_translation_intent(
     store: &dyn BookPipelineStateStore,
     source: BookPipelineSource,
@@ -3474,6 +3496,7 @@ fn queue_job_with_translation_intent(
     translation_intent: BookPipelineTranslationIntent,
     config: BookPipelinePreviewConfig,
 ) -> Result<BookPipelineJob, String> {
+    validate_enqueue_mode(&mode)?;
     queue_job_with_translation_intent_and_executor(
         store,
         &SystemCommandExecutor,
@@ -3484,6 +3507,10 @@ fn queue_job_with_translation_intent(
     )
 }
 
+/// Builds the job for a mode the caller has already cleared. `validate_enqueue_mode`
+/// sits one frame up in `queue_job_with_translation_intent`, which is the path the
+/// Tauri command takes; entering here directly skips that gate and is how tests
+/// reconstruct jobs in the retired conversion-only shape.
 fn queue_job_with_translation_intent_and_executor<E: RunnerCommandExecutor>(
     store: &dyn BookPipelineStateStore,
     executor: &E,
@@ -4126,6 +4153,10 @@ fn collection_snapshot_route(
     })
 }
 
+/// Tests reach the queue through here. The retired conversion-only mode goes
+/// around `validate_enqueue_mode` on purpose: the tests below assert on the
+/// three-stage shape of jobs queued before the retirement, and that shape has to
+/// stay reachable to stay covered. Every other mode goes through the real gate.
 #[cfg(test)]
 fn queue_job(
     store: &dyn BookPipelineStateStore,
@@ -4133,22 +4164,27 @@ fn queue_job(
     mode: String,
     config: BookPipelinePreviewConfig,
 ) -> Result<BookPipelineJob, String> {
-    queue_job_with_translation_intent(
-        store,
-        source,
-        mode,
-        BookPipelineTranslationIntent {
-            translation_mode: TRANSLATION_MODE_FAST.into(),
-            profile_id: "fake-provider-profile".into(),
-            config_id: "fake-provider-config".into(),
-            skill_ids: Vec::new(),
-            second_pass_enabled: false,
-            text_cleanup: false,
-            digest_mode: false,
-            output_formats: default_output_formats(),
-        },
-        config,
-    )
+    let intent = BookPipelineTranslationIntent {
+        translation_mode: TRANSLATION_MODE_FAST.into(),
+        profile_id: "fake-provider-profile".into(),
+        config_id: "fake-provider-config".into(),
+        skill_ids: Vec::new(),
+        second_pass_enabled: false,
+        text_cleanup: false,
+        digest_mode: false,
+        output_formats: default_output_formats(),
+    };
+    if mode == MODE_CONVERSION_ONLY {
+        return queue_job_with_translation_intent_and_executor(
+            store,
+            &SystemCommandExecutor,
+            source,
+            mode,
+            intent,
+            config,
+        );
+    }
+    queue_job_with_translation_intent(store, source, mode, intent, config)
 }
 
 fn handoff_job_markdown(
@@ -6338,8 +6374,19 @@ fn collection_awaits_attachment_routing(job: &BookPipelineJob) -> bool {
         })
 }
 
+/// Every live mode hands off to translation once the run finishes. The retired
+/// conversion-only mode is the single exception, and it is named here rather
+/// than inferred: before it was retired any string that was not one of the two
+/// live modes silently inherited its half pipeline, so a typo in stored state
+/// produced a job that stopped after extraction and looked finished.
+/// Whether extraction is followed by a translation handoff.
+///
+/// Phrased as exclusions because conversion now always continues into
+/// translation: the two modes that stop are the retired `conversion_only`, which
+/// never translated, and the layout-preserving track, which already has -- its
+/// single pass is the translation, and there is no Markdown to hand anywhere.
 fn should_handoff_after_run(mode: &str) -> bool {
-    mode == MODE_CONVERT_THEN_TRANSLATE || mode == MODE_TRANSLATE_ONLY
+    mode != MODE_CONVERSION_ONLY && mode != MODE_LAYOUT_PRESERVING
 }
 
 impl PipelineRunner for SystemPipelineRunner {
@@ -9159,17 +9206,19 @@ fn create_translation_handoff_project_with_title(
     let source = project_root.join("source").join("source.md");
     fs::copy(&markdown_path, &original).map_err(|err| err.to_string())?;
     fs::copy(&markdown_path, &source).map_err(|err| err.to_string())?;
-    let mineru_source = markdown_path.with_extension("mineru");
-    let source_resources_path = if mineru_source.is_dir() {
-        let directory_name = mineru_source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "MinerU artifact directory has an invalid name.".to_string())?;
-        let target = project_root.join("source").join(directory_name);
-        copy_directory_tree(&mineru_source, &target)?;
-        Some(format!("source/{directory_name}"))
-    } else {
-        None
+    let source_resources_path = match markdown_resource_directory(&markdown_path) {
+        Some(resources) => {
+            let directory_name = resources
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "Markdown resource directory has an invalid name.".to_string())?;
+            // Keep the directory name: the Markdown references it by that exact
+            // relative path, so renaming it here would dangle every figure link.
+            let target = project_root.join("source").join(directory_name);
+            copy_directory_tree(&resources, &target)?;
+            Some(format!("source/{directory_name}"))
+        }
+        None => None,
     };
     let source_sha256 = sha256_file(&markdown_path)?;
     write_source_manifest(
@@ -9208,17 +9257,33 @@ fn create_translation_handoff_project_with_title(
     })
 }
 
+/// The sibling directory a cleaned Markdown file needs in order to render.
+///
+/// MinerU writes `<stem>.mineru`. The PaddleOCR wrapper writes `<stem>_assets`
+/// and rewrites every image reference in the Markdown to the relative path
+/// `<stem>_assets/<file>`, so that directory has to travel with the file or the
+/// handed-off project has a figure link pointing at nothing.
+fn markdown_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
+    let mineru = markdown_path.with_extension("mineru");
+    if mineru.is_dir() {
+        return Some(mineru);
+    }
+    let stem = markdown_path.file_stem().and_then(|name| name.to_str())?;
+    let assets = markdown_path.with_file_name(format!("{stem}_assets"));
+    assets.is_dir().then_some(assets)
+}
+
 fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(source).map_err(|err| err.to_string())?;
     if metadata.file_type().is_symlink() {
         return Err(format!(
-            "Refusing to copy a symlink from the MinerU artifact tree: {}",
+            "Refusing to copy a symlink from the Markdown resource tree: {}",
             display_path(source)
         ));
     }
     if !metadata.is_dir() {
         return Err(format!(
-            "MinerU artifact path is not a directory: {}",
+            "Markdown resource path is not a directory: {}",
             display_path(source)
         ));
     }
@@ -9230,7 +9295,7 @@ fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
         let entry_metadata = fs::symlink_metadata(&source_path).map_err(|err| err.to_string())?;
         if entry_metadata.file_type().is_symlink() {
             return Err(format!(
-                "Refusing to copy a symlink from the MinerU artifact tree: {}",
+                "Refusing to copy a symlink from the Markdown resource tree: {}",
                 display_path(&source_path)
             ));
         }
@@ -9240,7 +9305,7 @@ fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
             fs::copy(&source_path, &target_path).map_err(|err| err.to_string())?;
         } else {
             return Err(format!(
-                "Unsupported entry in MinerU artifact tree: {}",
+                "Unsupported entry in the Markdown resource tree: {}",
                 display_path(&source_path)
             ));
         }
