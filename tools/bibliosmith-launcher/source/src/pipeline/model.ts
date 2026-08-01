@@ -254,11 +254,15 @@ export function isTrackOnlyDraftPatch(patch: Partial<PipelineDraft>): boolean {
  * effect that reset the draft instead would have to re-fire on every identity
  * change, which is the bug class the island's `sourceIdentity` comment is about.
  */
+// Takes the mode rather than the whole draft on purpose: its caller is a
+// `useCallback` whose dependencies are deliberately field-level, so that a
+// keystroke elsewhere in the draft does not rebuild it. Asking for the draft
+// object would force `pipelineDraft` into that array and undo that.
 export function effectivePipelineMode(
-  draft: PipelineDraft,
+  mode: PipelineDraft["mode"],
   preview: BookPipelineRouteItem[],
 ): PipelineDraft["mode"] {
-  return draft.mode === "layout_preserving" && layoutTrackAvailable(preview)
+  return mode === "layout_preserving" && layoutTrackAvailable(preview)
     ? "layout_preserving"
     : "convert_then_translate";
 }

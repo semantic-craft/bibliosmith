@@ -288,7 +288,7 @@ export default function App() {
       // Not `pipelineDraft.mode` directly: the layout-preserving track is only
       // eligible for a single text PDF, and the draft can still be carrying that
       // choice from a book the user has since swapped away from.
-      const mode = effectivePipelineMode(pipelineDraft, pipelinePreview);
+      const mode = effectivePipelineMode(pipelineDraft.mode, pipelinePreview);
       const queued = await queueBookPipelineJob(source, mode, translationIntent, pipelineConfig);
       setPipelineState((current) => upsertPipelineJob(current, queued));
       setPipelinePreview(queued.route);

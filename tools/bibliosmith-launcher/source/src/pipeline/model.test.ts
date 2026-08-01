@@ -25,7 +25,6 @@ import {
   unitProgress,
   visiblePhaseIndexes,
 } from "./model";
-import { defaultPipelineDraft, type PipelineDraft } from "./model";
 import type { BookPipelineRouteItem } from "../types";
 import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
 import {
@@ -768,14 +767,9 @@ describe("the two book tracks", () => {
   });
 
   describe("effectivePipelineMode", () => {
-    const draft = (mode: PipelineDraft["mode"]): PipelineDraft => ({
-      ...defaultPipelineDraft,
-      mode,
-    });
-
     it("honours the layout track when the preflight supports it", () => {
       expect(
-        effectivePipelineMode(draft("layout_preserving"), [route("r1", "direct_text")]),
+        effectivePipelineMode("layout_preserving", [route("r1", "direct_text")]),
       ).toBe("layout_preserving");
     });
 
@@ -784,13 +778,13 @@ describe("the two book tracks", () => {
     // queueing that gets refused by the backend.
     it("falls back to the reflow track when the book is no longer eligible", () => {
       expect(
-        effectivePipelineMode(draft("layout_preserving"), [route("r1", "remote_paddleocr")]),
+        effectivePipelineMode("layout_preserving", [route("r1", "remote_paddleocr")]),
       ).toBe("convert_then_translate");
     });
 
     it("never upgrades a reflow draft on its own", () => {
       expect(
-        effectivePipelineMode(draft("convert_then_translate"), [route("r1", "direct_text")]),
+        effectivePipelineMode("convert_then_translate", [route("r1", "direct_text")]),
       ).toBe("convert_then_translate");
     });
   });
