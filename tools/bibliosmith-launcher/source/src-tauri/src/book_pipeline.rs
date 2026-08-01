@@ -4948,9 +4948,77 @@ fn apply_runner_output_to_children(job: &mut BookPipelineJob) {
         child.artifacts = job.artifacts.clone();
         child.attempts = job.attempts;
         child.last_error = None;
+        split_children_per_book(job);
     }
     prepare_item_index_after_extract(job);
     derive_job(job);
+}
+
+/// Give every converted book its own child, so every book reaches translation.
+///
+/// A local PDF folder can hold several books and each one produces its own
+/// cleaned Markdown, but a non-collection job carries a single child. The
+/// handoff hands off one child at a time and picks a job's first `markdown`
+/// artifact, so all but one book was silently dropped from the translation
+/// track. The split runs only when a conversion really produced more than one
+/// book; a single-book run keeps the child it already had, untouched.
+fn split_children_per_book(job: &mut BookPipelineJob) {
+    let [child] = job.children.as_slice() else {
+        return;
+    };
+    let markdowns = child
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "markdown")
+        .cloned()
+        .collect::<Vec<_>>();
+    if markdowns.len() < 2 {
+        return;
+    }
+    let template = child.clone();
+    job.children = markdowns
+        .iter()
+        .enumerate()
+        .map(|(index, markdown)| {
+            let mut book = template.clone();
+            book.id = format!("{}-book{:03}", job.id, index + 1);
+            book.artifacts = artifacts_beside(&template.artifacts, &markdown.path);
+            book.source.title = Path::new(&markdown.path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+                .or_else(|| template.source.title.clone());
+            derive_child(&mut book);
+            book
+        })
+        .collect();
+}
+
+/// The artifacts that belong to one book: everything the wrapper wrote inside
+/// that book's own output directory, which is where its Markdown sits.
+fn artifacts_beside(
+    artifacts: &[BookPipelineArtifact],
+    markdown_path: &str,
+) -> Vec<BookPipelineArtifact> {
+    let Some(book_dir) = Path::new(markdown_path).parent() else {
+        return Vec::new();
+    };
+    artifacts
+        .iter()
+        .filter(|artifact| Path::new(&artifact.path).starts_with(book_dir))
+        .cloned()
+        .collect()
+}
+
+/// The Markdown a specific child is responsible for handing off.
+fn child_markdown_artifact_path(job: &BookPipelineJob, child_id: &str) -> Option<String> {
+    job.children
+        .iter()
+        .find(|child| child.id == child_id)?
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "markdown")
+        .map(|artifact| artifact.path.clone())
 }
 
 fn prepare_item_index_after_extract(job: &mut BookPipelineJob) {
@@ -6196,77 +6264,113 @@ fn run_job_with_handoff_mode(
                         "Source preparation completed; translation handoff started".into()
                     });
                 let execution_owner = store.execution_owner()?;
-                // Everything the runner produced is still only in memory here.
-                // Returning through `?` would drop the whole conversion along
-                // with it — and leave the extract stage `running` on disk from
-                // the save above — so the user had to re-OCR just to retry a
-                // handoff. Persist the run, then record the handoff as failed.
-                let Some(handoff_child_id) =
-                    mark_handoff_running(&mut state.jobs[index], execution_owner)
-                else {
-                    let error = "No completed extraction is ready for translation handoff.";
-                    state.jobs[index].current_step = "Translation handoff failed".into();
-                    state.jobs[index].last_error = Some(error.into());
-                    state.jobs[index]
-                        .log_summary
-                        .push(format!("Translation handoff failed: {error}"));
-                    mark_handoff_unavailable(&mut state.jobs[index], error);
+                // A folder can convert several books, and each one is its own
+                // child with its own Markdown. Hand every one of them off before
+                // returning, or the books after the first stay out of the
+                // translation track with nothing saying so.
+                let mut state = state;
+                let mut index = index;
+                let mut handed_off_any = false;
+                // A child is handed off at most once per run. The stage status
+                // should already guarantee that, but this loop drives the whole
+                // conversion's return path and must terminate on its own terms.
+                let mut attempted: BTreeSet<String> = BTreeSet::new();
+                loop {
+                    // Everything the runner produced is still only in memory
+                    // here. Returning through `?` would drop the whole
+                    // conversion along with it — and leave the extract stage
+                    // `running` on disk from the save above — so the user had to
+                    // re-OCR just to retry a handoff. Persist the run, then
+                    // record the handoff as failed.
+                    let Some(handoff_child_id) =
+                        mark_handoff_running(&mut state.jobs[index], execution_owner)
+                    else {
+                        if handed_off_any {
+                            break;
+                        }
+                        let error = "No completed extraction is ready for translation handoff.";
+                        state.jobs[index].current_step = "Translation handoff failed".into();
+                        state.jobs[index].last_error = Some(error.into());
+                        state.jobs[index]
+                            .log_summary
+                            .push(format!("Translation handoff failed: {error}"));
+                        mark_handoff_unavailable(&mut state.jobs[index], error);
+                        state.jobs[index].log_summary =
+                            trim_log_summary(&state.jobs[index].log_summary);
+                        state.jobs[index].updated_at = now_label();
+                        let finished = state.jobs[index].clone();
+                        store.save(&state)?;
+                        return Ok(finished);
+                    };
+                    if !attempted.insert(handoff_child_id.clone()) {
+                        break;
+                    }
+                    // Hand off this child's own book. Without it every child
+                    // would select the job's first Markdown artifact and the
+                    // same book would be handed off again and again.
+                    let artifact_path =
+                        child_markdown_artifact_path(&state.jobs[index], &handoff_child_id);
                     state.jobs[index].log_summary =
                         trim_log_summary(&state.jobs[index].log_summary);
                     state.jobs[index].updated_at = now_label();
-                    let finished = state.jobs[index].clone();
+                    let handoff_job = state.jobs[index].clone();
                     store.save(&state)?;
-                    return Ok(finished);
-                };
-                state.jobs[index].log_summary = trim_log_summary(&state.jobs[index].log_summary);
-                state.jobs[index].updated_at = now_label();
-                let handoff_job = state.jobs[index].clone();
-                store.save(&state)?;
 
-                let handoff_result = if let Some(repo_root) = repo_root {
-                    handoff_runner.handoff(&handoff_job, None, repo_root)
-                } else {
-                    local_reading_repo_root().and_then(|repo_root| {
-                        handoff_runner.handoff(&handoff_job, None, &repo_root)
-                    })
-                };
-                let mut state = store.load()?;
-                let index = state
-                    .jobs
-                    .iter()
-                    .position(|job| job.id == job_id)
-                    .ok_or_else(|| {
-                        "Book Pipeline job not found after handoff completed.".to_string()
-                    })?;
-                match handoff_result {
-                    Ok(handoff) => {
-                        state.jobs[index].current_step = "Translation handoff ready".into();
-                        state.jobs[index].last_error = None;
-                        state.jobs[index]
-                            .artifacts
-                            .extend(handoff.artifacts.clone());
-                        state.jobs[index]
-                            .log_summary
-                            .extend(handoff.log_summary.clone());
-                        mark_handoff_finished(
-                            &mut state.jobs[index],
-                            Some(&handoff_child_id),
-                            Ok(&handoff),
-                        );
-                    }
-                    Err(error) => {
-                        state.jobs[index].current_step = "Translation handoff failed".into();
-                        state.jobs[index].last_error = Some(redact_runner_message(&error));
-                        state.jobs[index]
-                            .log_summary
-                            .push(redact_runner_message(&format!(
-                                "Translation handoff failed: {error}"
-                            )));
-                        mark_handoff_finished(
-                            &mut state.jobs[index],
-                            Some(&handoff_child_id),
-                            Err(&error),
-                        );
+                    let selected = artifact_path.as_deref();
+                    let handoff_result = if let Some(repo_root) = repo_root {
+                        handoff_runner.handoff(&handoff_job, selected, repo_root)
+                    } else {
+                        local_reading_repo_root().and_then(|repo_root| {
+                            handoff_runner.handoff(&handoff_job, selected, &repo_root)
+                        })
+                    };
+                    state = store.load()?;
+                    index = state
+                        .jobs
+                        .iter()
+                        .position(|job| job.id == job_id)
+                        .ok_or_else(|| {
+                            "Book Pipeline job not found after handoff completed.".to_string()
+                        })?;
+                    match handoff_result {
+                        Ok(handoff) => {
+                            state.jobs[index].current_step = "Translation handoff ready".into();
+                            state.jobs[index].last_error = None;
+                            state.jobs[index]
+                                .artifacts
+                                .extend(handoff.artifacts.clone());
+                            state.jobs[index]
+                                .log_summary
+                                .extend(handoff.log_summary.clone());
+                            mark_handoff_finished(
+                                &mut state.jobs[index],
+                                Some(&handoff_child_id),
+                                Ok(&handoff),
+                            );
+                            handed_off_any = true;
+                        }
+                        Err(error) => {
+                            state.jobs[index].current_step = "Translation handoff failed".into();
+                            state.jobs[index].last_error = Some(redact_runner_message(&error));
+                            state.jobs[index]
+                                .log_summary
+                                .push(redact_runner_message(&format!(
+                                    "Translation handoff failed: {error}"
+                                )));
+                            mark_handoff_finished(
+                                &mut state.jobs[index],
+                                Some(&handoff_child_id),
+                                Err(&error),
+                            );
+                            // One book failing must not strand the others, but
+                            // the job keeps the failure so the user sees it.
+                            state.jobs[index].log_summary =
+                                trim_log_summary(&state.jobs[index].log_summary);
+                            state.jobs[index].updated_at = now_label();
+                            let finished = state.jobs[index].clone();
+                            store.save(&state)?;
+                            return Ok(finished);
+                        }
                     }
                 }
                 state.jobs[index].log_summary = trim_log_summary(&state.jobs[index].log_summary);
@@ -8893,11 +8997,20 @@ fn create_translation_handoff_project(
     artifact_path: Option<&str>,
     repo_root: &Path,
 ) -> Result<TranslationHandoffOutput, String> {
+    // With several books in one job the job title names the folder, not any one
+    // book, so every project would be slugged the same. Fall through to the
+    // Markdown's own file stem in that case.
+    let one_book = job
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "markdown")
+        .count()
+        <= 1;
     create_translation_handoff_project_with_title(
         job,
         artifact_path,
         repo_root,
-        job.source.title.as_deref(),
+        one_book.then_some(job.source.title.as_deref()).flatten(),
     )
 }
 
