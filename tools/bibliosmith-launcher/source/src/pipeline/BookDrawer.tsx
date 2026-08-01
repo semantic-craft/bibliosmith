@@ -10,6 +10,7 @@ import type { PipelineCopy } from "./copy";
 import {
   activePhaseIndex,
   allArtifacts,
+  currentArtifact,
   currentStage,
   firstMarkdownArtifact,
   phaseStates,
@@ -190,12 +191,6 @@ function sampleArtifact(unit: BookUnit, stageId: GateView["stageId"]): BookPipel
   return null;
 }
 
-function translationSampleArtifact(unit: BookUnit): BookPipelineArtifact | null {
-  return allArtifacts(unit).find(
-    (artifact) => artifact.kind === "translation_sample_report" && !artifact.supersededBy,
-  ) ?? null;
-}
-
 /** The 3-5 "take a look" confirmation card for a pending human gate. */
 function GateCard({
   unit,
@@ -250,7 +245,7 @@ function GateCard({
   // otherwise be blocked here with no picker on screen to unblock them.
   const jobSlotRetired = canRunProviderSample && !slotMeta(jobProfile, jobConfig);
 
-  const reportArtifact = canRunProviderSample ? translationSampleArtifact(unit) : null;
+  const reportArtifact = canRunProviderSample ? currentArtifact(unit, "translation_sample_report") : null;
   const reportVersion = reportArtifact?.sha256 ?? reportArtifact?.artifactId ?? null;
   const [sampleReportState, setSampleReport] = useState<SampleReportState | null>(null);
   const sampleReport = sampleReportState?.version === reportVersion ? sampleReportState.report : null;

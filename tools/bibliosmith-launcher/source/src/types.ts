@@ -214,7 +214,6 @@ export type BookPipelineOcrSampleEngine = {
   status: "ok" | "failed";
   markdownExcerpt: string;
   characterCount: number;
-  pageCount: number | null;
   elapsedMs: number;
   /** Present only when status is "failed"; already redacted by the worker. */
   error: string | null;
@@ -222,7 +221,6 @@ export type BookPipelineOcrSampleEngine = {
 
 export type BookPipelineOcrSampleReport = {
   schema: "ocr-sample-compare-report-v1";
-  sourcePdfSha256: string;
   totalPages: number;
   /** 1-based page numbers, interior only — never the cover or the last page. */
   sampledPages: number[];

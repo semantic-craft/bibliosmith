@@ -21,7 +21,6 @@ const readSample = vi.mocked(readBookPipelineOcrSample);
 function report(over: Partial<BookPipelineOcrSampleReport> = {}): BookPipelineOcrSampleReport {
   return {
     schema: "ocr-sample-compare-report-v1",
-    sourcePdfSha256: "0".repeat(64),
     totalPages: 40,
     sampledPages: [11, 21, 30],
     characterBudget: 4000,
@@ -31,7 +30,6 @@ function report(over: Partial<BookPipelineOcrSampleReport> = {}): BookPipelineOc
         status: "ok",
         markdownExcerpt: "# Paddle heading\n\nPaddle body.",
         characterCount: 30,
-        pageCount: 3,
         elapsedMs: 4100,
         error: null,
       },
@@ -40,7 +38,6 @@ function report(over: Partial<BookPipelineOcrSampleReport> = {}): BookPipelineOc
         status: "ok",
         markdownExcerpt: "# MinerU heading\n\nMinerU body.",
         characterCount: 30,
-        pageCount: 3,
         elapsedMs: 9200,
         error: null,
       },
@@ -249,7 +246,6 @@ describe("OcrCompareCard", () => {
             status: "failed",
             markdownExcerpt: "",
             characterCount: 0,
-            pageCount: null,
             elapsedMs: 12,
             error: "BAIDU_PADDLEOCR_TOKEN is not configured",
           },

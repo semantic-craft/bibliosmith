@@ -257,7 +257,7 @@
   color: #fff;
 }
 .pl-cover span {
-  font-family: "Songti SC", "Noto Serif SC", Georgia, serif;
+  font-family: var(--font-reading);
   font-size: 15px;
   line-height: 1.3;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -408,7 +408,8 @@
 .pl-ci-field small { display: block; margin-top: 3px; color: var(--pl-faint); font-size: 10.5px; text-align: right; }
 .pl-ci-field small.over, .pl-ci-error { color: var(--pl-failed); }
 .pl-ci-error { margin: 8px 0 0; font-size: 11.5px; }
-.pl-ci-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.pl-ci-actions,
+.pl-ocrcard-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 
 /* ---------- three-phase strip ---------- */
 
@@ -474,7 +475,7 @@
   border-radius: 10px;
   background: var(--sub);
   color: var(--ink);
-  font-family: "Songti SC", "Noto Serif SC", Georgia, serif;
+  font-family: var(--font-reading);
   font-size: 12.5px;
   line-height: 1.75;
   white-space: pre-wrap;
@@ -508,11 +509,14 @@
   background: var(--sub);
 }
 .pl-scompare-head h4 { margin: 0 0 4px; color: var(--ink); font-size: 13px; }
-.pl-scompare-head p { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.pl-scompare-head p,
+.pl-ocrcard-lead { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
 .pl-scontrols { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: end; }
-.pl-scontrols label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.pl-scontrols label,
+.pl-ocrcard-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
 .pl-scontrols select,
-.pl-scontrols input {
+.pl-scontrols input,
+.pl-ocrcard-controls input {
   min-width: 0;
   width: 100%;
   padding: 7px 8px;
@@ -537,10 +541,11 @@
 .pl-scolumns > div { min-width: 0; padding: 9px; }
 .pl-scolumns > div + div { border-left: 1px solid var(--line); }
 .pl-scolumns h5 { margin: 0 0 5px; color: var(--muted); font-size: 10.5px; }
-.pl-scolumns p {
+.pl-scolumns p,
+.pl-ocrpane-text {
   margin: 0;
   color: var(--ink);
-  font-family: "Songti SC", "Noto Serif SC", Georgia, serif;
+  font-family: var(--font-reading);
   font-size: 11px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -636,19 +641,9 @@
   margin-top: 14px;
   padding: 13px 15px;
 }
-.pl-ocrcard-lead { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
 .pl-ocrcard-controls { display: flex; align-items: end; gap: 8px; }
-.pl-ocrcard-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
-.pl-ocrcard-controls input {
-  width: 76px;
-  padding: 7px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--island);
-  color: var(--ink);
-  font: inherit;
-}
-.pl-ocrcard-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+/* A page count, not a full-width field. */
+.pl-ocrcard-controls input { width: 76px; border-radius: var(--radius-sm); }
 .pl-ocrpanes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
 .pl-ocrpane {
   min-width: 0;
@@ -675,18 +670,8 @@
 .pl-ocrpane-name { color: var(--ink); font-size: 12px; font-weight: 600; }
 .pl-ocrpane-meta { display: flex; gap: 10px; margin-bottom: 6px; color: var(--muted); font-size: 10.5px; }
 .pl-ocrpane-error { margin: 0; color: var(--pl-failed); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-.pl-ocrpane-text {
-  max-height: 190px;
-  margin: 0;
-  overflow: auto;
-  color: var(--ink);
-  /* Same reading stack as .pl-scolumns p; there is no token for it yet. */
-  font-family: "Songti SC", "Noto Serif SC", Georgia, serif;
-  font-size: 11px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+/* Only the scroll box differs from the translation comparison column. */
+.pl-ocrpane-text { max-height: 190px; overflow: auto; }
 
 @container (max-width: 560px) {
   .pl-det-cards,

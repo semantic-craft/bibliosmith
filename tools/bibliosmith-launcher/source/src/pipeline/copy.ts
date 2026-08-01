@@ -167,7 +167,6 @@ export function pipelineCopy(locale: PipelineLocale) {
     ocrCompareEmpty: zh ? "这个引擎没有返回文字。" : "This engine returned no text.",
     ocrCompareFailed: zh ? "未能完成" : "Did not finish",
     ocrComparePick: zh ? "用这个引擎转换" : "Convert with this engine",
-    ocrCompareRouteSet: zh ? "转换路由已改" : "Conversion route updated",
     // Said plainly because the pages cost money: the report is a preview of the
     // real conversion, not the conversion itself.
     ocrCompareNote: zh

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { readBookPipelineOcrSample } from "../api";
 import type { BookPipelineOcrSampleEngine, BookPipelineOcrSampleReport } from "../types";
 import type { PipelineCopy } from "./copy";
-import { allArtifacts, unitRoute, type BookUnit, type PipelineBusy } from "./model";
+import { currentArtifact, unitRoute, type BookUnit, type PipelineBusy } from "./model";
 
 /** Engine name to the route-override token apply_route_overrides accepts. */
 const ROUTE_TOKEN: Record<BookPipelineOcrSampleEngine["engine"], string> = {
@@ -39,14 +39,6 @@ const MAX_SAMPLE_PAGES = 10;
 // The report is read by artifact digest, so a stale render can be told from a
 // current one without an effect resetting state between books.
 type ReportState = { version: string; report: BookPipelineOcrSampleReport };
-
-function ocrSampleArtifact(unit: BookUnit) {
-  return (
-    allArtifacts(unit).find(
-      (artifact) => artifact.kind === "ocr_sample_report" && !artifact.supersededBy,
-    ) ?? null
-  );
-}
 
 /**
  * The local file a source reference points at, or null when it names none.
@@ -173,7 +165,7 @@ export function OcrCompareCard({
 }) {
   const route = unitRoute(unit);
   const childId = unit.child?.id ?? null;
-  const artifact = ocrSampleArtifact(unit);
+  const artifact = currentArtifact(unit, "ocr_sample_report");
   const version = artifact?.sha256 ?? artifact?.artifactId ?? null;
   const [reportState, setReportState] = useState<ReportState | null>(null);
   const report = reportState?.version === version ? reportState.report : null;
