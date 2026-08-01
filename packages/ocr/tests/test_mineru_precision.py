@@ -172,6 +172,25 @@ class FailedBatchSession(LocalBatchSession):
 
 
 class MinerUPrecisionCliTests(unittest.TestCase):
+    # The scratch-directory filter used to be matched against the absolute path,
+    # so scanning any folder living under a directory named tmp — /tmp on Linux,
+    # or a plain ~/tmp/books — silently found nothing and failed preflight with
+    # "No supported local files or URLs found".
+    def test_a_scanned_root_under_tmp_still_finds_its_files(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "tmp" / "books"
+            root.mkdir(parents=True)
+            write_blank_pdf(root / "book.pdf")
+            # A scratch directory *inside* the scanned tree is still skipped.
+            (root / "tmp").mkdir()
+            write_blank_pdf(root / "tmp" / "scratch.pdf")
+
+            found = mineru.iter_local_files(root)
+
+        self.assertEqual([path.name for path in found], ["book.pdf"])
+
     def test_cli_marks_progress_failed_when_precision_extract_fails(self) -> None:
         with (
             mock.patch.object(

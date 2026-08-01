@@ -142,7 +142,11 @@ def iter_local_files(path: Path) -> list[Path]:
         for candidate in path.rglob("*"):
             if not candidate.is_file():
                 continue
-            if ignored.intersection(candidate.parts):
+            # Matched against the parts below the directory being scanned, not
+            # the absolute path: the caller named this root explicitly, so a
+            # component of it (a book folder under ~/tmp, or /tmp itself) must
+            # not filter out everything inside it.
+            if ignored.intersection(candidate.relative_to(path).parts):
                 continue
             if candidate.suffix.lower() in SUPPORTED_SUFFIXES:
                 files.append(candidate)
