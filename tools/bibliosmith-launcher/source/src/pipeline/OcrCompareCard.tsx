@@ -49,18 +49,47 @@ function ocrSampleArtifact(unit: BookUnit) {
 }
 
 /**
+ * The local file a source reference points at, or null when it names none.
+ *
+ * Mirrors ocr_sample_local_path in book_pipeline.rs: zotero_source_ref appends
+ * `#source_md5=<fingerprint>` to the attachment's storage path, and falls back
+ * to a `zotero://attachment/<key>` URI when Zotero reported no path at all.
+ * Stripped by exact suffix rather than by splitting on `#`, because `#` is legal
+ * in a filename.
+ */
+function localPdfPath(sourceRef: string | null | undefined): string | null {
+  if (!sourceRef) return null;
+  const marker = sourceRef.lastIndexOf("#source_md5=");
+  const path = (marker < 0 ? sourceRef : sourceRef.slice(0, marker)).trim();
+  if (!path || path.startsWith("zotero://")) return null;
+  return /\.pdf$/i.test(path) ? path : null;
+}
+
+/**
  * Whether comparing engines can still change anything for this book.
  *
- * The backend refuses a sample once extraction is running or done — by then the
- * engine has been chosen and the comparison would answer a closed question — so
- * the card follows the same rule rather than offering a button that errors.
+ * Two conditions, both mirroring what the backend enforces so the card never
+ * offers a button that errors:
+ *
+ * - Extraction has not started. The backend refuses a sample once it is running
+ *   or done, because by then the engine has been chosen and the comparison
+ *   would answer a closed question.
+ * - There is a local PDF to sample. A Zotero attachment whose file was never
+ *   synced carries only a `zotero://` reference, which the backend rejects with
+ *   "not stored locally" — knowable from state, so it is not worth a paid
+ *   round trip to discover.
  */
 export function canCompareOcrEngines(unit: BookUnit): boolean {
   const route = unitRoute(unit);
   if (!route || !OCR_ROUTE_KINDS.has(route.routeKind)) return false;
-  const extract = unit.child?.stages.find((stage) => stage.stageId === "extract");
+  const child = unit.child;
+  const extract = child?.stages.find((stage) => stage.stageId === "extract");
   if (!extract) return false;
-  return extract.status !== "running" && extract.status !== "completed";
+  if (extract.status === "running" || extract.status === "completed") return false;
+  // Same references, same order, as ocr_sample_source_pdf walks.
+  return [child?.source.path, ...(child?.route ?? []).map((item) => item.sourceRef)].some(
+    (reference) => localPdfPath(reference) !== null,
+  );
 }
 
 /**

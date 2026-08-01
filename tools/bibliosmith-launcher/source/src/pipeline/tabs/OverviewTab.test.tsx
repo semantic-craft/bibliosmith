@@ -32,6 +32,9 @@ function tabProps(unit: BookUnit, over: Partial<TabProps> = {}): TabProps {
 
 function unitAwaitingOcr(routeKind = "remote_paddleocr"): BookUnit {
   const unit = bookUnit({ stages: [stage("route", "completed"), stage("extract", "pending")] });
+  // A synced attachment carries a real storage path; without one there is no
+  // PDF to sample and the card correctly stays hidden.
+  unit.child!.source.path = "/storage/ABCD1234/book.pdf";
   unit.child!.route = [routeItem({ routeKind })];
   return unit;
 }
@@ -44,6 +47,7 @@ describe("OverviewTab · OCR comparison wiring", () => {
 
   it("hides it once conversion is under way", () => {
     const unit = bookUnit({ stages: [stage("route", "completed"), stage("extract", "completed")] });
+    unit.child!.source.path = "/storage/ABCD1234/book.pdf";
     unit.child!.route = [routeItem({ routeKind: "remote_paddleocr" })];
     render(<OverviewTab {...tabProps(unit)} />);
     expect(screen.queryByText(copy.ocrCompareTitle)).toBeNull();

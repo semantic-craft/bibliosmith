@@ -453,7 +453,11 @@ export default function App() {
     try {
       const job = await runBookPipelineOcrSample(jobId, childId, samplePages);
       setPipelineState((current) => upsertPipelineJob(current, job));
-      addActivity("success", `OCR sample ready: ${samplePages} page(s)`);
+      // "requested", not "sampled": a book with fewer interior pages than asked
+      // for yields fewer, and the count that was actually compared is in the
+      // job's own log summary. Claiming ten pages here when four were sampled
+      // would misstate what the run spent.
+      addActivity("success", `OCR sample ready; requested up to ${samplePages} page(s)`);
       showFloatingToast(bookPipelineCopy.ocrCompareReady, "success");
     } catch (error) {
       const message = String(error);

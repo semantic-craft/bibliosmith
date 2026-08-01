@@ -49,12 +49,20 @@ function report(over: Partial<BookPipelineOcrSampleReport> = {}): BookPipelineOc
   };
 }
 
-/** A book still waiting to be converted through an OCR route. */
+/**
+ * A book still waiting to be converted through an OCR route.
+ *
+ * `source.path` carries a real storage path with the `#source_md5=` suffix
+ * zotero_source_ref appends, because that is what a synced attachment actually
+ * looks like — a fixture holding only an attachment key would have no PDF to
+ * sample and so would not be sampleable at all.
+ */
 function sampleableUnit(over: { artifacts?: ReturnType<typeof artifact>[]; extract?: string } = {}): BookUnit {
   const unit = bookUnit({
     stages: [stage("route", "completed"), stage("extract", (over.extract ?? "pending") as never)],
   });
   const child = unit.child!;
+  child.source.path = "/storage/ABCD1234/book.pdf#source_md5=d41d8cd98f00b204e9800998ecf8427e";
   child.route = [routeItem({ routeKind: "remote_paddleocr" })];
   child.artifacts = over.artifacts ?? [];
   return unit;
@@ -110,6 +118,38 @@ describe("canCompareOcrEngines", () => {
       unit.child!.route = [routeItem({ routeKind })];
       expect(canCompareOcrEngines(unit), routeKind).toBe(true);
     }
+  });
+
+  it("stays closed when the attachment was never synced locally", () => {
+    // A single Zotero attachment with no local file carries only a zotero://
+    // reference. The backend rejects it with "not stored locally", and that is
+    // knowable from state — not worth a paid round trip to discover.
+    const unit = sampleableUnit();
+    unit.child!.source.path = undefined;
+    unit.child!.route = [
+      routeItem({ routeKind: "missing_credentials", sourceRef: "zotero://attachment/ABCD1234" }),
+    ];
+    expect(canCompareOcrEngines(unit)).toBe(false);
+  });
+
+  it("accepts a storage path carrying its md5 fingerprint", () => {
+    // zotero_source_ref appends #source_md5=<hex> to the real path; stripping
+    // it by exact suffix is what the backend does, and `#` is legal in a name.
+    const unit = sampleableUnit();
+    unit.child!.source.path = undefined;
+    unit.child!.route = [
+      routeItem({ routeKind: "remote_paddleocr", sourceRef: "/books/draft#2.pdf#source_md5=abc" }),
+    ];
+    expect(canCompareOcrEngines(unit)).toBe(true);
+  });
+
+  it("stays closed when the only local file is not a PDF", () => {
+    const unit = sampleableUnit();
+    unit.child!.source.path = "/books/notes.epub";
+    unit.child!.route = [
+      routeItem({ routeKind: "remote_paddleocr", sourceRef: "/books/notes.epub" }),
+    ];
+    expect(canCompareOcrEngines(unit)).toBe(false);
   });
 
   it("stays closed for a unit with no child job", () => {
