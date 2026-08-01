@@ -8558,6 +8558,92 @@ fn mineru_handoff_preserves_assets_and_split_keeps_links_resolvable() {
     let _ = fs::remove_dir_all(root);
 }
 
+const PADDLE_ASSET_MARKDOWN: &str =
+    "# Sample Book\n\nChapter One\n\n![Figure](Sample_Book_assets/figure.png)\n";
+
+/// Writes the layout `packages/ocr/scripts/pdf_to_html_paddleocr.py` produces:
+/// the cleaned Markdown beside its `<stem>_assets` directory, with the image
+/// references inside the Markdown pointing at that directory relatively.
+struct PaddleAssetsLayoutExecutor;
+
+impl RunnerCommandExecutor for PaddleAssetsLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        let assets_dir = book_dir.join("Sample_Book_assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(book_dir.join("Sample_Book.md"), PADDLE_ASSET_MARKDOWN).unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        fs::write(assets_dir.join("figure.png"), b"png-fixture").unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Paddle wrapper completed".into()],
+        })
+    }
+}
+
+#[test]
+fn paddle_handoff_copies_the_assets_directory_and_keeps_links_resolvable() {
+    let root = temp_root("paddle-handoff-assets");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("Sample Book.pdf"), "%PDF fixture").unwrap();
+    let repo = handoff_repo_fixture(&root);
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let handed_off = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            PaddleAssetsLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo),
+    )
+    .unwrap();
+
+    assert_eq!(handed_off.status, STATUS_READY);
+    let project_root = child_project_root(&handed_off);
+
+    // The directory keeps its name, because the Markdown references it by that
+    // exact relative path.
+    let copied_asset = project_root.join("source/Sample_Book_assets/figure.png");
+    assert_eq!(
+        fs::read(&copied_asset).unwrap(),
+        b"png-fixture",
+        "the assets directory must travel with the Markdown"
+    );
+
+    // The decisive check: the link inside the handed-off source resolves.
+    let source_md = project_root.join("source/source.md");
+    let referenced = source_md
+        .parent()
+        .unwrap()
+        .join("Sample_Book_assets/figure.png");
+    assert_eq!(
+        referenced.canonicalize().unwrap(),
+        copied_asset.canonicalize().unwrap()
+    );
+
+    let manifest =
+        fs::read_to_string(project_root.join("metadata").join("source_manifest.json")).unwrap();
+    assert!(
+        manifest.contains("source/Sample_Book_assets"),
+        "the manifest must record where the resources landed: {manifest}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 fn fake_handoff_ready_job(store: &BookPipelineStore, repo: &Path) -> String {
     fake_handoff_ready_job_with_options(store, repo, false, false)
 }

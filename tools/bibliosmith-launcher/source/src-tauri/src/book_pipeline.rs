@@ -8972,17 +8972,19 @@ fn create_translation_handoff_project_with_title(
     let source = project_root.join("source").join("source.md");
     fs::copy(&markdown_path, &original).map_err(|err| err.to_string())?;
     fs::copy(&markdown_path, &source).map_err(|err| err.to_string())?;
-    let mineru_source = markdown_path.with_extension("mineru");
-    let source_resources_path = if mineru_source.is_dir() {
-        let directory_name = mineru_source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "MinerU artifact directory has an invalid name.".to_string())?;
-        let target = project_root.join("source").join(directory_name);
-        copy_directory_tree(&mineru_source, &target)?;
-        Some(format!("source/{directory_name}"))
-    } else {
-        None
+    let source_resources_path = match markdown_resource_directory(&markdown_path) {
+        Some(resources) => {
+            let directory_name = resources
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "Markdown resource directory has an invalid name.".to_string())?;
+            // Keep the directory name: the Markdown references it by that exact
+            // relative path, so renaming it here would dangle every figure link.
+            let target = project_root.join("source").join(directory_name);
+            copy_directory_tree(&resources, &target)?;
+            Some(format!("source/{directory_name}"))
+        }
+        None => None,
     };
     let source_sha256 = sha256_file(&markdown_path)?;
     write_source_manifest(
@@ -9021,17 +9023,33 @@ fn create_translation_handoff_project_with_title(
     })
 }
 
+/// The sibling directory a cleaned Markdown file needs in order to render.
+///
+/// MinerU writes `<stem>.mineru`. The PaddleOCR wrapper writes `<stem>_assets`
+/// and rewrites every image reference in the Markdown to the relative path
+/// `<stem>_assets/<file>`, so that directory has to travel with the file or the
+/// handed-off project has a figure link pointing at nothing.
+fn markdown_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
+    let mineru = markdown_path.with_extension("mineru");
+    if mineru.is_dir() {
+        return Some(mineru);
+    }
+    let stem = markdown_path.file_stem().and_then(|name| name.to_str())?;
+    let assets = markdown_path.with_file_name(format!("{stem}_assets"));
+    assets.is_dir().then_some(assets)
+}
+
 fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(source).map_err(|err| err.to_string())?;
     if metadata.file_type().is_symlink() {
         return Err(format!(
-            "Refusing to copy a symlink from the MinerU artifact tree: {}",
+            "Refusing to copy a symlink from the Markdown resource tree: {}",
             display_path(source)
         ));
     }
     if !metadata.is_dir() {
         return Err(format!(
-            "MinerU artifact path is not a directory: {}",
+            "Markdown resource path is not a directory: {}",
             display_path(source)
         ));
     }
@@ -9043,7 +9061,7 @@ fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
         let entry_metadata = fs::symlink_metadata(&source_path).map_err(|err| err.to_string())?;
         if entry_metadata.file_type().is_symlink() {
             return Err(format!(
-                "Refusing to copy a symlink from the MinerU artifact tree: {}",
+                "Refusing to copy a symlink from the Markdown resource tree: {}",
                 display_path(&source_path)
             ));
         }
@@ -9053,7 +9071,7 @@ fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
             fs::copy(&source_path, &target_path).map_err(|err| err.to_string())?;
         } else {
             return Err(format!(
-                "Unsupported entry in MinerU artifact tree: {}",
+                "Unsupported entry in the Markdown resource tree: {}",
                 display_path(&source_path)
             ));
         }
