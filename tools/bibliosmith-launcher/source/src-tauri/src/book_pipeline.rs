@@ -11416,7 +11416,13 @@ fn placeholder_tokens(text: &str) -> BTreeMap<String, u32> {
             (None, '{') => start = Some(index),
             (Some(open), '}') => {
                 let token = &text[open..index + character.len_utf8()];
-                if token.len() > 2 && !token.chars().any(char::is_whitespace) {
+                let is_math_superscript = open > 0
+                    && text[..open].ends_with('^')
+                    && is_inside_latex_math(text, open, index + character.len_utf8());
+                if !is_math_superscript
+                    && token.len() > 2
+                    && !token.chars().any(char::is_whitespace)
+                {
                     *tokens.entry(token.to_string()).or_insert(0) += 1;
                 }
                 start = None;
@@ -11425,6 +11431,20 @@ fn placeholder_tokens(text: &str) -> BTreeMap<String, u32> {
         }
     }
     tokens
+}
+
+fn is_inside_latex_math(text: &str, start: usize, end: usize) -> bool {
+    let before = &text[..start];
+    let after = &text[end..];
+    [(r"\(", r"\)"), (r"\[", r"\]")]
+        .into_iter()
+        .any(|(opening, closing)| {
+            let Some(last_opening) = before.rfind(opening) else {
+                return false;
+            };
+            let last_closing = before.rfind(closing);
+            last_closing.is_none_or(|position| position < last_opening) && after.contains(closing)
+        })
 }
 
 fn markdown_heading_shape(text: &str) -> Vec<usize> {

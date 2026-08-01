@@ -165,6 +165,9 @@ class CustomInstructionTests(unittest.TestCase):
             self.assertIn("Critique anachronistic wording.", reflection_instruction)
             self.assertNotIn("Use restrained literary Chinese.", reflection_instruction)
             self.assertNotIn("Critique anachronistic wording.", improve_instruction)
+            self.assertIn("never spell a line break", draft_instruction)
+            self.assertIn("never spell a line break", improve_instruction)
+            self.assertIn("never insert HTML <br> tags", improve_instruction)
             self.assertLess(
                 draft_instruction.index("Use restrained literary Chinese."),
                 draft_instruction.index("# MANDATORY STRUCTURE PROTECTION"),
@@ -278,7 +281,7 @@ class CustomInstructionTests(unittest.TestCase):
             )
             self.assertEqual(len(provider.requests), 3)
 
-    def test_degraded_first_pass_does_not_claim_unrun_reflection_progress(self) -> None:
+    def test_source_fallback_does_not_claim_uncheckpointed_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project_root = Path(temporary_directory)
             manifest_path = build_run_fixture(
@@ -304,7 +307,7 @@ class CustomInstructionTests(unittest.TestCase):
             self.assertEqual(report["units"][0]["status"], "failed")
             self.assertFalse(metrics["secondPassApplied"])
             self.assertEqual(progress["total"], metrics["chunkCount"] * 2)
-            self.assertEqual(progress["completed"], metrics["chunkCount"])
+            self.assertEqual(progress["completed"], 0)
             self.assertEqual(progress["phase"], "translating")
 
 

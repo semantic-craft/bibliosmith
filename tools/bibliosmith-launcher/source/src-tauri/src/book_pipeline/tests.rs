@@ -1031,6 +1031,7 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
             manifest["translationPolicyVersion"],
             TRANSLATION_POLICY_VERSION
         );
+        assert_eq!(TRANSLATION_POLICY_VERSION, "translation-policy-v10");
         assert_eq!(manifest["maxTokens"], TRANSLATION_ENGINE_MAX_TOKENS);
         assert_eq!(
             manifest["placeholderRetries"],
@@ -8355,6 +8356,19 @@ fn automated_qa_covers_placeholders_structure_glossary_and_completeness() {
     let terms = vec![("Foo".to_string(), "术语".to_string())];
 
     assert!(automated_qa_checks(&unit("# 标题\n\n使用 {name} 术语。\n"), &terms).passed());
+    assert!(
+        automated_qa_checks(&unit("# 标题\n\n使用 {name} 术语。\\(^{12}\\)\n"), &terms)
+            .placeholder_integrity
+    );
+    assert!(
+        !automated_qa_checks(&unit("# 标题\n\n使用 {name} 术语。^{missing}\n"), &terms)
+            .placeholder_integrity
+    );
+    assert_eq!(
+        placeholder_tokens(r"Use ^{name}"),
+        BTreeMap::from([(String::from("{name}"), 1)])
+    );
+    assert!(placeholder_tokens(r"Use \(^{12}\)").is_empty());
     assert!(!automated_qa_checks(&unit("# 标题\n\n使用术语。\n"), &terms).placeholder_integrity);
     assert!(!automated_qa_checks(&unit("## 标题\n\n使用 {name} 术语。\n"), &terms).structure);
     assert!(

@@ -46,6 +46,18 @@ class GlossaryIgnoringProvider:
         return request.text
 
 
+class LongGlossaryIgnoringProvider(GlossaryIgnoringProvider):
+    def translate(self, request: TranslationRequest) -> str:
+        occurrence = 0
+
+        def translate_padding(_: re.Match[str]) -> str:
+            nonlocal occurrence
+            occurrence += 1
+            return f"这里是第{occurrence}处填充文字。"
+
+        return re.sub(r"padding words here\.", translate_padding, request.text)
+
+
 class GlossarySubstitutingProvider:
     """Translates, but reaches for a synonym instead of the required term."""
 
@@ -63,13 +75,13 @@ class GlossarySubstitutingProvider:
 
 
 class StructureBreakingProvider:
-    """Adds a paragraph, so every chunk fails validation and falls back to source."""
+    """Returns no translation, so every chunk falls back to its source."""
 
     profile_id = "fake-provider-profile"
     config_id = "fake-config-no-secrets"
 
     def translate(self, request: TranslationRequest) -> str:
-        return f"{request.text}\n\nAdded paragraph."
+        return ""
 
 
 class GlossaryEnforcementTests(unittest.TestCase):
@@ -354,7 +366,7 @@ class GlossaryOutputCheckTests(unittest.TestCase):
         a four-hundred-page book has to stay something a person can read."""
         markers = ["alpha", "bravo", "delta", "gamma", "kappa"]
         unit, _ = self._run(
-            GlossaryIgnoringProvider(),
+            LongGlossaryIgnoringProvider(),
             source_text="\n\n".join(
                 # Twice per paragraph, so the cap has to survive repetition too.
                 f"Fan {marker}. {'padding words here. ' * 40} Fan again."

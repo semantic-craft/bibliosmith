@@ -265,23 +265,31 @@ class OpenAICompatibleProvider:
         self._http_client = http_client
         self._max_attempts = max_attempts
         self._sleep = sleep
-        self._deadline_guard = _RequestDeadlineGuard()
 
     def translate(self, request: TranslationRequest) -> str:
+        deadline_guard = _RequestDeadlineGuard()
         return _translate_with_retries(
             request=request,
             credential_pool=self.credential_pool,
             max_attempts=self._max_attempts,
             sleep=self._sleep,
-            operation=self._translate_once,
+            operation=lambda active_request, key: self._translate_once(
+                active_request, key, deadline_guard=deadline_guard
+            ),
         )
 
-    def _translate_once(self, request: TranslationRequest, key: str) -> str:
+    def _translate_once(
+        self,
+        request: TranslationRequest,
+        key: str,
+        *,
+        deadline_guard: _RequestDeadlineGuard,
+    ) -> str:
         try:
             response = _post_with_total_deadline(
                 self._http_client,
                 f"{self.base_url}/chat/completions",
-                deadline_guard=self._deadline_guard,
+                deadline_guard=deadline_guard,
                 headers={"Authorization": f"Bearer {key}"},
                 json={
                     "model": self.model,
@@ -405,23 +413,31 @@ class GeminiProvider:
         self._http_client = http_client
         self._max_attempts = max_attempts
         self._sleep = sleep
-        self._deadline_guard = _RequestDeadlineGuard()
 
     def translate(self, request: TranslationRequest) -> str:
+        deadline_guard = _RequestDeadlineGuard()
         return _translate_with_retries(
             request=request,
             credential_pool=self.credential_pool,
             max_attempts=self._max_attempts,
             sleep=self._sleep,
-            operation=self._translate_once,
+            operation=lambda active_request, key: self._translate_once(
+                active_request, key, deadline_guard=deadline_guard
+            ),
         )
 
-    def _translate_once(self, request: TranslationRequest, key: str) -> str:
+    def _translate_once(
+        self,
+        request: TranslationRequest,
+        key: str,
+        *,
+        deadline_guard: _RequestDeadlineGuard,
+    ) -> str:
         try:
             response = _post_with_total_deadline(
                 self._http_client,
                 f"{self.base_url}/models/{quote(self.model, safe='')}:generateContent",
-                deadline_guard=self._deadline_guard,
+                deadline_guard=deadline_guard,
                 headers={"x-goog-api-key": key},
                 json={
                     "system_instruction": {

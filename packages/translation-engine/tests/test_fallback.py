@@ -68,6 +68,16 @@ class MidWordAlignmentProvider:
         return "AB CDEFG"
 
 
+class PromptPlaceholderLeakingProvider:
+    profile_id = "prompt-placeholder-leak-test"
+    config_id = "offline"
+
+    def translate(self, request: TranslationRequest) -> str:
+        if "⟦PH_000000⟧" in request.text:
+            return f"⟦PH_000999⟧{request.text}"
+        return "⟦PH_000999⟧TRANSLATED TEXT"
+
+
 class StructureChangingThenValidProvider:
     profile_id = "structure-test"
     config_id = "offline"
@@ -164,6 +174,22 @@ class PlaceholderFallbackTests(unittest.TestCase):
 
         self.assertEqual(result.degradation, "aligned")
         self.assertEqual(result.text, "AB ⟦PH_000000⟧CDEFG")
+
+    def test_plain_fallback_removes_placeholders_leaked_from_the_prompt(self) -> None:
+        result = translate_chunk_with_fallback(
+            PromptPlaceholderLeakingProvider(),
+            TranslationRequest(
+                text="before ⟦PH_000000⟧ after",
+                source_language="auto",
+                target_language="zh-Hans",
+                system_instruction="translate",
+            ),
+            placeholder_retries=0,
+        )
+
+        self.assertEqual(result.degradation, "aligned")
+        self.assertEqual(result.text.count("⟦PH_000000⟧"), 1)
+        self.assertNotIn("⟦PH_000999⟧", result.text)
 
     def test_rate_limit_propagates_instead_of_degrading_to_source(self) -> None:
         with self.assertRaises(RateLimitError):

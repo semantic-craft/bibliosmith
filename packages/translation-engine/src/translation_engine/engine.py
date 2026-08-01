@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import hashlib
 import json
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AbstractSet, Any, Callable, Mapping, Sequence
 
-from .checkpoint import CheckpointStore, UnitCheckpoint, UnitIdempotencyKey
+from .checkpoint import (
+    CheckpointStore,
+    CompletionStore,
+    UnitCheckpoint,
+    UnitCompletion,
+    UnitIdempotencyKey,
+)
 from .chunking import TokenChunker, Utf8ByteTokenCounter
 from .files import atomic_write_text
 from .glossary import (
@@ -55,6 +63,15 @@ MAX_CUSTOM_INSTRUCTION_CHARACTERS = 2000
 # readable and small on the way through stdout into the job's state.
 MAX_VIOLATION_OCCURRENCES = 2
 VIOLATION_EXCERPT_CHARACTERS = 200
+ADJACENT_REPEAT_PATTERN = re.compile(r"(?P<unit>.{4,15})(?P=unit)", re.DOTALL)
+PRESERVED_LITERAL_PATTERN = re.compile(
+    r"(?:https?://|www\.)\S+"
+    r"|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"
+    r"|10\.\d{4,9}/\S+"
+    r"|\b\d{10,}\b"
+    r"|[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]{80,}",
+    re.IGNORECASE,
+)
 
 
 ProviderFactory = Callable[..., LLMProvider]
@@ -271,6 +288,9 @@ def _planned_translation_work(
         / ".partial"
         / "reflection"
     )
+    completion_store = CompletionStore(
+        project_root / "chapters" / "translated" / ".completed"
+    )
     translation_pass_id = _custom_instruction_pass_id(
         "translation-v1-text-cleanup" if text_cleanup else "translation-v1",
         custom_translation,
@@ -292,7 +312,28 @@ def _planned_translation_work(
                     protected.text
                 )
             )
-            total += chunk_count
+            total += chunk_count * pass_count
+            completion_key = _completion_key(
+                task_bytes=loaded.task_bytes,
+                provider=provider,
+                translation_policy_version=translation_policy_version,
+                translation_pass_id=translation_pass_id,
+                max_tokens=max_tokens,
+                second_pass_enabled=pass_count == 2,
+                custom_reflection=custom_reflection,
+            )
+            completion = completion_store.load(loaded.unit_id, completion_key)
+            if completion is not None:
+                if _completion_is_valid(
+                    project_root=project_root,
+                    unit_id=loaded.unit_id,
+                    chunk_count=chunk_count,
+                    second_pass_enabled=pass_count == 2,
+                    completion=completion,
+                ):
+                    resumed_by_unit[loaded.unit_id] = chunk_count * pass_count
+                    continue
+                completion_store.delete(loaded.unit_id)
             first_pass_key = UnitIdempotencyKey(
                 task_manifest_sha256=_sha256(loaded.task_bytes),
                 provider_profile_id=provider.profile_id,
@@ -307,7 +348,6 @@ def _planned_translation_work(
             completed = checkpoint.next_chunk_index if checkpoint is not None else 0
 
             if pass_count == 2:
-                total += chunk_count
                 if completed == chunk_count:
                     reflection_key = UnitIdempotencyKey(
                         task_manifest_sha256=_sha256(loaded.task_bytes),
@@ -333,6 +373,114 @@ def _planned_translation_work(
         except (OSError, json.JSONDecodeError, EngineError, ValueError):
             total += pass_count
     return TranslationWorkPlan(max(1, total), resumed_by_unit)
+
+
+def _completion_key(
+    *,
+    task_bytes: bytes,
+    provider: LLMProvider,
+    translation_policy_version: str,
+    translation_pass_id: str,
+    max_tokens: int,
+    second_pass_enabled: bool,
+    custom_reflection: str | None,
+) -> UnitIdempotencyKey:
+    model = getattr(provider, "model", "")
+    model_suffix = f"+model-{_sha256(model.encode())[:16]}" if model else ""
+    completed_pass_id = (
+        f"completion-v1+{translation_pass_id}+max-{max_tokens}{model_suffix}"
+    )
+    if second_pass_enabled:
+        reflection_pass_id = _custom_instruction_pass_id(
+            f"reflection-v1+{translation_pass_id}", custom_reflection
+        )
+        completed_pass_id = (
+            f"completion-v1+{reflection_pass_id}+max-{max_tokens}{model_suffix}"
+        )
+    return UnitIdempotencyKey(
+        task_manifest_sha256=_sha256(task_bytes),
+        provider_profile_id=provider.profile_id,
+        provider_config_id=provider.config_id,
+        translation_policy_version=translation_policy_version,
+        pass_id=completed_pass_id,
+    )
+
+
+def _completion_is_valid(
+    *,
+    project_root: Path,
+    unit_id: str,
+    chunk_count: int,
+    second_pass_enabled: bool,
+    completion: UnitCompletion,
+) -> bool:
+    report = completion.report
+    metrics = report.get("metrics")
+    artifact = report.get("artifact")
+    if (
+        completion.chunk_count != chunk_count
+        or report.get("unitId") != unit_id
+        or report.get("status") != "completed"
+        or not isinstance(metrics, dict)
+        or metrics.get("chunkCount") != chunk_count
+        or metrics.get("secondPassApplied") is not second_pass_enabled
+        or not _completion_artifact_matches(
+            project_root,
+            artifact,
+            expected_path=f"chapters/translated/{unit_id}.md",
+        )
+    ):
+        return False
+    second_pass_artifacts = report.get("secondPassArtifacts")
+    if not second_pass_enabled:
+        return second_pass_artifacts is None
+    if not isinstance(second_pass_artifacts, dict):
+        return False
+    return (
+        _completion_artifact_matches(
+            project_root,
+            second_pass_artifacts.get("draft"),
+            expected_path=f"qa/reflection/{unit_id}.draft.md",
+        )
+        and _completion_artifact_matches(
+            project_root,
+            second_pass_artifacts.get("reflection"),
+            expected_path=f"qa/reflection/{unit_id}.reflection.md",
+        )
+        and second_pass_artifacts.get("revised") == artifact
+    )
+
+
+def _completion_artifact_matches(
+    project_root: Path,
+    artifact: Any,
+    *,
+    expected_path: str,
+) -> bool:
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("path") != expected_path
+        or artifact.get("complete") is not True
+        or not isinstance(artifact.get("sha256"), str)
+    ):
+        return False
+    try:
+        path = _project_path(project_root, expected_path)
+        return path.is_file() and _sha256(path.read_bytes()) == artifact["sha256"]
+    except OSError:
+        return False
+
+
+def _reused_completion_report(completion: UnitCompletion) -> dict[str, Any]:
+    report = deepcopy(completion.report)
+    metrics = report["metrics"]
+    metrics["completionReused"] = True
+    metrics["providerAttemptCount"] = 0
+    metrics["resumedChunkCount"] = completion.chunk_count
+    metrics["secondPassResumedChunkCount"] = (
+        completion.chunk_count if metrics.get("secondPassApplied") else 0
+    )
+    return report
 
 
 def _unit_concurrency(provider: LLMProvider, unit_count: int) -> int:
@@ -464,6 +612,47 @@ def _translate_unit(
         "translation-v1-text-cleanup" if text_cleanup else "translation-v1",
         custom_translation,
     )
+    completion_store = CompletionStore(
+        project_root / "chapters" / "translated" / ".completed"
+    )
+    completion_key = _completion_key(
+        task_bytes=task_bytes,
+        provider=provider,
+        translation_policy_version=translation_policy_version,
+        translation_pass_id=translation_pass_id,
+        max_tokens=max_tokens,
+        second_pass_enabled=second_pass is not None,
+        custom_reflection=custom_reflection,
+    )
+    completion = completion_store.load(unit_id, completion_key)
+    if completion is not None:
+        if _completion_is_valid(
+            project_root=project_root,
+            unit_id=unit_id,
+            chunk_count=len(chunks),
+            second_pass_enabled=second_pass is not None,
+            completion=completion,
+        ):
+            checkpoint_store.delete(unit_id)
+            CheckpointStore(
+                project_root
+                / "chapters"
+                / "translated"
+                / ".partial"
+                / "reflection"
+            ).delete(unit_id)
+            _project_path(
+                project_root,
+                f"chapters/translated/.partial/{unit_id}.degraded.md",
+            ).unlink(missing_ok=True)
+            if progress_callback is not None:
+                progress_callback(
+                    unit_id,
+                    len(chunks) * (2 if second_pass is not None else 1),
+                    "completed",
+                )
+            return _reused_completion_report(completion)
+        completion_store.delete(unit_id)
     idempotency_key = UnitIdempotencyKey(
         task_manifest_sha256=_sha256(task_bytes),
         provider_profile_id=provider.profile_id,
@@ -489,9 +678,10 @@ def _translate_unit(
     # Resumed chunks need no equivalent set: the checkpoint prefix closes at the
     # first source fallback, so anything resumed is known to have translated.
     source_fallback_indices: set[int] = set()
+    persisted_chunk_count = resumed_chunk_count
     for index in range(resumed_chunk_count, len(chunks)):
         if progress_callback is not None:
-            progress_callback(unit_id, index, "translating")
+            progress_callback(unit_id, persisted_chunk_count, "translating")
         system_instruction = target_profile.build_system_instruction(
             source_text=chunks[index],
             task_manifest=profile_task,
@@ -504,13 +694,24 @@ def _translate_unit(
                 translated_chunks[-1]
             )
             if previous_translation_tail:
+                context_block = (
+                    "# PREVIOUS TRANSLATION CONTEXT — REFERENCE ONLY\n"
+                    "This text is not part of the current source segment. Use it only "
+                    "for terminology and continuity. Do not reproduce or continue it "
+                    "as a passage. Reuse individual terms only when the current source "
+                    "independently requires them.\n"
+                    f"{previous_translation_tail}\n\n"
+                    "# CURRENT SEGMENT ONLY\n"
+                    "Translate only the source segment in the user message. Do not "
+                    "reproduce the reference context as part of the answer."
+                )
                 if custom_translation:
                     chunk_system_instruction = (
-                        f"# CONTEXT\n{previous_translation_tail}\n\n{system_instruction}"
+                        f"{context_block}\n\n{system_instruction}"
                     )
                 else:
                     chunk_system_instruction = (
-                        f"{system_instruction}\n\n# CONTEXT\n{previous_translation_tail}"
+                        f"{system_instruction}\n\n{context_block}"
                     )
         result = translate_chunk_with_fallback(
             provider,
@@ -521,8 +722,30 @@ def _translate_unit(
                 system_instruction=chunk_system_instruction,
             ),
             placeholder_retries=placeholder_retries,
+            candidate_normalizer=lambda candidate, protected=protected_chunks[index]: (
+                _normalize_candidate_structure(protected, candidate)
+            ),
             candidate_validator=lambda candidate, protected=protected_chunks[index]: (
-                _candidate_preserves_structure(protected, candidate)
+                _candidate_is_acceptable(
+                    protected,
+                    candidate,
+                    target_language=target_profile.language,
+                )
+                and _candidate_avoids_previous_echo(
+                    previous_source=chunks[index - 1] if index > 0 else None,
+                    current_source=chunks[index],
+                    previous_candidate=(
+                        translated_chunks[-1] if translated_chunks else None
+                    ),
+                    candidate=candidate,
+                )
+            ),
+            candidate_repair=(
+                None
+                if text_cleanup or custom_translation
+                else lambda candidate, protected=protected_chunks[index]: (
+                    _remove_unprotected_paragraph_breaks(protected, candidate)
+                )
             ),
         )
         translated_chunks.append(result.text)
@@ -543,10 +766,12 @@ def _translate_unit(
                     translated_chunks=tuple(translated_chunks),
                 ),
             )
+            persisted_chunk_count = index + 1
         if progress_callback is not None:
-            progress_callback(unit_id, index + 1, "translating")
+            progress_callback(unit_id, persisted_chunk_count, "translating")
     second_pass_applied = second_pass is not None and source_fallback_count == 0
     second_pass_resumed_chunk_count = 0
+    second_pass_draft_fallbacks: list[bool] = []
     second_pass_checkpoint_store = None
     if second_pass_applied:
         draft_relative = f"qa/reflection/{unit_id}.draft.md"
@@ -600,6 +825,9 @@ def _translate_unit(
             )
             reflection_chunks = list(second_pass_checkpoint.reflection_chunks)
             revised_chunks = list(second_pass_checkpoint.translated_chunks)
+            second_pass_draft_fallbacks = list(
+                second_pass_checkpoint.second_pass_draft_fallbacks
+            ) or [False] * second_pass_checkpoint.next_chunk_index
         if progress_callback is not None:
             progress_callback(
                 unit_id,
@@ -635,12 +863,38 @@ def _translate_unit(
                     ),
                     custom_instruction=custom_reflection,
                 ),
+                candidate_retries=placeholder_retries,
+                candidate_normalizer=lambda candidate, protected=protected_chunks[index]: (
+                    _normalize_candidate_structure(protected, candidate)
+                ),
                 candidate_validator=lambda candidate, protected=protected_chunks[index]: (
-                    _candidate_preserves_structure(protected, candidate)
+                    _candidate_is_acceptable(
+                        protected,
+                        candidate,
+                        target_language=target_profile.language,
+                    )
+                    and _candidate_avoids_previous_echo(
+                        previous_source=chunks[index - 1] if index > 0 else None,
+                        current_source=chunks[index],
+                        previous_candidate=(
+                            revised_chunks[-1] if revised_chunks else None
+                        ),
+                        candidate=candidate,
+                    )
+                ),
+                draft_fallback_validator=(
+                    None
+                    if custom_reflection
+                    else lambda candidate, protected=protected_chunks[index]: (
+                        _candidate_allows_validated_draft_fallback(
+                            protected, candidate
+                        )
+                    )
                 ),
             )
             reflection_chunks.append(result.reflection_text)
             revised_chunks.append(result.revised_text)
+            second_pass_draft_fallbacks.append(result.draft_fallback)
             second_pass_checkpoint_store.save(
                 unit_id,
                 second_pass_idempotency_key,
@@ -648,6 +902,9 @@ def _translate_unit(
                     next_chunk_index=index + 1,
                     translated_chunks=tuple(revised_chunks),
                     reflection_chunks=tuple(reflection_chunks),
+                    second_pass_draft_fallbacks=tuple(
+                        second_pass_draft_fallbacks
+                    ),
                 ),
             )
             if progress_callback is not None:
@@ -676,24 +933,18 @@ def _translate_unit(
     )
     output_path = _project_path(project_root, output_relative)
     atomic_write_text(output_path, restored)
-    if complete:
-        checkpoint_store.delete(unit_id)
-        if second_pass_checkpoint_store is not None:
-            second_pass_checkpoint_store.delete(unit_id)
-        _project_path(
-            project_root,
-            f"chapters/translated/.partial/{unit_id}.degraded.md",
-        ).unlink(missing_ok=True)
     report = {
         "unitId": unit_id,
         "status": "completed" if complete else "failed",
         "metrics": {
             "alignedFallbackCount": aligned_fallback_count,
             "chunkCount": len(chunks),
+            "completionReused": False,
             "glossaryViolationCount": len(glossary_violations),
             "providerAttemptCount": provider_attempt_count,
             "resumedChunkCount": resumed_chunk_count,
             "secondPassApplied": second_pass_applied,
+            "secondPassDraftFallbackCount": sum(second_pass_draft_fallbacks),
             "secondPassResumedChunkCount": second_pass_resumed_chunk_count,
             "sourceFallbackCount": source_fallback_count,
             "tokenCounter": "utf8-byte-upper-bound-v1",
@@ -751,6 +1002,19 @@ def _translate_unit(
             "code": "translation_structure_invalid",
             "retryable": True,
         }
+    else:
+        completion_store.save(
+            unit_id,
+            completion_key,
+            UnitCompletion(chunk_count=len(chunks), report=report),
+        )
+        checkpoint_store.delete(unit_id)
+        if second_pass_checkpoint_store is not None:
+            second_pass_checkpoint_store.delete(unit_id)
+        _project_path(
+            project_root,
+            f"chapters/translated/.partial/{unit_id}.degraded.md",
+        ).unlink(missing_ok=True)
     return report
 
 
@@ -946,12 +1210,41 @@ def _restore_chunks(
 ) -> str:
     if len(protected_chunks) != len(translated_chunks):
         raise ValueError("translated chunk count mismatch")
-    return "".join(
+    source_chunks = [
+        protected.restore(protected.text) for protected in protected_chunks
+    ]
+    output_chunks = [
         protected.restore(translated)
         for protected, translated in zip(
             protected_chunks, translated_chunks, strict=True
         )
-    )
+    ]
+
+    def edge_whitespace(source_edge: str, output_edge: str) -> str:
+        if "\n" in source_edge or "\r" in source_edge:
+            return source_edge
+        if "\n" in output_edge or "\r" in output_edge:
+            return ""
+        return output_edge
+
+    rebuilt_chunks: list[str] = []
+    for source, output in zip(source_chunks, output_chunks, strict=True):
+        if not source or source.isspace():
+            rebuilt_chunks.append(edge_whitespace(source, output))
+            continue
+        source_leading = re.match(r"\s*", source).group(0)
+        source_trailing = re.search(r"\s*$", source).group(0)
+        output_leading = re.match(r"\s*", output).group(0)
+        output_trailing = re.search(r"\s*$", output).group(0)
+        output_core = output[len(output_leading) :]
+        if output_trailing:
+            output_core = output_core[: -len(output_trailing)]
+        rebuilt_chunks.append(
+            edge_whitespace(source_leading, output_leading)
+            + output_core
+            + edge_whitespace(source_trailing, output_trailing)
+        )
+    return "".join(rebuilt_chunks)
 
 
 def _candidate_preserves_structure(
@@ -966,7 +1259,324 @@ def _candidate_preserves_structure(
         _markdown_heading_shape(source) == _markdown_heading_shape(translated)
         and _markdown_content_block_count(source)
         == _markdown_content_block_count(translated)
+        and all(
+            translated_count <= source_count
+            for translated_count, source_count in zip(
+                _visual_break_token_count(translated),
+                _visual_break_token_count(source),
+                strict=True,
+            )
+        )
     )
+
+
+def _candidate_is_acceptable(
+    protected: ProtectedMarkdown,
+    candidate: str,
+    *,
+    target_language: str = "zh-Hans",
+) -> bool:
+    if not _candidate_preserves_structure(protected, candidate):
+        return False
+    source = protected.restore(protected.text)
+    translated = protected.restore(candidate)
+    return not _model_added_repetition(
+        source, translated
+    ) and not _copies_long_source_span(
+        protected.text,
+        candidate,
+        target_language=target_language,
+    )
+
+
+def _candidate_avoids_previous_echo(
+    *,
+    previous_source: str | None,
+    current_source: str,
+    previous_candidate: str | None,
+    candidate: str,
+) -> bool:
+    if previous_source is None or previous_candidate is None:
+        return True
+    source_overlap = _boundary_overlap_text(previous_source, current_source)
+    candidate_overlap = _boundary_overlap_text(previous_candidate, candidate)
+    if len(candidate_overlap) < 16:
+        return True
+    if len(source_overlap) < 16:
+        return False
+    source_literals = _preserved_literals(source_overlap)
+    candidate_literals = _preserved_literals(candidate_overlap)
+    shared_literals = source_literals & candidate_literals
+    if not shared_literals:
+        return False
+    source_residual = _boundary_residual(source_overlap, shared_literals)
+    candidate_residual = _boundary_residual(candidate_overlap, shared_literals)
+    if len(candidate_residual) < 16:
+        return True
+    return (
+        len(source_residual) >= 16
+        and len(candidate_residual) <= len(source_residual) + 8
+        and len(candidate_residual) * 4 >= len(source_residual)
+    )
+
+
+def _boundary_overlap_size(previous: str, current: str) -> int:
+    return len(_boundary_overlap_text(previous, current))
+
+
+def _boundary_overlap_text(previous: str, current: str) -> str:
+    previous_text = _normalize_repetition_text(
+        PLACEHOLDER_PATTERN.sub("", previous)
+    )[-800:]
+    current_text = _normalize_repetition_text(
+        PLACEHOLDER_PATTERN.sub("", current)
+    )[:800]
+    if not previous_text or not current_text:
+        return ""
+    # Prefix-function on `current + sentinel + previous` gives the exact
+    # suffix(previous) -> prefix(current) overlap. A common phrase elsewhere in
+    # either window is not a chunk-boundary echo.
+    combined = f"{current_text}\0{previous_text}"
+    prefix_lengths = [0] * len(combined)
+    for index in range(1, len(combined)):
+        matched = prefix_lengths[index - 1]
+        while matched and combined[index] != combined[matched]:
+            matched = prefix_lengths[matched - 1]
+        if combined[index] == combined[matched]:
+            matched += 1
+        prefix_lengths[index] = matched
+    overlap_size = min(prefix_lengths[-1], len(current_text), len(previous_text))
+    return current_text[:overlap_size]
+
+
+def _preserved_literals(text: str) -> set[str]:
+    return {
+        match.group(0).casefold()
+        for match in PRESERVED_LITERAL_PATTERN.finditer(text)
+    }
+
+
+def _boundary_residual(text: str, shared_literals: set[str]) -> str:
+    residual = text
+    for literal in sorted(shared_literals, key=len, reverse=True):
+        residual = re.sub(re.escape(literal), "", residual, flags=re.IGNORECASE)
+    return re.sub(r"[\W_]+", "", residual, flags=re.UNICODE)
+
+
+def _model_added_repetition(source: str, candidate: str) -> bool:
+    return not _repetition_regions_align(
+        source_regions=_repetition_profile(source),
+        candidate_regions=_repetition_profile(candidate),
+    )
+
+
+def _repetition_regions_align(
+    *,
+    source_regions: Sequence[float],
+    candidate_regions: Sequence[float],
+    tolerance: float = 0.25,
+) -> bool:
+    source_index = 0
+    for candidate_region in candidate_regions:
+        while (
+            source_index < len(source_regions)
+            and source_regions[source_index] < candidate_region - tolerance
+        ):
+            source_index += 1
+        if (
+            source_index >= len(source_regions)
+            or source_regions[source_index] > candidate_region + tolerance
+        ):
+            return False
+        source_index += 1
+    return True
+
+
+def _copies_long_source_span(
+    source: str,
+    candidate: str,
+    *,
+    target_language: str = "zh-Hans",
+) -> bool:
+    source_text = _normalize_repetition_text(_strip_preserved_literals(source))
+    candidate_text = _normalize_repetition_text(_strip_preserved_literals(candidate))
+    if _probably_target_language(source_text, target_language):
+        return False
+    gram_length = 160
+    if len(source_text) < gram_length or len(candidate_text) < gram_length:
+        return False
+    source_grams = {
+        source_text[start : start + gram_length]
+        for start in range(0, len(source_text) - gram_length + 1)
+        if _meaningful_repeat_unit(source_text[start : start + gram_length])
+    }
+    return any(
+        candidate_text[start : start + gram_length] in source_grams
+        for start in range(0, len(candidate_text) - gram_length + 1)
+    )
+
+
+def _strip_preserved_literals(text: str) -> str:
+    without_placeholders = PLACEHOLDER_PATTERN.sub("", text)
+    return PRESERVED_LITERAL_PATTERN.sub("", without_placeholders)
+
+
+def _probably_target_language(text: str, target_language: str) -> bool:
+    if target_language != "zh-Hans":
+        return False
+    han = sum("\u3400" <= character <= "\u9fff" for character in text)
+    kana = sum(
+        "\u3040" <= character <= "\u30ff" or "\u31f0" <= character <= "\u31ff"
+        for character in text
+    )
+    cyrillic = sum("\u0400" <= character <= "\u052f" for character in text)
+    latin = sum(
+        ("A" <= character <= "Z") or ("a" <= character <= "z")
+        for character in text
+    )
+    return han >= 120 and kana == 0 and cyrillic == 0 and latin * 3 < han
+
+
+def _repetition_profile(text: str) -> tuple[float, ...]:
+    normalized = _normalize_repetition_text(text)
+    if not normalized:
+        return ()
+    positions = [
+        (match.start() + (len(match.group(0)) / 2)) / len(normalized)
+        for match in ADJACENT_REPEAT_PATTERN.finditer(normalized)
+        if _meaningful_repeat_unit(match.group("unit"))
+    ]
+    gram_length = 16
+    maximum_distance = 600
+    previous_positions: dict[str, int] = {}
+    previous_pair: tuple[int, int] | None = None
+    for start in range(0, len(normalized) - gram_length + 1):
+        gram = normalized[start : start + gram_length]
+        if not _meaningful_repeat_unit(gram):
+            continue
+        previous = previous_positions.get(gram)
+        if (
+            previous is not None
+            and start - previous >= gram_length
+            and start - previous <= maximum_distance
+        ):
+            pair = (previous, start)
+            if previous_pair != (previous - 1, start - 1):
+                positions.append(
+                    (previous + start + gram_length) / (2 * len(normalized))
+                )
+            previous_pair = pair
+        else:
+            previous_pair = None
+        previous_positions[gram] = start
+    positions.sort()
+    distinct_positions: list[float] = []
+    for position in positions:
+        if not distinct_positions or position - distinct_positions[-1] > 0.03:
+            distinct_positions.append(position)
+    return tuple(distinct_positions)
+
+
+def _normalize_repetition_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _meaningful_repeat_unit(unit: str) -> bool:
+    return sum(character.isalnum() for character in unit) >= 4
+
+
+def _visual_break_token_count(text: str) -> tuple[int, int]:
+    return (
+        text.count(r"\n"),
+        len(re.findall(r"<br\s*/?>", text, flags=re.IGNORECASE)),
+    )
+
+
+def _candidate_only_drops_block_placeholders(
+    protected: ProtectedMarkdown,
+    candidate: str,
+) -> bool:
+    expected = protected.placeholders
+    actual = tuple(PLACEHOLDER_PATTERN.findall(candidate))
+    if len(actual) >= len(expected):
+        return False
+    missing: list[str] = []
+    expected_index = 0
+    for placeholder in actual:
+        while (
+            expected_index < len(expected)
+            and expected[expected_index] != placeholder
+        ):
+            missing.append(expected[expected_index])
+            expected_index += 1
+        if expected_index == len(expected):
+            return False
+        expected_index += 1
+    missing.extend(expected[expected_index:])
+    replacements = dict(protected.replacements)
+    return bool(missing) and all(
+        _STRUCTURE_PARAGRAPH_BREAK.fullmatch(replacements[placeholder])
+        or _line_is_heading(replacements[placeholder])
+        for placeholder in missing
+    )
+
+
+def _candidate_allows_validated_draft_fallback(
+    protected: ProtectedMarkdown,
+    candidate: str,
+) -> bool:
+    if tuple(PLACEHOLDER_PATTERN.findall(candidate)) == protected.placeholders:
+        return True
+    replacements = dict(protected.replacements)
+    if all(
+        _STRUCTURE_PARAGRAPH_BREAK.fullmatch(replacements[placeholder])
+        or _line_is_heading(replacements[placeholder])
+        for placeholder in protected.placeholders
+    ):
+        return True
+    return _candidate_only_drops_block_placeholders(protected, candidate)
+
+
+def _remove_unprotected_paragraph_breaks(
+    protected: ProtectedMarkdown,
+    candidate: str,
+) -> str:
+    if tuple(PLACEHOLDER_PATTERN.findall(candidate)) != protected.placeholders:
+        return candidate
+    tokens = re.split(f"({PLACEHOLDER_PATTERN.pattern})", candidate)
+    for index in range(0, len(tokens), 2):
+        tokens[index] = _STRUCTURE_PARAGRAPH_BREAK.sub(" ", tokens[index])
+    return "".join(tokens)
+
+
+_CANDIDATE_HEADING_BEFORE_PLACEHOLDER = re.compile(
+    r"(?m)^[ \t]{0,3}#{1,6}[ \t]*\Z"
+)
+_CANDIDATE_HEADING_AFTER_PLACEHOLDER = re.compile(r"\A[ \t]*#{1,6}[ \t]+")
+_STRUCTURE_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)*")
+
+
+def _normalize_candidate_structure(
+    protected: ProtectedMarkdown, candidate: str
+) -> str:
+    """Keep block structure owned by placeholders, never by model formatting."""
+    if tuple(PLACEHOLDER_PATTERN.findall(candidate)) != protected.placeholders:
+        return candidate
+    tokens = re.split(f"({PLACEHOLDER_PATTERN.pattern})", candidate)
+    replacements = dict(protected.replacements)
+    for index in range(1, len(tokens), 2):
+        original = replacements[tokens[index]]
+        if _line_is_heading(original):
+            tokens[index - 1] = _CANDIDATE_HEADING_BEFORE_PLACEHOLDER.sub(
+                "", tokens[index - 1]
+            )
+            tokens[index + 1] = _CANDIDATE_HEADING_AFTER_PLACEHOLDER.sub(
+                "", tokens[index + 1]
+            )
+        elif _STRUCTURE_PARAGRAPH_BREAK.fullmatch(original):
+            tokens[index - 1] = tokens[index - 1].rstrip(" \t\r\n")
+            tokens[index + 1] = tokens[index + 1].lstrip(" \t\r\n")
+    return "".join(tokens)
 
 
 def _markdown_heading_shape(text: str) -> list[int]:
@@ -1033,6 +1643,7 @@ def _sha256(value: bytes) -> str:
 
 
 def _translation_context_tail(text: str, word_limit: int = 25) -> str:
+    text = PLACEHOLDER_PATTERN.sub(" ", text)
     word_starts: list[int] = []
     inside_non_cjk_word = False
     for index, character in enumerate(text):

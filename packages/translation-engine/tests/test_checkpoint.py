@@ -11,7 +11,7 @@ from translation_engine.checkpoint import (
     UnitCheckpoint,
     UnitIdempotencyKey,
 )
-from translation_engine.engine import run_manifest
+from translation_engine.engine import _translation_context_tail, run_manifest
 from translation_engine.profiles import TargetLanguageProfile
 from translation_engine.providers import (
     FakeProvider,
@@ -100,7 +100,148 @@ class ProgressCapturingProvider(RecordingFakeProvider):
         return super().translate(request)
 
 
+class CompletionCountingProvider:
+    profile_id = "fake-provider-profile"
+    config_id = "fake-config-no-secrets"
+
+    def __init__(self, *, model: str = "fake-model") -> None:
+        self.requests: list[TranslationRequest] = []
+        self.model = model
+
+    def translate(self, request: TranslationRequest) -> str:
+        self.requests.append(request)
+        if "Output only the suggestions" in request.system_instruction:
+            return "No changes needed."
+        if "translation editing" in request.system_instruction:
+            return json.loads(request.text)["draft"]
+        return request.text.upper()
+
+
 class CheckpointStoreTests(unittest.TestCase):
+    def test_completed_unit_is_reused_and_progress_does_not_go_backwards(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            manifest_path = build_run_fixture(
+                project_root,
+                source_text="first\n",
+                max_tokens=100,
+                second_pass_enabled=True,
+            )
+            progress_path = project_root / ".book-pipeline-progress"
+            first_provider = CompletionCountingProvider()
+            with mock.patch.dict(
+                os.environ,
+                {"BIBLIOSMITH_PROGRESS_PATH": str(progress_path)},
+            ):
+                first = run_manifest(
+                    manifest_path,
+                    provider_factory=lambda profile_id, *, config_id: first_provider,
+                )
+
+            second_provider = CompletionCountingProvider()
+            with mock.patch.dict(
+                os.environ,
+                {"BIBLIOSMITH_PROGRESS_PATH": str(progress_path)},
+            ):
+                second = run_manifest(
+                    manifest_path,
+                    provider_factory=lambda profile_id, *, config_id: second_provider,
+                )
+
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(first["units"][0]["status"], "completed")
+            self.assertEqual(len(first_provider.requests), 3)
+            self.assertEqual(second["units"][0]["status"], "completed")
+            self.assertEqual(len(second_provider.requests), 0)
+            self.assertTrue(second["units"][0]["metrics"]["completionReused"])
+            self.assertEqual(progress["completed"], progress["total"])
+            self.assertEqual(progress["total"], 2)
+            self.assertTrue(
+                (
+                    project_root
+                    / "chapters"
+                    / "translated"
+                    / ".completed"
+                    / "chapter_001.json"
+                ).is_file()
+            )
+
+    def test_tampered_completed_output_is_not_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            manifest_path = build_run_fixture(
+                project_root,
+                source_text="first\n",
+                max_tokens=100,
+                second_pass_enabled=True,
+            )
+            first_provider = CompletionCountingProvider()
+            run_manifest(
+                manifest_path,
+                provider_factory=lambda profile_id, *, config_id: first_provider,
+            )
+            output = (
+                project_root / "chapters" / "translated" / "chapter_001.md"
+            )
+            output.write_text("tampered\n", encoding="utf-8")
+            second_provider = CompletionCountingProvider()
+
+            second = run_manifest(
+                manifest_path,
+                provider_factory=lambda profile_id, *, config_id: second_provider,
+            )
+
+            self.assertEqual(second["units"][0]["status"], "completed")
+            self.assertFalse(second["units"][0]["metrics"]["completionReused"])
+            self.assertEqual(len(second_provider.requests), 3)
+            self.assertEqual(output.read_text(encoding="utf-8"), "FIRST\n")
+
+    def test_completed_unit_is_not_reused_after_the_model_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            manifest_path = build_run_fixture(
+                project_root,
+                source_text="first\n",
+                max_tokens=100,
+                second_pass_enabled=True,
+            )
+            run_manifest(
+                manifest_path,
+                provider_factory=lambda profile_id, *, config_id: (
+                    CompletionCountingProvider(model="model-a")
+                ),
+            )
+            changed_provider = CompletionCountingProvider(model="model-b")
+
+            report = run_manifest(
+                manifest_path,
+                provider_factory=lambda profile_id, *, config_id: changed_provider,
+            )
+
+            self.assertFalse(report["units"][0]["metrics"]["completionReused"])
+            self.assertEqual(len(changed_provider.requests), 3)
+
+    def test_second_pass_draft_fallback_evidence_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = CheckpointStore(Path(temporary_directory))
+            key = UnitIdempotencyKey(
+                task_manifest_sha256="a" * 64,
+                provider_profile_id="fake-provider-profile",
+                provider_config_id="fake-config-no-secrets",
+                translation_policy_version="translation-policy-v1",
+                pass_id="reflection-v1",
+            )
+            checkpoint = UnitCheckpoint(
+                next_chunk_index=2,
+                translated_chunks=("first", "second"),
+                reflection_chunks=("review first", "review second"),
+                second_pass_draft_fallbacks=(True, False),
+            )
+
+            store.save("chapter_001", key, checkpoint)
+
+            self.assertEqual(store.load("chapter_001", key), checkpoint)
+
     def test_queued_resume_checkpoints_are_counted_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project_root = Path(temporary_directory)
@@ -167,9 +308,26 @@ class CheckpointStoreTests(unittest.TestCase):
             self.assertEqual(provider.requests[0].system_instruction, "translate")
             self.assertEqual(
                 provider.requests[1].system_instruction,
-                f"translate\n\n# CONTEXT\n{expected_tail}",
+                "translate\n\n"
+                "# PREVIOUS TRANSLATION CONTEXT — REFERENCE ONLY\n"
+                "This text is not part of the current source segment. Use it only "
+                "for terminology and continuity. Do not reproduce or continue it "
+                "as a passage. Reuse individual terms only when the current source "
+                "independently requires them.\n"
+                f"{expected_tail}\n\n"
+                "# CURRENT SEGMENT ONLY\n"
+                "Translate only the source segment in the user message. Do not "
+                "reproduce the reference context as part of the answer.",
             )
             self.assertNotIn("一二三四五", provider.requests[1].system_instruction)
+
+    def test_translation_context_omits_protected_placeholders(self) -> None:
+        tail = _translation_context_tail(
+            "上一段译文⟦PH_000017⟧末尾术语⟦PH_000018⟧"
+        )
+
+        self.assertEqual(tail, "上一段译文 末尾术语")
+        self.assertNotIn("⟦PH_", tail)
 
     def test_killed_run_resumes_to_uninterrupted_output_without_persisting_secrets(
         self,
@@ -244,7 +402,11 @@ class CheckpointStoreTests(unittest.TestCase):
                 1,
             )
             self.assertEqual(resumed_output, baseline_output)
-            self.assertIn("# CONTEXT\nONE", resumed_provider.requests[0].system_instruction)
+            self.assertIn(
+                "# PREVIOUS TRANSLATION CONTEXT — REFERENCE ONLY\n",
+                resumed_provider.requests[0].system_instruction,
+            )
+            self.assertIn("\nONE\n\n# CURRENT SEGMENT ONLY", resumed_provider.requests[0].system_instruction)
             self.assertFalse(checkpoint_path.exists())
 
     def test_changed_idempotency_key_invalidates_private_resume_cache(self) -> None:

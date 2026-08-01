@@ -32,6 +32,7 @@ class OperationProgress:
         self.scope_id = scope_id or None
         self.completed = 0
         self._item_completed: dict[str, int] = {}
+        self._phase = "starting"
         self._lock = threading.Lock()
 
     @classmethod
@@ -84,6 +85,10 @@ class OperationProgress:
     def _write(self, phase: str) -> None:
         if self.path is None:
             return
+        if phase == "completed":
+            phase = self._phase
+        else:
+            self._phase = phase
         document: dict[str, object] = {
             "schema": "book-pipeline-progress-v1",
             "stageId": self.stage_id,

@@ -41,6 +41,16 @@ def request_marker(request: TranslationRequest) -> str:
     return request.text.split()[0]
 
 
+def context_contains_marker(request: TranslationRequest, marker: str) -> bool:
+    instruction = request.system_instruction
+    header = "# PREVIOUS TRANSLATION CONTEXT — REFERENCE ONLY\n"
+    footer = "\n\n# CURRENT SEGMENT ONLY"
+    if header not in instruction or footer not in instruction:
+        return False
+    context = instruction.split(header, 1)[1].split(footer, 1)[0]
+    return marker.upper() in context
+
+
 class ConcurrencyProbeProvider:
     """Records the true parallelism the engine reached, and insists on it.
 
@@ -181,7 +191,7 @@ class UnitConcurrencyTests(unittest.TestCase):
         for marker in MARKERS:
             self.assertEqual(
                 sum(
-                    f"# CONTEXT\n{marker.upper()}" in request.system_instruction
+                    context_contains_marker(request, marker)
                     for request in provider.requests
                 ),
                 1,
