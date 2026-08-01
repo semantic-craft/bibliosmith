@@ -1,6 +1,6 @@
 # Book Pipeline Capability Matrix
 
-Updated: 2026-08-01
+Updated: 2026-07-26
 
 This matrix reconciles the launcher Book Pipeline with the local reading workflow and the external Book OCR Conversion boundary. It distinguishes product-core behavior from adapters and manual gates.
 
@@ -8,7 +8,7 @@ Every row is meant to be checkable against the code as it stands. Two convention
 
 | Capability | Status | Product boundary | Evidence |
 | --- | --- | --- | --- |
-| Local PDF folder conversion route | Automated, but produces no Markdown or EPUB | Core launcher route, external Book OCR Conversion wrapper execution | `local_pdf_folder` previews and runs `scripts/pdf_to_html_paddleocr.py`, which writes HTML plus its `_state.json` and JSONL sidecars; those, and the output directory, are what artifact scanning normalizes here. No Markdown is written: `full_md` is joined in memory and handed straight to `md_to_html`, so a Paddle-routed local folder has no Markdown artifact for the handoff to pick up — that break is #100. No EPUB comes out of this route either; both builders read `chapters/final/`, which exists only after translation promotion. |
+| Local PDF folder conversion route | Automated | Core launcher route, external Book OCR Conversion wrapper execution | `local_pdf_folder` previews and runs `scripts/pdf_to_html_paddleocr.py`; artifacts are normalized as Markdown, HTML, EPUB, metadata, index, and output directory. |
 | Zotero attachment discovery and route preview | Automated | Core launcher route, external Zotero worker dry-run | Worker dry-run output is parsed into attachment sources with direct text, PaddleOCR, MinerU, dirty text, and already-converted states. |
 | Zotero direct-text attachment execution | Automated | Core launcher route, external Zotero worker execution | `direct_text` runs the worker with `--force-text`; Markdown upload keys are captured on artifacts. |
 | Zotero remote PaddleOCR execution | Automated when credentials exist | Core launcher route, external worker/provider execution | `remote_paddleocr` runs with `--force-ocr`; missing credentials block only affected items. |
