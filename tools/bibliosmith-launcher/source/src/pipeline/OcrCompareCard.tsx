@@ -15,8 +15,23 @@ const ENGINE_LABEL: Record<BookPipelineOcrSampleEngine["engine"], string> = {
   mineru: "MinerU",
 };
 
-/** Route kinds where choosing an OCR engine is still an open question. */
-const OCR_ROUTE_KINDS = new Set(["remote_paddleocr", "mineru", "missing_credentials"]);
+/**
+ * Route kinds where choosing an OCR engine is still an open question.
+ *
+ * All four are in OVERRIDABLE_ROUTE_KINDS on the Rust side, so a pick here can
+ * actually be written. `blocked_dirty_text_layer` belongs precisely because it
+ * is the case where the choice matters most — the book's own text layer is
+ * unusable and an engine has to be picked — and it is what the blocked-state
+ * buttons already offer paddle/mineru for. `direct_text` is deliberately absent:
+ * that book has a good text layer and needs no OCR, so comparing engines would
+ * spend on pages nothing will use.
+ */
+const OCR_ROUTE_KINDS = new Set([
+  "remote_paddleocr",
+  "mineru",
+  "missing_credentials",
+  "blocked_dirty_text_layer",
+]);
 
 const DEFAULT_SAMPLE_PAGES = 3;
 const MAX_SAMPLE_PAGES = 10;
@@ -48,32 +63,44 @@ export function canCompareOcrEngines(unit: BookUnit): boolean {
   return extract.status !== "running" && extract.status !== "completed";
 }
 
+/**
+ * One engine's pane.
+ *
+ * The choice is a real radio rather than a clickable card: the two engines are
+ * mutually exclusive, which is what a radio group means, and it keeps the
+ * excerpt out of the control's accessible name. Wrapping the whole pane in a
+ * button made the excerpt — up to 4000 characters of the book — the button's
+ * name, and ARIA's "children presentational" rule erased the engine heading
+ * that names it.
+ */
 function EnginePane({
   result,
   copy,
+  groupName,
   picked,
   onPick,
 }: {
   result: BookPipelineOcrSampleEngine;
   copy: PipelineCopy;
+  groupName: string;
   picked: boolean;
   onPick: () => void;
 }) {
   const failed = result.status === "failed";
   return (
-    <button
-      type="button"
-      className={`pl-ocrpane${picked ? " picked" : ""}${failed ? " failed" : ""}`}
-      // A failed engine is shown so its reason is visible, but it cannot be
-      // chosen: there is no evidence it converts this book.
-      disabled={failed}
-      aria-pressed={picked}
-      onClick={onPick}
-    >
-      <div className="pl-ocrpane-head">
-        <h5>{ENGINE_LABEL[result.engine]}</h5>
-        {picked && <span className="pl-ocrpane-tag">{copy.ocrComparePicked}</span>}
-      </div>
+    <div className={`pl-ocrpane${picked ? " picked" : ""}${failed ? " failed" : ""}`}>
+      <label className="pl-ocrpane-head">
+        <input
+          type="radio"
+          name={groupName}
+          checked={picked}
+          // A failed engine is shown so its reason is visible, but it cannot be
+          // chosen: there is no evidence it converts this book.
+          disabled={failed}
+          onChange={onPick}
+        />
+        <span className="pl-ocrpane-name">{ENGINE_LABEL[result.engine]}</span>
+      </label>
       {failed ? (
         <p className="pl-ocrpane-error">
           {copy.ocrCompareFailed}
@@ -90,12 +117,15 @@ function EnginePane({
               {copy.ocrCompareSeconds}
             </span>
           </div>
-          <pre className="pl-ocrpane-text">
+          {/* Focusable so the excerpt can be scrolled from the keyboard; it
+              overflows for any real page of text. dir=auto because OCR output
+              is whatever language the book is in. */}
+          <pre className="pl-ocrpane-text" tabIndex={0} dir="auto">
             {result.markdownExcerpt.trim() || copy.ocrCompareEmpty}
           </pre>
         </>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -183,12 +213,16 @@ export function OcrCompareCard({
               {report.sampledPages.join(" · ")} / {report.totalPages}
             </span>
           </div>
-          <div className="pl-ocrpanes">
+          {/* A native radio group: same name, so exactly one engine is chosen
+              and screen readers announce it as "1 of 2". Scoped to this child
+              so two open books never share a group. */}
+          <div className="pl-ocrpanes" role="radiogroup" aria-label={copy.ocrCompareTitle}>
             {report.engines.map((result) => (
               <EnginePane
                 key={result.engine}
                 result={result}
                 copy={copy}
+                groupName={`ocr-engine-${childId}`}
                 picked={picked === result.engine}
                 onPick={() => version && setChoice({ version, engine: result.engine })}
               />

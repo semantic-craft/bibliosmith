@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { readBookPipelineOcrSample } from "../api";
 import { OcrCompareCard, canCompareOcrEngines } from "./OcrCompareCard";
 import { pipelineCopy } from "./copy";
-import type { BookUnit } from "./model";
+import type { BookUnit, PipelineBusy } from "./model";
 import { artifact, bookUnit, routeItem, stage } from "../test/fixtures";
 import type { BookPipelineOcrSampleReport } from "../types";
 
@@ -88,8 +88,34 @@ describe("canCompareOcrEngines", () => {
   });
 
   it("stays closed for a book that needs no OCR at all", () => {
+    // A usable text layer means no engine to choose; sampling would spend on
+    // pages nothing goes on to use.
     const unit = sampleableUnit();
     unit.child!.route = [routeItem({ routeKind: "direct_text" })];
+    expect(canCompareOcrEngines(unit)).toBe(false);
+  });
+
+  it("is open for every route kind the backend lets an override reach", () => {
+    // A dirty text layer is where the choice matters most — the book's own text
+    // is unusable — and it is what the blocked-state buttons already offer
+    // paddle/mineru for. missing_credentials is reachable too: one engine may
+    // still be configured, and half a comparison decides the route.
+    for (const routeKind of [
+      "remote_paddleocr",
+      "mineru",
+      "missing_credentials",
+      "blocked_dirty_text_layer",
+    ]) {
+      const unit = sampleableUnit();
+      unit.child!.route = [routeItem({ routeKind })];
+      expect(canCompareOcrEngines(unit), routeKind).toBe(true);
+    }
+  });
+
+  it("stays closed for a unit with no child job", () => {
+    // Collection parents carry no stages of their own.
+    const unit = sampleableUnit();
+    unit.child = null;
     expect(canCompareOcrEngines(unit)).toBe(false);
   });
 });
@@ -234,6 +260,138 @@ describe("OcrCompareCard", () => {
       />,
     );
     expect(screen.queryByText("PaddleOCR")).toBeNull();
+  });
+
+  it("shows a report that arrives after mount, not only one present on mount", async () => {
+    // The real journey is the opposite of every other test here: the card is
+    // already open with no report, the user runs a comparison, and the new
+    // artifact digest has to make the effect fetch again. Dropping `version`
+    // from the dependency array leaves the card blank forever.
+    readSample.mockResolvedValue(report());
+    const props = {
+      copy,
+      busy: null as PipelineBusy,
+      onSampleOcr: vi.fn(),
+      onRouteOverride: vi.fn(),
+    };
+    const { rerender } = render(<OcrCompareCard unit={sampleableUnit()} {...props} />);
+    expect(screen.queryByText("PaddleOCR")).toBeNull();
+
+    rerender(
+      <OcrCompareCard
+        unit={sampleableUnit({ artifacts: [artifact("ocr_sample_report", { sha256: "abc" })] })}
+        {...props}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("PaddleOCR")).toBeTruthy());
+  });
+
+  it("drops the previous selection when a re-sample replaces the report", async () => {
+    const user = userEvent.setup();
+    readSample.mockResolvedValue(report());
+    const props = {
+      copy,
+      busy: null as PipelineBusy,
+      onSampleOcr: vi.fn(),
+      onRouteOverride: vi.fn(),
+    };
+    const { rerender } = render(
+      <OcrCompareCard
+        unit={sampleableUnit({ artifacts: [artifact("ocr_sample_report", { sha256: "abc" })] })}
+        {...props}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("MinerU")).toBeTruthy());
+    await user.click(screen.getByText("MinerU"));
+    expect(screen.getByRole("button", { name: copy.ocrComparePick })).toHaveProperty(
+      "disabled",
+      false,
+    );
+
+    // A new comparison is evidence the old choice was never made against.
+    readSample.mockResolvedValue(report({ totalPages: 88 }));
+    rerender(
+      <OcrCompareCard
+        unit={sampleableUnit({ artifacts: [artifact("ocr_sample_report", { sha256: "def" })] })}
+        {...props}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/\/ 88/)).toBeTruthy());
+    expect(screen.getByRole("button", { name: copy.ocrComparePick })).toHaveProperty(
+      "disabled",
+      true,
+    );
+  });
+
+  it("reports each engine's cost in the units the label promises", async () => {
+    readSample.mockResolvedValue(report());
+    renderCard(sampleableUnit({ artifacts: [artifact("ocr_sample_report", { sha256: "abc" })] }));
+    await waitFor(() => expect(screen.getByText("PaddleOCR")).toBeTruthy());
+
+    // Seconds, not milliseconds: 4100ms next to a "s" label reads as an engine
+    // that took over an hour.
+    expect(screen.getByText(`4.1${copy.ocrCompareSeconds}`)).toBeTruthy();
+    expect(screen.getByText(`9.2${copy.ocrCompareSeconds}`)).toBeTruthy();
+    expect(screen.getAllByText(`30 ${copy.ocrCompareCharacters}`)).toHaveLength(2);
+  });
+
+  it("presents the engines as one mutually exclusive choice", async () => {
+    const user = userEvent.setup();
+    readSample.mockResolvedValue(report());
+    renderCard(sampleableUnit({ artifacts: [artifact("ocr_sample_report", { sha256: "abc" })] }));
+    await waitFor(() => expect(screen.getByText("PaddleOCR")).toBeTruthy());
+
+    // Radios, not toggle buttons: exactly one engine converts the book, and the
+    // excerpt must stay out of the control's accessible name.
+    const radios = screen.getAllByRole("radio");
+    expect(radios).toHaveLength(2);
+    await user.click(screen.getByText("MinerU"));
+    expect(radios[1]).toHaveProperty("checked", true);
+    await user.click(screen.getByText("PaddleOCR"));
+    expect(radios[0]).toHaveProperty("checked", true);
+    expect(radios[1]).toHaveProperty("checked", false);
+  });
+
+  it("offers a re-sample once a comparison exists", async () => {
+    readSample.mockResolvedValue(report());
+    renderCard(sampleableUnit({ artifacts: [artifact("ocr_sample_report", { sha256: "abc" })] }));
+    await waitFor(() => expect(screen.getByText("PaddleOCR")).toBeTruthy());
+    expect(screen.getByRole("button", { name: copy.ocrCompareRetry })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: copy.ocrCompareRun })).toBeNull();
+  });
+
+  it("says so when an engine succeeded but returned nothing", async () => {
+    // The backend accepts this: only both engines failing is an error, so an
+    // empty pane must read as an answer rather than as a render bug.
+    readSample.mockResolvedValue(
+      report({
+        engines: [
+          { ...report().engines[0], markdownExcerpt: "   ", characterCount: 0 },
+          report().engines[1],
+        ],
+      }),
+    );
+    renderCard(sampleableUnit({ artifacts: [artifact("ocr_sample_report", { sha256: "abc" })] }));
+    await waitFor(() => expect(screen.getByText(copy.ocrCompareEmpty)).toBeTruthy());
+  });
+
+  it("will not write a route while another action is in flight", async () => {
+    readSample.mockResolvedValue(report());
+    render(
+      <OcrCompareCard
+        unit={sampleableUnit({ artifacts: [artifact("ocr_sample_report", { sha256: "abc" })] })}
+        copy={copy}
+        busy="sample"
+        onSampleOcr={vi.fn()}
+        onRouteOverride={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("PaddleOCR")).toBeTruthy());
+    // A re-sample in flight is about to replace the evidence under the choice.
+    expect(screen.getByRole("button", { name: copy.ocrComparePick })).toHaveProperty(
+      "disabled",
+      true,
+    );
   });
 
   it("is inert while another pipeline action is running", () => {
