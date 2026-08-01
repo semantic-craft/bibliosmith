@@ -117,14 +117,41 @@ further suites sit under `tools/`: `tools/git` and
 That tree is run with `--package digest` because `tests/digest/` shells out to
 `python -m digest.bibliosmith_digest`, which needs the member installed.
 
+## What `main` enforces
+
+The repository ruleset **Protect default branch** is active on the default
+branch, with no bypass actors — the owner cannot bypass it either. A direct push
+to `main` is rejected; every change lands through a pull request.
+
+Five status checks are required, each named by the `name:` of its job in
+`ci.yml`: `Python suites (pytest)`, `Launcher frontend (tsc + startup
+contract)`, `Launcher backend (cargo test)`, `Commit messages (ZH/EN/JA)`, and
+`Secret and personal-info scan (gitleaks)`.
+
+Renaming one of those jobs renames its check, which strands any pull request
+already in flight against the old name. The four CodeQL `Analyze` jobs are
+deliberately **not** required: CodeQL decides per pull request whether to run at
+all, so requiring it would hang pull requests it skips.
+
+Three more rules apply:
+
+- **Review threads must be resolved.** No approving review is required
+  (`required_approving_review_count` is 0), but an unresolved thread — including
+  one opened by a review bot — keeps `mergeStateStatus` at `BLOCKED` with every
+  check green. `gh pr checks` will not show this; query `reviewThreads`.
+- **No force-push, no deletion.** History rewrites are fine on a topic branch
+  and impossible on `main`.
+- **Checks are not strict.** A pull request does not have to be up to date with
+  `main` to merge, so a green run may have been produced against an older base.
+
+Merge, squash, and rebase are all permitted. Existing history uses merge
+commits, and squashing would discard the per-commit ZH/EN/JA bodies that the
+launcher renders as its update text.
+
 ## Not covered by CI
 
 - Live-provider behaviour is a manual check — see
   [`docs/runbooks/real-backend-smoke.md`](docs/runbooks/real-backend-smoke.md).
-- Nothing enforces the gate at the branch level: `main` has no protection rule
-  and no required status check, so a direct push lands whether or not `ci.yml`
-  is green. The gate is real for tags — the release build waits on it — but on
-  `main` it reports rather than blocks.
 
 ## Runners
 
