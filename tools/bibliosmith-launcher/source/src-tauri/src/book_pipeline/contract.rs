@@ -14,6 +14,14 @@ pub(crate) const STATUS_HANDOFF_RUNNING: &str = "handoff_running";
 pub(crate) const STATUS_TRANSLATION_READY: &str = "translation_ready";
 pub(crate) const MODE_CONVERT_THEN_TRANSLATE: &str = "convert_then_translate";
 pub(crate) const MODE_TRANSLATE_ONLY: &str = "translate_only";
+/// Retired: conversion always continues into translation now, so nothing may be
+/// enqueued with this mode. It stays spelled out because jobs stored before the
+/// retirement still carry it, and reading them must not fall through to a
+/// pipeline shape nobody named.
+pub(crate) const MODE_CONVERSION_ONLY: &str = "conversion_only";
+/// The modes a caller may enqueue. Anything else is refused at the queue
+/// boundary rather than silently given a shape.
+pub(crate) const ENQUEUEABLE_MODES: [&str; 2] = [MODE_CONVERT_THEN_TRANSLATE, MODE_TRANSLATE_ONLY];
 pub(crate) const TRANSLATION_MODE_FAST: &str = "fast";
 pub(crate) const TRANSLATION_MODE_EXPERT: &str = "expert";
 pub(crate) const STATE_SCHEMA_VERSION: &str = "book-pipeline-state-v5";

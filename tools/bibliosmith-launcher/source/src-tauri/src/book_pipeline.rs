@@ -3399,6 +3399,28 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
     Ok(())
 }
 
+/// Guards the queue boundary. An unknown mode is refused instead of being given
+/// whichever pipeline shape it happens to miss, and the retired conversion-only
+/// mode is refused by name so the message says why rather than reading as a
+/// typo. Stored jobs are not re-checked: retiring the mode must not stop an
+/// existing library from opening.
+fn validate_enqueue_mode(mode: &str) -> Result<(), String> {
+    if ENQUEUEABLE_MODES.contains(&mode) {
+        return Ok(());
+    }
+    if mode == MODE_CONVERSION_ONLY {
+        return Err(format!(
+            "Book Pipeline mode {MODE_CONVERSION_ONLY} was retired: conversion now always \
+             continues into translation. Enqueue {MODE_CONVERT_THEN_TRANSLATE} instead. Jobs \
+             queued before the retirement keep running and stay readable."
+        ));
+    }
+    Err(format!(
+        "Unknown Book Pipeline mode {mode}. Valid modes: {}.",
+        ENQUEUEABLE_MODES.join(", ")
+    ))
+}
+
 fn queue_job_with_translation_intent(
     store: &dyn BookPipelineStateStore,
     source: BookPipelineSource,
@@ -3406,6 +3428,7 @@ fn queue_job_with_translation_intent(
     translation_intent: BookPipelineTranslationIntent,
     config: BookPipelinePreviewConfig,
 ) -> Result<BookPipelineJob, String> {
+    validate_enqueue_mode(&mode)?;
     queue_job_with_translation_intent_and_executor(
         store,
         &SystemCommandExecutor,
@@ -3416,6 +3439,10 @@ fn queue_job_with_translation_intent(
     )
 }
 
+/// Builds the job for a mode the caller has already cleared. `validate_enqueue_mode`
+/// sits one frame up in `queue_job_with_translation_intent`, which is the path the
+/// Tauri command takes; entering here directly skips that gate and is how tests
+/// reconstruct jobs in the retired conversion-only shape.
 fn queue_job_with_translation_intent_and_executor<E: RunnerCommandExecutor>(
     store: &dyn BookPipelineStateStore,
     executor: &E,
@@ -4058,6 +4085,10 @@ fn collection_snapshot_route(
     })
 }
 
+/// Tests reach the queue through here. The retired conversion-only mode goes
+/// around `validate_enqueue_mode` on purpose: the tests below assert on the
+/// three-stage shape of jobs queued before the retirement, and that shape has to
+/// stay reachable to stay covered. Every other mode goes through the real gate.
 #[cfg(test)]
 fn queue_job(
     store: &dyn BookPipelineStateStore,
@@ -4065,22 +4096,27 @@ fn queue_job(
     mode: String,
     config: BookPipelinePreviewConfig,
 ) -> Result<BookPipelineJob, String> {
-    queue_job_with_translation_intent(
-        store,
-        source,
-        mode,
-        BookPipelineTranslationIntent {
-            translation_mode: TRANSLATION_MODE_FAST.into(),
-            profile_id: "fake-provider-profile".into(),
-            config_id: "fake-provider-config".into(),
-            skill_ids: Vec::new(),
-            second_pass_enabled: false,
-            text_cleanup: false,
-            digest_mode: false,
-            output_formats: default_output_formats(),
-        },
-        config,
-    )
+    let intent = BookPipelineTranslationIntent {
+        translation_mode: TRANSLATION_MODE_FAST.into(),
+        profile_id: "fake-provider-profile".into(),
+        config_id: "fake-provider-config".into(),
+        skill_ids: Vec::new(),
+        second_pass_enabled: false,
+        text_cleanup: false,
+        digest_mode: false,
+        output_formats: default_output_formats(),
+    };
+    if mode == MODE_CONVERSION_ONLY {
+        return queue_job_with_translation_intent_and_executor(
+            store,
+            &SystemCommandExecutor,
+            source,
+            mode,
+            intent,
+            config,
+        );
+    }
+    queue_job_with_translation_intent(store, source, mode, intent, config)
 }
 
 fn handoff_job_markdown(
@@ -6270,8 +6306,13 @@ fn collection_awaits_attachment_routing(job: &BookPipelineJob) -> bool {
         })
 }
 
+/// Every live mode hands off to translation once the run finishes. The retired
+/// conversion-only mode is the single exception, and it is named here rather
+/// than inferred: before it was retired any string that was not one of the two
+/// live modes silently inherited its half pipeline, so a typo in stored state
+/// produced a job that stopped after extraction and looked finished.
 fn should_handoff_after_run(mode: &str) -> bool {
-    mode == MODE_CONVERT_THEN_TRANSLATE || mode == MODE_TRANSLATE_ONLY
+    mode != MODE_CONVERSION_ONLY
 }
 
 impl PipelineRunner for SystemPipelineRunner {
