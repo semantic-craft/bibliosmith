@@ -5,6 +5,8 @@ import {
   PIPELINE_STAGE_ORDER,
   activePhaseIndex,
   approvalRecords,
+  effectivePipelineMode,
+  layoutTrackAvailable,
   buildGateView,
   flattenBookUnits,
   phaseStates,
@@ -21,7 +23,10 @@ import {
   unitAdvanceAction,
   unitNote,
   unitProgress,
+  visiblePhaseIndexes,
 } from "./model";
+import { defaultPipelineDraft, type PipelineDraft } from "./model";
+import type { BookPipelineRouteItem } from "../types";
 import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
 import {
   approvalRef,
@@ -703,6 +708,121 @@ describe("unitAdvanceAction", () => {
       stages: [stage("build_reading", "ready"), stage("split", "ready")],
     });
     expect(unitAdvanceAction(unit)?.stageId).toBe("split");
+  });
+});
+
+describe("the two book tracks", () => {
+  const route = (
+    id: string,
+    routeKind: string,
+    canRun = true,
+  ): BookPipelineRouteItem => ({
+    id,
+    title: id,
+    sourceKind: "zotero_attachment",
+    sourceRef: id,
+    routeKind,
+    canRun,
+    summary: "",
+  });
+
+  describe("layoutTrackAvailable", () => {
+    it("accepts a single text PDF", () => {
+      expect(layoutTrackAvailable([route("r1", "direct_text")])).toBe(true);
+    });
+
+    it("refuses a scanned book, which has no text layer to translate", () => {
+      expect(layoutTrackAvailable([route("r1", "remote_paddleocr")])).toBe(false);
+      expect(layoutTrackAvailable([route("r1", "mineru")])).toBe(false);
+    });
+
+    it("refuses a batch, which has no single layout to preserve", () => {
+      expect(
+        layoutTrackAvailable([route("r1", "direct_text"), route("r2", "direct_text")]),
+      ).toBe(false);
+    });
+
+    it("ignores the synthetic handoff row the backend appends", () => {
+      // Without this the preflight for a perfectly eligible book counts two
+      // items and the choice never appears.
+      expect(
+        layoutTrackAvailable([
+          route("r1", "direct_text"),
+          route("handoff", "translation_handoff"),
+        ]),
+      ).toBe(true);
+    });
+
+    it("ignores items that cannot run", () => {
+      expect(
+        layoutTrackAvailable([
+          route("r1", "direct_text"),
+          route("r2", "missing_credentials", false),
+        ]),
+      ).toBe(true);
+    });
+
+    it("refuses an empty preflight", () => {
+      expect(layoutTrackAvailable([])).toBe(false);
+    });
+  });
+
+  describe("effectivePipelineMode", () => {
+    const draft = (mode: PipelineDraft["mode"]): PipelineDraft => ({
+      ...defaultPipelineDraft,
+      mode,
+    });
+
+    it("honours the layout track when the preflight supports it", () => {
+      expect(
+        effectivePipelineMode(draft("layout_preserving"), [route("r1", "direct_text")]),
+      ).toBe("layout_preserving");
+    });
+
+    // The bug this exists to prevent: pick the layout track for a text PDF,
+    // then swap to a scanned book. The draft still says layout_preserving, and
+    // queueing that gets refused by the backend.
+    it("falls back to the reflow track when the book is no longer eligible", () => {
+      expect(
+        effectivePipelineMode(draft("layout_preserving"), [route("r1", "remote_paddleocr")]),
+      ).toBe("convert_then_translate");
+    });
+
+    it("never upgrades a reflow draft on its own", () => {
+      expect(
+        effectivePipelineMode(draft("convert_then_translate"), [route("r1", "direct_text")]),
+      ).toBe("convert_then_translate");
+    });
+  });
+
+  describe("visiblePhaseIndexes", () => {
+    it("draws one segment for the layout track", () => {
+      const unit = bookUnit({
+        status: "running",
+        stages: [stage("route", "completed"), stage("extract", "running")],
+        jobOver: { mode: "layout_preserving" },
+      });
+      expect(visiblePhaseIndexes(unit)).toEqual([0]);
+    });
+
+    it("leaves the reflow track's three segments alone", () => {
+      const unit = bookUnit({
+        status: "running",
+        stages: [
+          stage("route", "completed"),
+          stage("extract", "running"),
+          stage("prepare", "pending"),
+          stage("build_reading", "pending"),
+        ],
+      });
+      expect(visiblePhaseIndexes(unit)).toEqual([0, 1, 2]);
+    });
+
+    it("shows the full strip for a unit with no recognised stages", () => {
+      // Rendering nothing would read as a broken drawer; a full pending strip
+      // reads as "queued, nothing has happened yet", which is true.
+      expect(visiblePhaseIndexes(bookUnit({ stages: [] }))).toEqual([0, 1, 2]);
+    });
   });
 });
 

@@ -14029,3 +14029,76 @@ fn a_layout_job_never_takes_the_reflow_source_shortcuts() {
         );
     }
 }
+
+#[test]
+fn a_finished_layout_job_opens_the_bilingual_pdf_itself() {
+    // The layout track builds no reading project, so without its own navigation
+    // target a finished book falls back to "Open workspace" and leaves the user
+    // to pick the PDF out of the job output directory themselves.
+    let root = temp_root("layout-open-target");
+    fs::create_dir_all(&root).unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        fake_direct_zotero_source(),
+        MODE_LAYOUT_PRESERVING.into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            ..BookPipelinePreviewConfig::default()
+        },
+    )
+    .unwrap();
+
+    let completed = run_job(&store, &LayoutPdfFixtureRunner, &job.id).unwrap();
+
+    assert_eq!(completed.status, STATUS_COMPLETED);
+    let open_target = completed
+        .open_target
+        .as_ref()
+        .expect("a finished layout job must offer something to open");
+    assert_eq!(open_target.kind, "bilingual_pdf");
+    assert_eq!(open_target.action_label, "Open bilingual PDF");
+    let target = completed
+        .navigation_targets
+        .iter()
+        .find(|target| target.target_id == open_target.target_id)
+        .expect("the selected target must be registered");
+    assert!(
+        target.path.ends_with(".pdf"),
+        "expected the bilingual PDF, got {}",
+        target.path
+    );
+}
+
+#[test]
+fn a_reflow_job_keeps_its_own_open_target() {
+    // The arm added for the layout track sits ahead of the reading-output one,
+    // so it has to be scoped by mode or every finished book claims to be a PDF.
+    let root = temp_root("layout-open-target-reflow");
+    fs::create_dir_all(&root).unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        fake_direct_zotero_source(),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            ..BookPipelinePreviewConfig::default()
+        },
+    )
+    .unwrap();
+
+    // Same runner, so the same PDF lands in the job output directory. Only the
+    // mode differs, and that alone must keep the target off this job.
+    let ran = run_job(&store, &LayoutPdfFixtureRunner, &job.id).unwrap();
+
+    assert!(
+        !ran.navigation_targets
+            .iter()
+            .any(|target| target.kind == "bilingual_pdf"),
+        "the reflow track must not claim a bilingual PDF target: {:?}",
+        ran.navigation_targets
+    );
+
+    let _ = fs::remove_dir_all(root);
+}

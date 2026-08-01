@@ -1199,6 +1199,25 @@ fn refresh_navigation_targets(job: &mut BookPipelineJob) {
             Path::new(output_dir),
             None,
         );
+        // The layout track's whole deliverable is one PDF sitting in the job
+        // output directory -- it builds no reading project, so without this the
+        // finished book offers "Open workspace" and leaves the user to find the
+        // file themselves.
+        if job.mode == MODE_LAYOUT_PRESERVING {
+            if let Some(artifact) = job
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "pdf" && artifact.validation.hash_matches)
+            {
+                register_navigation_target(
+                    &mut targets,
+                    "bilingual_pdf",
+                    Path::new(&artifact.path),
+                    Path::new(output_dir),
+                    Some(&artifact.artifact_id),
+                );
+            }
+        }
         if job.kind == "collection" {
             if let Some(manifest) = job
                 .artifacts
@@ -1414,7 +1433,9 @@ fn select_book_pipeline_open_target(job: &BookPipelineJob) -> Option<BookPipelin
             "Open collection results",
         ),
         STATUS_COMPLETED => {
-            if let Some(target) = find(&["reading_output_directory"]) {
+            if let Some(target) = find(&["bilingual_pdf"]) {
+                (Some(target), "Open bilingual PDF")
+            } else if let Some(target) = find(&["reading_output_directory"]) {
                 (Some(target), "Open reading output")
             } else {
                 (find(&["project_workspace", "workspace"]), "Open workspace")
