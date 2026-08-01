@@ -58,8 +58,9 @@ pub(crate) fn migrate_legacy_job(job: &mut BookPipelineJob) {
         migrate_legacy_collection_execution_status(job, &legacy_status);
     }
     let digest_mode = job.digest_mode;
+    let mode = job.mode.clone();
     for child in &mut job.children {
-        ensure_item_index_stage(child);
+        ensure_item_index_stage(child, &mode);
         if child
             .stages
             .iter()
@@ -276,6 +277,13 @@ pub(crate) fn ordered_child_stage_ids(
     mode: &str,
     legacy_translation_state: bool,
 ) -> Vec<&'static str> {
+    // Ahead of the legacy check on purpose: this mode postdates every state file
+    // a legacy flag can describe, so a job carrying it is never mid-translation.
+    // Spelled out rather than left to fall through the `else` below, which is
+    // the retiring `conversion_only` hole and is not a contract to build on.
+    if mode == MODE_LAYOUT_PRESERVING {
+        return vec!["route", "extract"];
+    }
     if should_handoff_after_run(mode) || legacy_translation_state {
         vec![
             "route",
@@ -298,7 +306,14 @@ pub(crate) fn ordered_child_stage_ids(
     }
 }
 
-pub(crate) fn ensure_item_index_stage(child: &mut BookPipelineChildJob) {
+pub(crate) fn ensure_item_index_stage(child: &mut BookPipelineChildJob, mode: &str) {
+    // The item index is built from the Markdown the reflow track produces. The
+    // layout track never produces any, and its stage list is exactly two long --
+    // inserting a third here would leave every job stalled on a stage with no
+    // input.
+    if mode == MODE_LAYOUT_PRESERVING {
+        return;
+    }
     if child.stages.iter().any(|stage| stage.stage_id == "index") {
         return;
     }

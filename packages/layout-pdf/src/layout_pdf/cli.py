@@ -94,6 +94,12 @@ def main(
     if source.suffix.lower() != ".pdf":
         raise SystemExit(f"The layout-preserving track only accepts PDFs: {source}")
 
+    # Read before anything is created or spawned: an unconfigured endpoint is the
+    # likeliest failure here and it should cost nothing to hit.
+    base_url = _require_env(BASE_URL_ENV)
+    api_key = _require_env(API_KEY_ENV)
+    model = _require_env(MODEL_ENV)
+
     output_dir: Path = arguments.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -115,9 +121,9 @@ def main(
                 output_dir=Path(staging),
                 lang_in=arguments.lang_in,
                 lang_out=arguments.lang_out,
-                base_url=_require_env(BASE_URL_ENV),
-                api_key=_require_env(API_KEY_ENV),
-                model=_require_env(MODEL_ENV),
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
                 qps=arguments.qps,
             )
             outcome = translate(request, progress)

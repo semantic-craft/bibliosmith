@@ -79,11 +79,16 @@ export type RouteOverride = "auto" | "direct" | "paddle" | "mineru" | "keep";
 
 export type PipelineDraft = {
   sourceKind: BookPipelineSource["kind"];
-  // The union is the backend contract and keeps its three arms, but the input
-  // island never sets anything other than convert_then_translate: conversion
-  // without translation left the UI with the mode selector, and translate_only
-  // waits on the EPUB input route.
-  mode: "conversion_only" | "convert_then_translate" | "translate_only";
+  // The union is the backend contract, but the input island never sets anything
+  // other than convert_then_translate: conversion without translation left the
+  // UI with the mode selector, translate_only waits on the EPUB input route, and
+  // layout_preserving -- the BabelDOC bilingual-PDF track, which the backend can
+  // already run -- waits on the island's two-way choice for text PDFs (#99).
+  mode:
+    | "conversion_only"
+    | "convert_then_translate"
+    | "translate_only"
+    | "layout_preserving";
   localPdfFolder: string;
   localPdfTitle: string;
   translationMode: "fast" | "expert";

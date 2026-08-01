@@ -999,7 +999,7 @@ fn source_reference_sha256(source: &BookPipelineSource) -> String {
 fn artifact_default_stage(kind: &str) -> &'static str {
     match kind {
         "collection_manifest" => "discover",
-        "markdown" | "html" | "epub" | "metadata" | "index" => "extract",
+        "markdown" | "html" | "epub" | "pdf" | "metadata" | "index" => "extract",
         "translation_source"
         | "source_manifest"
         | "translation_draft"
@@ -6345,12 +6345,24 @@ impl TranslationHandoffRunner for LocalProjectHandoffRunner {
     }
 }
 
+/// Whether `run` may take its two source-kind shortcuts instead of building a
+/// command.
+///
+/// Both shortcuts assume the reflow track. The layout track is dispatched inside
+/// the command builder, so it has to skip them -- a Zotero title search is a
+/// "batch" source, and a layout job queued from one would otherwise be handed to
+/// the OCR worker with its mode silently ignored.
+fn takes_reflow_source_shortcut(job: &BookPipelineJob) -> bool {
+    job.mode != MODE_LAYOUT_PRESERVING
+        && (job.source.kind == "markdown_source" || is_zotero_batch_source(&job.source))
+}
+
 impl<E: RunnerCommandExecutor> PipelineRunner for CommandPipelineRunner<E> {
     fn run(&self, job: &BookPipelineJob, output_dir: &Path) -> Result<RunnerOutput, String> {
-        if job.source.kind == "markdown_source" {
-            return run_markdown_source_job(job, output_dir);
-        }
-        if is_zotero_batch_source(&job.source) {
+        if takes_reflow_source_shortcut(job) {
+            if job.source.kind == "markdown_source" {
+                return run_markdown_source_job(job, output_dir);
+            }
             let root = self
                 .book_ocr_conversion_root
                 .as_deref()
@@ -6474,6 +6486,9 @@ fn execute_conversion_command<E: RunnerCommandExecutor>(
     if command_uses_ocr_credentials(&command) {
         inject_ocr_credentials(&mut command);
     }
+    if command.label == LAYOUT_PDF_COMMAND_LABEL {
+        inject_layout_pdf_model_env(&mut command)?;
+    }
     fs::create_dir_all(&command.output_dir).map_err(|err| err.to_string())?;
     let command_result = executor.execute(&command)?;
     let zotero_key = extract_zotero_attachment_key(&command_result);
@@ -6503,6 +6518,13 @@ fn execute_conversion_command<E: RunnerCommandExecutor>(
     ));
     if let Some(key) = zotero_key {
         log_summary.push(format!("Zotero Markdown attachment recorded: {key}"));
+    }
+    if command.label == LAYOUT_PDF_COMMAND_LABEL {
+        // Stated unconditionally because BabelDOC has no runtime warning for it,
+        // so there is no marker to forward -- and a reader who opens the
+        // bibliography of a finished book deserves to know before they conclude
+        // the translation is broken.
+        log_summary.push(LAYOUT_PDF_REFERENCE_LIMITATION.into());
     }
     Ok(RunnerOutput {
         log_summary: trim_log_summary(&log_summary),
@@ -6618,6 +6640,27 @@ fn inject_ocr_credentials(command: &mut RunnerCommand) {
     for (key_env, value) in crate::ocr_settings::resolve_credential_env() {
         command.env.push((key_env, value));
     }
+}
+
+/// Point BabelDOC at the model the user chose in Settings.
+///
+/// Unlike the OCR injection above there is no fallback: BabelDOC has no registry
+/// and no `.env` lookup of its own, so a missing key or a non-OpenAI provider has
+/// to fail here with something the user can act on rather than a stack trace from
+/// inside the subprocess.
+fn inject_layout_pdf_model_env(command: &mut RunnerCommand) -> Result<(), String> {
+    let repo_root = translation_engine_repo_root()?;
+    let endpoint = crate::model_settings::resolve_openai_compatible_endpoint(&repo_root)?;
+    command
+        .env
+        .push((LAYOUT_PDF_BASE_URL_ENV.into(), endpoint.base_url));
+    command
+        .env
+        .push((LAYOUT_PDF_API_KEY_ENV.into(), endpoint.api_key));
+    command
+        .env
+        .push((LAYOUT_PDF_MODEL_ENV.into(), endpoint.model));
+    Ok(())
 }
 
 fn validated_item_index_artifact(
@@ -6953,6 +6996,12 @@ fn build_runner_command_with_root(
     output_dir: &Path,
     book_ocr_root: Option<&Path>,
 ) -> Result<RunnerCommand, String> {
+    // Dispatched on the mode before the source kind: this track replaces the
+    // conversion step outright rather than being one more way to convert. The
+    // eligibility rule -- a single `direct_text` PDF -- lives in the builder.
+    if job.mode == MODE_LAYOUT_PRESERVING {
+        return build_layout_pdf_command(job, output_dir);
+    }
     match job.source.kind.as_str() {
         "fake" => build_fake_runner_command(job, output_dir),
         "external_adapter" => build_external_adapter_command(job, output_dir),
@@ -7169,6 +7218,129 @@ fn build_local_pdf_folder_command_for_root(
             ]);
             args
         },
+        env: Vec::new(),
+        cwd: Some(root.to_path_buf()),
+        output_dir: output_dir.to_path_buf(),
+        attempts: job.attempts,
+        accepted_exit_codes: vec![0],
+    })
+}
+
+/// The repository root, having checked that the layout-preserving package is
+/// actually there. `uv run --package` resolves against the workspace root, so a
+/// repoRoot pointing somewhere without this member fails inside uv with a much
+/// worse message than this one.
+fn layout_pdf_repo_root() -> Result<PathBuf, String> {
+    let repo_root = local_reading_repo_root()?;
+    let package_manifest = repo_root
+        .join("packages")
+        .join("layout-pdf")
+        .join("pyproject.toml");
+    if !package_manifest.is_file() {
+        return Err(format!(
+            "Layout-preserving PDF package not found at {}",
+            display_path(&package_manifest)
+        ));
+    }
+    Ok(repo_root)
+}
+
+/// The source PDF for a layout-track route.
+///
+/// `source_ref` carries the worker's fingerprint as a `#source_md5=` fragment,
+/// so the raw value is a path that does not exist and whose extension is not
+/// `.pdf`. Every real Zotero attachment arrives this way; only hand-built
+/// fixtures come through clean, which is exactly why this is easy to get wrong.
+fn layout_pdf_source_path(route: &BookPipelineRouteItem) -> Result<PathBuf, String> {
+    let raw = route
+        .source_ref
+        .split_once("#source_md5=")
+        .map(|(path, _)| path)
+        .unwrap_or(&route.source_ref)
+        .trim();
+    if raw.is_empty() {
+        return Err("The layout-preserving track has no source PDF path.".into());
+    }
+    let path = PathBuf::from(raw);
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+        != Some("pdf")
+    {
+        return Err(format!(
+            "The layout-preserving track only accepts PDFs, not {}",
+            display_path(&path)
+        ));
+    }
+    if !path.is_file() {
+        return Err(format!("Source PDF not found at {}", display_path(&path)));
+    }
+    Ok(path)
+}
+
+/// The one route this track is allowed to run.
+///
+/// `direct_text` means the worker found a usable text layer. A scanned book has
+/// nothing for BabelDOC to translate, and a multi-item source has no single
+/// document to preserve the layout of, so both are refused here rather than
+/// failing halfway through a run.
+fn layout_pdf_route(job: &BookPipelineJob) -> Result<&BookPipelineRouteItem, String> {
+    let runnable: Vec<&BookPipelineRouteItem> = job
+        .route
+        .iter()
+        .filter(|route| route.can_run && route.route_kind != "translation_handoff")
+        .collect();
+    match runnable.as_slice() {
+        [] => Err(
+            "The layout-preserving track has no runnable item. Only a text PDF is eligible."
+                .into(),
+        ),
+        [route] if route.route_kind == "direct_text" => Ok(route),
+        [route] => Err(format!(
+            "The layout-preserving track is only available for text PDFs, and this item routed as {}.",
+            route.route_kind
+        )),
+        _ => Err(
+            "The layout-preserving track handles one book at a time. Queue each PDF separately."
+                .into(),
+        ),
+    }
+}
+
+fn build_layout_pdf_command(
+    job: &BookPipelineJob,
+    output_dir: &Path,
+) -> Result<RunnerCommand, String> {
+    build_layout_pdf_command_for_root(job, output_dir, &layout_pdf_repo_root()?)
+}
+
+fn build_layout_pdf_command_for_root(
+    job: &BookPipelineJob,
+    output_dir: &Path,
+    root: &Path,
+) -> Result<RunnerCommand, String> {
+    let source_path = layout_pdf_source_path(layout_pdf_route(job)?)?;
+    Ok(RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: LAYOUT_PDF_COMMAND_LABEL.into(),
+        program: PathBuf::from("uv"),
+        args: vec![
+            "run".into(),
+            "--package".into(),
+            "layout-pdf".into(),
+            // BabelDOC is an optional extra so the shared venv every other suite
+            // runs in stays light; asking for it here is what installs it, from
+            // uv's cache after the first run. See packages/layout-pdf/README.md.
+            "--extra".into(),
+            "babeldoc".into(),
+            "layout-pdf".into(),
+            "--input".into(),
+            display_path(&source_path),
+            "--output-dir".into(),
+            display_path(output_dir),
+        ],
         env: Vec::new(),
         cwd: Some(root.to_path_buf()),
         output_dir: output_dir.to_path_buf(),
@@ -7909,6 +8081,12 @@ fn runner_command_timeout(command: &RunnerCommand) -> Duration {
     let hours = match command.label.as_str() {
         TRANSLATION_ENGINE_COMMAND_LABEL => 12,
         ZOTERO_CONVERSION_COMMAND_LABEL => 6,
+        // Measured, not guessed: 37s/page on dense academic pages and 23s/page
+        // on lighter ones, against Qwen at the default qps of 4. Twelve hours
+        // therefore covers a book of roughly 1100 dense pages, which is well
+        // past anything in the library, and absorbs the one-off model download
+        // (~4 minutes) on the first run.
+        LAYOUT_PDF_COMMAND_LABEL => 12,
         _ => 2,
     };
     Duration::from_secs(hours * 60 * 60)
@@ -8106,6 +8284,11 @@ fn parse_allowlisted_worker_markers(value: &str, allowed_roots: &[&Path]) -> Vec
                         | STATUS_SKIPPED
                 ),
                 "count" => !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()),
+                // A classification, never the warning text. BabelDOC warns in
+                // free English that interpolates page numbers and sometimes file
+                // paths; `layout_pdf/warnings.py` counts by kind so none of it
+                // has to cross into a job log.
+                "warning" => LAYOUT_PDF_WARNING_KINDS.contains(&value),
                 "sha256" => value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()),
                 "path" => {
                     let path = Path::new(value);
@@ -8803,6 +8986,22 @@ fn scan_artifacts(output_dir: &Path) -> Result<Vec<BookPipelineArtifact>, String
     Ok(artifacts)
 }
 
+/// `.state/chunks` under an OCR output root, where `zotero_llm_worker.py` splits
+/// a long book into page ranges before uploading them. Those splits are PDFs, so
+/// once `artifact_kind` learned to recognise PDFs they would otherwise be
+/// registered as deliverables -- dozens of `pages-0001-0050.pdf` per book. The
+/// worker's other private subtrees hold no PDFs and are left alone; `.state`
+/// itself must stay scanned, because the finished Markdown lives in
+/// `.state/staging`.
+fn is_ocr_worker_chunk_dir(path: &Path) -> bool {
+    path.file_name().and_then(OsStr::to_str) == Some("chunks")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            == Some(".state")
+}
+
 fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> Result<(), String> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -8816,6 +9015,9 @@ fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> R
             // Markdown, not a second set of handoff candidates. In particular,
             // MinerU's per-part Markdown must never outrank the assembled file.
             if path.extension().and_then(|extension| extension.to_str()) == Some("mineru") {
+                continue;
+            }
+            if is_ocr_worker_chunk_dir(&path) {
                 continue;
             }
             collect_artifacts(&path, artifacts)?;
@@ -9060,6 +9262,10 @@ fn artifact_kind(path: &Path) -> Option<&'static str> {
         Some("md") | Some("markdown") => Some("markdown"),
         Some("html") | Some("htm") => Some("html"),
         Some("epub") => Some("epub"),
+        // The layout-preserving track's deliverable. `collect_artifacts` skips
+        // the OCR worker's chunk directory, which is the only other place a PDF
+        // appears under a job output root.
+        Some("pdf") => Some("pdf"),
         Some("json") | Some("jsonl") => Some("metadata"),
         Some("idx") | Some("index") => Some("index"),
         _ if is_index_artifact(path) => Some("index"),
