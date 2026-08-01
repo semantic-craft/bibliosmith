@@ -1,19 +1,18 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { Plus } from "lucide-react";
 import type {
   BookPipelineCustomInstructions,
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
-  BookPipelineDiagnosticProfile,
   ModelSlotView,
 } from "../types";
 import "./pipeline.css";
 import type { PipelineCopy } from "./copy";
 import { flattenBookUnits, type PipelineBusy, type PipelineDraft, type RouteOverride } from "./model";
+import { LogoMark } from "../shell/LogoMark";
 import { Shelf } from "./Shelf";
 import { BookDrawer } from "./BookDrawer";
-import { NewJobWizard } from "./NewJobWizard";
+import { InputIsland } from "./InputIsland";
 
 export type PipelineWorkbenchProps = {
   copy: PipelineCopy;
@@ -27,15 +26,12 @@ export type PipelineWorkbenchProps = {
   onPreview: () => void;
   onQueueRun: () => Promise<boolean>;
   onChooseFolder: () => void;
-  onChooseMarkdown: () => void;
-  onDiscoverZotero: () => void;
   onSearchZotero: (query: string) => void;
   onRetry: (jobId: string) => void;
   onDelete: (jobId: string, childId?: string | null) => void;
   onAdvance: (jobId: string, childId: string, invalidateDownstream?: boolean) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
-  onExportDiagnostic: (jobId: string, profile: BookPipelineDiagnosticProfile) => void;
   onSaveCustomInstructions: (
     jobId: string,
     childId: string,
@@ -43,14 +39,6 @@ export type PipelineWorkbenchProps = {
   ) => void;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
-  onRecordReaderEvidence: (
-    jobId: string,
-    childId: string,
-    artifactKind: string,
-    reader: string,
-    readerVersion: string,
-    conclusion: string,
-  ) => void;
   onOpenOutput: (jobId: string) => void;
   routeOverrides: Record<string, RouteOverride>;
   onRouteOverrideChange: (routeItemId: string, override: RouteOverride) => void;
@@ -60,7 +48,6 @@ export type PipelineWorkbenchProps = {
 export function PipelineWorkbench(props: PipelineWorkbenchProps) {
   const { copy, state, busy } = props;
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [wizardOpen, setWizardOpen] = useState(false);
   const [drawerPercent, setDrawerPercent] = useState(50);
   const splitViewRef = useRef<HTMLDivElement>(null);
   const resizeHandleRef = useRef<HTMLDivElement>(null);
@@ -78,61 +65,56 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
   const units = useMemo(() => flattenBookUnits(state.jobs), [state.jobs]);
   const selected = units.find((unit) => unit.key === selectedKey) ?? null;
 
-  // Esc closes the wizard first, then the drawer.
   useEffect(() => {
-    if (!wizardOpen && !selectedKey) return undefined;
+    if (!selectedKey) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (wizardOpen) setWizardOpen(false);
-      else setSelectedKey(null);
+      if (event.key === "Escape") setSelectedKey(null);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [wizardOpen, selectedKey]);
+  }, [selectedKey]);
+
+  const island = (variant: "hero" | "compact", dimmed?: boolean) => (
+    <InputIsland
+      dimmed={dimmed}
+      copy={props.copy}
+      draft={props.draft}
+      preview={props.preview}
+      zoteroSources={props.zoteroSources}
+      modelSlots={props.modelSlots}
+      busy={busy}
+      variant={variant}
+      onDraftChange={props.onDraftChange}
+      onPreview={props.onPreview}
+      onQueueRun={props.onQueueRun}
+      onChooseFolder={props.onChooseFolder}
+      onSearchZotero={props.onSearchZotero}
+      routeOverrides={props.routeOverrides}
+      onRouteOverrideChange={props.onRouteOverrideChange}
+    />
+  );
+
+  // Empty shelf: the island is the page, centred, with nothing else competing.
+  if (units.length === 0) {
+    return (
+      <div className="pl-hero">
+        <div className="pl-hero-brand">
+          <LogoMark />
+          <span>BiblioSmith</span>
+        </div>
+        {island("hero")}
+        <p className="pl-hero-note">{copy.inboxEmptyBody}</p>
+      </div>
+    );
+  }
 
   return (
-    <section className="pl-panel">
-      <div className="pl-topbar">
-        <h1>{copy.inboxTitle}</h1>
-        <span className="pl-spacer" />
-        {!wizardOpen && (
-          <button className="pl-btn primary" type="button" onClick={() => setWizardOpen(true)}>
-            <Plus size={15} />
-            {copy.newJob}
-          </button>
-        )}
-      </div>
-
-      {wizardOpen ? (
-        <NewJobWizard
-          copy={props.copy}
-          draft={props.draft}
-          preview={props.preview}
-          zoteroSources={props.zoteroSources}
-          modelSlots={props.modelSlots}
-          busy={busy}
-          onDraftChange={props.onDraftChange}
-          onPreview={props.onPreview}
-          onQueueRun={props.onQueueRun}
-          onChooseFolder={props.onChooseFolder}
-          onChooseMarkdown={props.onChooseMarkdown}
-          onDiscoverZotero={props.onDiscoverZotero}
-          onSearchZotero={props.onSearchZotero}
-          onClose={() => setWizardOpen(false)}
-          routeOverrides={props.routeOverrides}
-          onRouteOverrideChange={props.onRouteOverrideChange}
-        />
-      ) : units.length === 0 ? (
-        <div className="pl-empty">
-          <h3>{copy.inboxEmptyTitle}</h3>
-          <p>{copy.inboxEmptyBody}</p>
-          <button className="pl-btn primary" type="button" onClick={() => setWizardOpen(true)}>
-            <Plus size={15} />
-            {copy.newJob}
-          </button>
-          <p className="pl-empty-formats">{copy.inboxEmptyFormats}</p>
+    <>
+      {island("compact", Boolean(selected))}
+      <section className="pl-island pl-shelf-island">
+        <div className={selected ? "pl-shelf-title dimmed" : "pl-shelf-title"}>
+          {copy.shelfCount(units.length)}
         </div>
-      ) : (
         <div
           ref={splitViewRef}
           className="pl-shelfwrap"
@@ -143,7 +125,7 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
             units={units}
             selectedKey={selected?.key ?? null}
             onSelect={setSelectedKey}
-            onNewJob={() => setWizardOpen(true)}
+            dimmed={Boolean(selected)}
           />
           {selected && (
             <div
@@ -199,17 +181,15 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
               onAdvance={props.onAdvance}
               onSampleTranslation={props.onSampleTranslation}
               onApplySampleProvider={props.onApplySampleProvider}
-              onExportDiagnostic={props.onExportDiagnostic}
               onSaveCustomInstructions={props.onSaveCustomInstructions}
               onApproveGate={props.onApproveGate}
               onRouteOverride={props.onRouteOverride}
-              onRecordReaderEvidence={props.onRecordReaderEvidence}
               onOpenOutput={props.onOpenOutput}
               onHandoff={props.onHandoff}
             />
           )}
         </div>
-      )}
-    </section>
+      </section>
+    </>
   );
 }

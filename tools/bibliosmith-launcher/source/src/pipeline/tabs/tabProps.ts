@@ -11,13 +11,5 @@ export type TabProps = {
   onOpenOutput: (jobId: string) => void;
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
-  onRecordReaderEvidence: (
-    jobId: string,
-    childId: string,
-    artifactKind: string,
-    reader: string,
-    readerVersion: string,
-    conclusion: string,
-  ) => void;
   onGoApproval: () => void;
 };

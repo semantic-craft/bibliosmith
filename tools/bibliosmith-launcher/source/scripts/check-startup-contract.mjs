@@ -39,25 +39,21 @@ assert(
   "Launcher main window must allow Tauri event listen/unlisten for progress subscriptions.",
 );
 
+// The island redesign removed the blocking bootstrap screen entirely: runtime
+// and project preparation are background-only, and only failures surface (as
+// toasts). These checks keep that startup contract from regressing back to a
+// blocking first screen.
 const appSource = readText("src/App.tsx");
 assert(
-  appSource.includes("useState<RuntimeBootstrapState>(\"ready\")"),
-  "Launcher must treat runtime bootstrap as optional at startup instead of blocking the first screen.",
+  !appSource.includes("RuntimeBootstrapScreen"),
+  "Launcher must not block the first screen on runtime bootstrap; preparation is background-only.",
 );
 assert(
-  appSource.includes("useState(false)") && !appSource.includes("useState(hasTauriRuntime())"),
-  "Runtime bootstrap blocking state must default to false.",
-);
-assert(
-  !appSource.includes("startRuntimeBootstrap(true)"),
-  "Runtime preparation must not be started in blocking mode.",
-);
-assert(
-  /if\s*\(!runtimeBootstrapStartedRef\.current\)\s*\{[\s\S]*?startRuntimeBootstrap\(false\)/.test(appSource),
+  /if\s*\(!runtimePrepareStartedRef\.current\)\s*\{[\s\S]*?startRuntimePrepare\(\)/.test(appSource),
   "Launcher should keep optional runtime preparation in the background after initial UI startup.",
 );
 assert(
-  appSource.includes("void prepareBiblioSmithInBackground();"),
+  appSource.includes("void prepareBiblioSmithProject(locale)"),
   "Launcher should keep automatic BiblioSmith project preparation in the background after initial UI startup.",
 );
 

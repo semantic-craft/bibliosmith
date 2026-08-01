@@ -1,25 +1,24 @@
 import { useEffect, useState, type ReactElement } from "react";
-import { ChevronLeft, ChevronRight, Download, FolderOpen, Trash2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, FolderOpen, Trash2, X } from "lucide-react";
 import { readBookPipelineArtifactExcerpt, readBookPipelineTranslationSample } from "../api";
 import type {
   BookPipelineArtifact,
   BookPipelineCustomInstructions,
-  BookPipelineDiagnosticProfile,
   BookPipelineTranslationSampleReport,
 } from "../types";
 import type { PipelineCopy } from "./copy";
 import {
-  activeStepIndex,
+  activePhaseIndex,
   allArtifacts,
   currentStage,
   firstMarkdownArtifact,
-  fourStepStates,
+  phaseStates,
   pendingGates,
   providerDefaultConfig,
-  stepCaption,
-  stepSummaryCaption,
-  stepName,
-  stepStatusCaption,
+  phaseCaption,
+  phaseSummaryCaption,
+  phaseName,
+  phaseStatusCaption,
   sourceChangedRequiresRebuild,
   translationFailureSummary,
   unitAdvanceAction,
@@ -27,7 +26,7 @@ import {
   type BookUnit,
   type GateView,
   type PipelineBusy,
-  type StepState,
+  type PhaseState,
 } from "./model";
 import { MODEL_BRANDS, slotDisplayName, slotMeta } from "../pages/settings/modelCatalog";
 import { BookCover } from "./Shelf";
@@ -65,7 +64,6 @@ export type BookDrawerProps = {
   // Adopting a sampled slot as the book's own. Separate from sampling, because
   // sampling is "try one out" and this decides what the full run uses.
   onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
-  onExportDiagnostic: (jobId: string, profile: BookPipelineDiagnosticProfile) => void;
   onSaveCustomInstructions: (
     jobId: string,
     childId: string,
@@ -73,14 +71,6 @@ export type BookDrawerProps = {
   ) => void;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
-  onRecordReaderEvidence: (
-    jobId: string,
-    childId: string,
-    artifactKind: string,
-    reader: string,
-    readerVersion: string,
-    conclusion: string,
-  ) => void;
   onOpenOutput: (jobId: string) => void;
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
 };
@@ -149,7 +139,7 @@ function CustomInstructionsEditor({ unit, copy, busy, onSaveCustomInstructions }
   );
 }
 
-const STEP_MARKS: Record<StepState, (index: number) => string> = {
+const PHASE_MARKS: Record<PhaseState, (index: number) => string> = {
   done: () => "✓",
   gate: () => "!",
   error: () => "✕",
@@ -158,23 +148,23 @@ const STEP_MARKS: Record<StepState, (index: number) => string> = {
   none: () => "–",
 };
 
-function FourStepStrip({ unit, copy }: { unit: BookUnit; copy: PipelineCopy }) {
-  const states = fourStepStates(unit);
+function PhaseStrip({ unit, copy }: { unit: BookUnit; copy: PipelineCopy }) {
+  const states = phaseStates(unit);
   return (
     <>
-      <div className="pl-steps4">
+      <div className="pl-phases">
         {states.map((state, index) => (
-          <div key={index} className={`pl-step4 ${state}`}>
-            <div className="pl-s4c">{STEP_MARKS[state](index)}</div>
-            <div className="pl-s4n">{stepName(index, copy)}</div>
-            <div className="pl-s4status">{stepStatusCaption(unit, index, copy)}</div>
+          <div key={index} className={`pl-phase ${state}`}>
+            <div className="pl-phase-dot">{PHASE_MARKS[state](index)}</div>
+            <div className="pl-phase-name">{phaseName(index, copy)}</div>
+            <div className="pl-phase-status">{phaseStatusCaption(unit, index, copy)}</div>
           </div>
         ))}
       </div>
-      <div className="pl-s4cap">
-        {activeStepIndex(states) === -1
-          ? stepSummaryCaption(unit, copy)
-          : `${copy.stepCurrentPrefix}${stepSummaryCaption(unit, copy)}`}
+      <div className="pl-phase-cap">
+        {activePhaseIndex(states) === -1
+          ? phaseSummaryCaption(unit, copy)
+          : `${copy.phaseCurrentPrefix}${phaseSummaryCaption(unit, copy)}`}
       </div>
     </>
   );
@@ -515,7 +505,7 @@ function StateCard(props: BookDrawerProps) {
     const label = advance.stageId === "translate" ? copy.runTranslation : copy.continueStage;
     return (
       <div className="pl-hintcard">
-        <span>{stepSummaryCaption(unit, copy)}</span>
+        <span>{phaseSummaryCaption(unit, copy)}</span>
         <span className="pl-spacer" />
         <button
           className="pl-btn sm primary"
@@ -550,7 +540,7 @@ function StateCard(props: BookDrawerProps) {
   if (unit.status === "completed") {
     return (
       <div className="pl-hintcard">
-        <span>✓ {stepCaption(unit, copy)}</span>
+        <span>✓ {phaseCaption(unit, copy)}</span>
         <span className="pl-spacer" />
         {unit.job.openTarget && (
           <button className="pl-btn sm primary" type="button" disabled={busy === "open"} onClick={() => onOpenOutput(unit.job.id)}>
@@ -566,7 +556,7 @@ function StateCard(props: BookDrawerProps) {
     <div className="pl-running-stack">
       <OperationProgressBar unit={unit} copy={copy} />
       <div className="pl-hintcard">
-        <span>{stepSummaryCaption(unit, copy)} · {copy.abNoAction}</span>
+        <span>{phaseSummaryCaption(unit, copy)} · {copy.abNoAction}</span>
       </div>
     </div>
   );
@@ -585,7 +575,6 @@ function AdvancedDetails(props: BookDrawerProps) {
     onAdvance: props.onAdvance,
     onApproveGate: props.onApproveGate,
     onRouteOverride: props.onRouteOverride,
-    onRecordReaderEvidence: props.onRecordReaderEvidence,
     onOpenOutput: props.onOpenOutput,
     onHandoff: props.onHandoff,
     onGoApproval: () => setTab("approval"),
@@ -622,71 +611,7 @@ function AdvancedDetails(props: BookDrawerProps) {
         {tab === "approval" && <ApprovalTab {...tabProps} />}
         {tab === "logs" && <LogsTab {...tabProps} />}
       </div>
-      <DiagnosticExport
-        copy={copy}
-        busy={props.busy}
-        jobId={unit.job.id}
-        onExportDiagnostic={props.onExportDiagnostic}
-      />
     </details>
-  );
-}
-
-/**
- * The three redaction profiles have been configured and tested on the backend
- * since the diagnostic command landed, with nothing in the UI to reach them —
- * a user reporting a problem had only screenshots. Public-issue is the default
- * because it is the one that can be pasted anywhere without reading it first.
- */
-function DiagnosticExport({
-  copy,
-  busy,
-  jobId,
-  onExportDiagnostic,
-}: {
-  copy: PipelineCopy;
-  busy: PipelineBusy;
-  jobId: string;
-  onExportDiagnostic: BookDrawerProps["onExportDiagnostic"];
-}) {
-  const [profile, setProfile] = useState<BookPipelineDiagnosticProfile>("public-issue");
-  const profiles: [BookPipelineDiagnosticProfile, string, string][] = [
-    ["public-issue", copy.diagnosticPublicIssue, copy.diagnosticPublicIssueNote],
-    ["redacted-support", copy.diagnosticRedactedSupport, copy.diagnosticRedactedSupportNote],
-    ["local-full", copy.diagnosticLocalFull, copy.diagnosticLocalFullNote],
-  ];
-  const note = profiles.find(([key]) => key === profile)?.[2] ?? "";
-  return (
-    <section className="pl-diagnostic" aria-label={copy.diagnosticTitle}>
-      <h4>{copy.diagnosticTitle}</h4>
-      <p>{copy.diagnosticIntro}</p>
-      <div className="pl-diagnostic-controls">
-        <label>
-          {copy.diagnosticProfile}
-          <select
-            value={profile}
-            disabled={busy === "diagnostic"}
-            onChange={(event) => setProfile(event.target.value as BookPipelineDiagnosticProfile)}
-          >
-            {profiles.map(([key, label]) => (
-              <option key={key} value={key}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          className="pl-btn sm"
-          type="button"
-          disabled={busy !== null}
-          onClick={() => onExportDiagnostic(jobId, profile)}
-        >
-          <Download size={14} />
-          {copy.diagnosticExport}
-        </button>
-      </div>
-      <p className="pl-diagnostic-note">{note}</p>
-    </section>
   );
 }
 
@@ -715,7 +640,7 @@ function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement
   }
   if (unit.status === "failed" || unit.status === "partial") {
     return {
-      hint: stepSummaryCaption(unit, copy),
+      hint: phaseSummaryCaption(unit, copy),
       button: (
         <button className="pl-btn" type="button" disabled={busy === "retry"} onClick={() => props.onRetry(unit.job.id)}>
           {copy.retryJob}
@@ -736,7 +661,7 @@ function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement
       ),
     };
   }
-  return { hint: `${stepSummaryCaption(unit, copy)} · ${copy.abNoAction}`, button: null };
+  return { hint: `${phaseSummaryCaption(unit, copy)} · ${copy.abNoAction}`, button: null };
 }
 
 export function BookDrawer(props: BookDrawerProps) {
@@ -802,10 +727,10 @@ export function BookDrawer(props: BookDrawerProps) {
             <BookCover title={unit.title} className="drawer" />
             <div>
               <h2>{unit.title}</h2>
-              <div className="pl-dnow">{stepSummaryCaption(unit, copy)}</div>
+              <div className="pl-dnow">{phaseSummaryCaption(unit, copy)}</div>
             </div>
           </div>
-          <FourStepStrip unit={unit} copy={copy} />
+          <PhaseStrip unit={unit} copy={copy} />
           {unit.job.mode !== "conversion_only" && unit.job.translationMode === "fast" && (
             <CustomInstructionsEditor key={customInstructionsKey(unit)} {...props} />
           )}

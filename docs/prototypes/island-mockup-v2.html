@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>BiblioSmith · Island v2（JetBrains Islands 教科书规则）</title>
+<style>
+  /* 三层背景 + 圆角/间隙数值 = JetBrains Islands 主题原始 token
+     (intellij-community: themes/islands/ManyIslands{Light,Dark}.theme.json)
+     Light: canvas gray-150 #E9EAEE / island white / sub gray-160 #F7F8F9
+     Dark(反转): canvas gray-30 #26282C / island gray-10 #191A1C / sub gray-20 #212326
+     Island.arc=20(r=10px) · Island.borderWidth=6(岛间隙) · 控件 arc=8(r=4px)
+     岛不带投影,分离靠层差;投影只给弹层(drawer/popup)。 */
+  :root {
+    --canvas: #E9EAEE; --island: #FFFFFF; --sub: #F7F8F9;
+    --line: #D1D3D9; --line-soft: #E2E4E9;
+    --text: #212326; --muted: #73767C; --faint: #9FA2A8;
+    --jade: #12897A; --jade-soft: rgba(18,137,122,.10);
+    --amber: #A96410; --amber-soft: rgba(182,109,19,.10);
+    --info: #2E6DA8; --info-soft: rgba(46,109,168,.10);
+    --on-accent: #FFFFFF;
+    --scrim: rgba(33,35,38,.32);
+    --shadow-overlay: 0 8px 24px rgba(33,35,38,.18);
+    --r-island: 10px; --r-card: 8px; --r-ctl: 6px; --r-overlay: 12px;
+    --gutter: 6px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --canvas: #26282C; --island: #191A1C; --sub: #212326;
+      --line: #33353B; --line-soft: #2B2D31;
+      --text: #DDDFE4; --muted: #8B8E94; --faint: #5F6269;
+      --jade: #43C9B0; --jade-soft: rgba(67,201,176,.12);
+      --amber: #E0A45B; --amber-soft: rgba(224,164,91,.12);
+      --info: #71A1FE; --info-soft: rgba(113,161,254,.12);
+      --on-accent: #16181A;
+      --scrim: rgba(0,0,0,.45);
+      --shadow-overlay: 0 8px 28px rgba(0,0,0,.5);
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+    background: var(--sub); color: var(--text); padding: 32px 16px; display: grid; gap: 36px;
+    justify-items: center; -webkit-font-smoothing: antialiased;
+  }
+  .frame-label { font-size: 13px; color: var(--muted); margin-bottom: 8px; letter-spacing: .05em; }
+  .frame {
+    width: min(960px, 96vw); aspect-ratio: 1280/760; background: var(--canvas);
+    border-radius: 10px; overflow: hidden; position: relative;
+    display: flex; flex-direction: column; font-size: clamp(9px, 1.3vw, 13px);
+    box-shadow: 0 1px 3px rgba(0,0,0,.12);
+  }
+  /* ---- 标题栏：画布层的一部分，无边框无底色 ---- */
+  .titlebar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; flex: none; }
+  .lights { display: flex; gap: 6px; margin-right: 8px; }
+  .lights i { width: 11px; height: 11px; border-radius: 50%; }
+  .lights i:nth-child(1){ background:#E0655A } .lights i:nth-child(2){ background:#E0A83D } .lights i:nth-child(3){ background:#65B855 }
+  .brand { font-weight: 650; font-size: 1em; color: var(--text); }
+  .titlebar .gear { margin-left: auto; color: var(--muted); font-size: 1.15em; }
+  /* ---- 岛：无边框、无投影，纯层差 + 6px 间隙 ---- */
+  .islands { flex: 1; display: flex; flex-direction: column; gap: var(--gutter); padding: 0 var(--gutter) var(--gutter); min-height: 0; }
+  .island { background: var(--island); border-radius: var(--r-island); }
+  /* ---- 输入岛（两态） ---- */
+  .input-island { padding: 14px 16px 10px; }
+  .drop-hint { color: var(--muted); font-size: 1.05em; display: flex; gap: 9px; align-items: center; }
+  .drop-hint b { color: var(--text); font-weight: 550; }
+  .island-controls { display: flex; align-items: center; gap: 6px; margin-top: 12px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--r-ctl);
+    border: 1px solid var(--line-soft); color: var(--muted); font-size: .9em; background: var(--sub);
+  }
+  .chip.active { background: var(--jade-soft); color: var(--jade); border-color: transparent; font-weight: 550; }
+  .go {
+    margin-left: auto; width: 28px; height: 28px; border-radius: var(--r-ctl); background: var(--jade);
+    color: var(--on-accent); display: grid; place-items: center; font-size: 1em;
+  }
+  /* hero 态 */
+  .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; }
+  .hero .logo { font-size: 2em; font-weight: 700; color: var(--text); display: flex; gap: 12px; align-items: center; }
+  .hero .logo .mark { width: 1.3em; height: 1.3em; border-radius: 8px; background: var(--jade); display: grid; place-items: center; color: var(--on-accent); font-size: .72em; }
+  .hero .input-island { width: min(560px, 78%); padding: 18px 18px 12px; }
+  .hero .quiet { color: var(--faint); font-size: .92em; }
+  /* compact 态 */
+  .input-island.compact { flex: none; display: flex; align-items: center; gap: 10px; padding: 11px 16px; }
+  .input-island.compact .drop-hint { flex: 1; }
+  .input-island.compact .island-controls { margin: 0; }
+  /* ---- 书架岛 ---- */
+  .shelf-island { flex: 1; padding: 20px 24px; min-height: 0; }
+  .shelf-title { font-size: .92em; color: var(--faint); margin-bottom: 14px; font-weight: 550; letter-spacing: .04em; }
+  .shelf { display: flex; gap: 20px; }
+  .book { width: 112px; display: flex; flex-direction: column; gap: 7px; }
+  .cover {
+    aspect-ratio: 3/4.2; border-radius: var(--r-card);
+    padding: 11px 10px; display: flex; flex-direction: column; justify-content: space-between;
+    color: #FFFDF7; position: relative; overflow: hidden;
+  }
+  .cover .t { font-size: .95em; font-weight: 600; line-height: 1.45; text-shadow: 0 1px 2px rgba(0,0,0,.25); }
+  .c1 { background: linear-gradient(160deg,#2C6E63,#16283B); }
+  .c2 { background: linear-gradient(160deg,#8A5A2B,#43301A); }
+  .c3 { background: linear-gradient(160deg,#3A5F8A,#1D2F47); }
+  .c4 { background: linear-gradient(160deg,#7B5AA6,#3C2C52); }
+  .status { font-size: .87em; display: flex; align-items: center; gap: 6px; color: var(--muted); padding: 0 2px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .bar { height: 4px; border-radius: 2px; background: rgba(255,253,247,.3); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: #FFFFFF; opacity: .9; }
+  .badge {
+    position: absolute; top: 8px; right: 8px; font-size: .76em; padding: 2px 7px;
+    border-radius: var(--r-ctl); background: rgba(255,255,255,.92); color: #212326; font-weight: 600;
+  }
+  .add-tile {
+    aspect-ratio: 3/4.2; border-radius: var(--r-card); border: 1.5px dashed var(--line);
+    display: grid; place-items: center; color: var(--faint); font-size: 1.9em; width: 112px; background: var(--sub);
+  }
+  /* ---- 抽屉：弹层，允许投影 ---- */
+  .dim { position: absolute; inset: 0; background: var(--scrim); }
+  .islands.dimmed .island { opacity: .56; } /* Island.inactiveAlpha */
+  .drawer {
+    position: absolute; top: var(--gutter); right: var(--gutter); bottom: var(--gutter); width: 46%;
+    background: var(--island); border-radius: var(--r-overlay); box-shadow: var(--shadow-overlay);
+    padding: 20px 22px; display: flex; flex-direction: column; gap: 15px;
+  }
+  .d-head { display: flex; align-items: baseline; gap: 10px; }
+  .d-head .t { font-size: 1.22em; font-weight: 650; }
+  .d-head .src { font-size: .88em; color: var(--muted); }
+  .d-head .x { margin-left: auto; color: var(--faint); }
+  .phases { display: flex; gap: 8px; }
+  .phase { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+  .phase .name { font-size: .88em; color: var(--muted); }
+  .phase .track { height: 4px; border-radius: 2px; background: var(--sub); overflow: hidden; }
+  .phase .track i { display: block; height: 100%; background: var(--jade); }
+  .phase.now .name { color: var(--text); font-weight: 600; }
+  .state-card { background: var(--amber-soft); border-radius: var(--r-card); padding: 13px 15px; display: flex; flex-direction: column; gap: 10px; }
+  .state-card .h { font-weight: 600; color: var(--amber); font-size: .96em; }
+  .compare { display: flex; gap: 8px; }
+  .pane {
+    flex: 1; background: var(--island); border-radius: var(--r-ctl); padding: 10px 12px;
+    border: 1px solid var(--line-soft); font-size: .83em; color: var(--muted); line-height: 1.55;
+  }
+  .pane .ph { font-weight: 600; color: var(--text); margin-bottom: 6px; display: flex; justify-content: space-between; }
+  .pane.picked { border-color: var(--jade); box-shadow: 0 0 0 2px var(--jade-soft); }
+  .pane .pick { color: var(--jade); font-weight: 600; font-size: .9em; }
+  .actions { display: flex; gap: 8px; margin-top: auto; align-items: center; }
+  .btn { padding: 7px 15px; border-radius: var(--r-ctl); font-size: .93em; font-weight: 550; border: 1px solid var(--line-soft); color: var(--text); background: var(--island); }
+  .btn.primary { background: var(--jade); color: var(--on-accent); border-color: transparent; }
+  .adv { color: var(--faint); font-size: .88em; margin-left: auto; }
+</style>
+</head>
+<body>
+
+<div>
+  <div class="frame-label">屏 1 · 空书架 = hero 态 —— 输入岛居中，画布留白</div>
+  <div class="frame">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="gear">⚙</span>
+    </div>
+    <div class="hero">
+      <div class="logo"><span class="mark">B</span>BiblioSmith</div>
+      <div class="island input-island">
+        <div class="drop-hint">📚 <span>拖入 <b>PDF / EPUB</b>，或输入书名搜索 Zotero…</span></div>
+        <div class="island-controls">
+          <span class="chip active">本地文件</span>
+          <span class="chip">Zotero</span>
+          <span class="chip">模型 · DeepSeek</span>
+          <span class="go">↑</span>
+        </div>
+      </div>
+      <div class="quiet">扫描件自动走 OCR 对比 · 文字版可选保版式双语 PDF</div>
+    </div>
+  </div>
+</div>
+
+<div>
+  <div class="frame-label">屏 2 · 有书 = compact 态 —— 输入岛收成顶条，书架岛占满</div>
+  <div class="frame">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="brand">BiblioSmith</span>
+      <span class="gear">⚙</span>
+    </div>
+    <div class="islands">
+      <div class="island input-island compact">
+        <div class="drop-hint">📚 <span>拖入 <b>PDF / EPUB</b>，或搜索 Zotero…</span></div>
+        <div class="island-controls">
+          <span class="chip">模型 · DeepSeek</span>
+          <span class="go">↑</span>
+        </div>
+      </div>
+      <div class="island shelf-island">
+        <div class="shelf-title">书架 · 4 本</div>
+        <div class="shelf">
+          <div class="book">
+            <div class="cover c1">
+              <div class="t">利维坦</div>
+              <div class="bar"><i style="width:38%"></i></div>
+            </div>
+            <div class="status"><span class="dot" style="background:var(--info)"></span>翻译中 · 7/22 章</div>
+          </div>
+          <div class="book">
+            <div class="cover c2"><div class="t">规训与惩罚</div></div>
+            <div class="status"><span class="dot" style="background:var(--amber)"></span>等待翻译审批</div>
+          </div>
+          <div class="book">
+            <div class="cover c3">
+              <div class="t">科学革命的结构</div>
+              <span class="badge">双语 PDF</span>
+              <div class="bar"><i style="width:71%"></i></div>
+            </div>
+            <div class="status"><span class="dot" style="background:var(--info)"></span>保版式翻译中</div>
+          </div>
+          <div class="book">
+            <div class="cover c4"><div class="t">论美国的民主</div></div>
+            <div class="status"><span class="dot" style="background:var(--jade)"></span>完成 · 已挂回 Zotero</div>
+          </div>
+          <div class="add-tile">＋</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div>
+  <div class="frame-label">屏 3 · 抽屉（弹层，唯一允许投影处；背后岛淡至 0.56）</div>
+  <div class="frame">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="brand">BiblioSmith</span>
+      <span class="gear">⚙</span>
+    </div>
+    <div class="islands dimmed">
+      <div class="island input-island compact">
+        <div class="drop-hint">📚 <span>拖入 <b>PDF / EPUB</b>，或搜索 Zotero…</span></div>
+      </div>
+      <div class="island shelf-island"></div>
+    </div>
+    <div class="dim"></div>
+    <div class="drawer">
+      <div class="d-head">
+        <span class="t">规训与惩罚</span>
+        <span class="src">来源 · Zotero（扫描件）</span>
+        <span class="x">✕</span>
+      </div>
+      <div class="phases">
+        <div class="phase now">
+          <div class="name">① 转换</div>
+          <div class="track"><i style="width:55%"></i></div>
+        </div>
+        <div class="phase">
+          <div class="name">② 翻译</div>
+          <div class="track"></div>
+        </div>
+        <div class="phase">
+          <div class="name">③ 成书</div>
+          <div class="track"></div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="h">OCR 抽样对比 · 已抽 3 页，选定路由后继续</div>
+        <div class="compare">
+          <div class="pane picked">
+            <div class="ph"><span>PaddleOCR</span><span class="pick">✓ 选这个</span></div>
+            监狱的历史并不是一段简单的刑罚史。在十八世纪末……段落与脚注编号完整，表格保留。
+          </div>
+          <div class="pane">
+            <div class="ph"><span>MinerU</span><span class="pick" style="color:var(--faint)">选这个</span></div>
+            监狱的历史并不是一段簡单的刑罚史。在十八世纪末……两处繁简混排，脚注 3 丢失。
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <span class="btn primary">确认路由，开始转换</span>
+        <span class="btn">重抽 3 页</span>
+        <span class="adv">▸ 高级</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

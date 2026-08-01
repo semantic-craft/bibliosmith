@@ -3,72 +3,40 @@ export type PipelineLocale = string;
 export function pipelineCopy(locale: PipelineLocale) {
   const zh = locale.startsWith("zh");
   return {
-    nav: zh ? "书架" : "Bookshelf",
     title: zh ? "Book Pipeline" : "Book Pipeline",
     provider: zh ? "模型后端" : "Model provider",
-    providerUnconfigured: zh ? "未配置" : "no key",
     providerKeyMissing: zh
       ? "所选模型还没有 API Key。请先在「设置 → 模型」里配置，否则这批书会先跑完 OCR，再在翻译阶段挂在鉴权错误上。"
       : "The selected model has no API key. Configure it under Settings → Models first, or this batch runs OCR to completion and then dies on provider auth at the translate stage.",
     textCleanup: zh ? "翻译时修复段内 OCR / 排版瑕疵" : "Fix within-paragraph OCR / layout defects while translating",
-    secondPass: zh ? "反思二遍（更慢，约两倍模型开销）" : "Reflection second pass (slower, roughly double the model spend)",
     continueStage: zh ? "继续下一阶段" : "Continue",
     recheckHandoff: zh ? "重新检查交接" : "Recheck handoff",
     runTranslation: zh ? "运行翻译（将发送正文）" : "Run translation (sends source text)",
-    conversionOnly: zh ? "只转换" : "Conversion only",
-    convertThenTranslate: zh ? "转换后翻译" : "Convert then translate",
-    translateOnly: zh ? "只翻译" : "Translate only",
-    outputFormatMd: zh ? "Markdown" : "Markdown",
-    outputFormatHtml: zh ? "语义 HTML" : "Semantic HTML",
-    outputFormatEpub: zh ? "EPUB" : "EPUB",
-    outputFormatBilingual: zh ? "双语 EPUB（段对段）" : "Bilingual EPUB (paragraph-paired)",
-    outputFormatDigest: zh ? "摘要版" : "Digest edition",
-    outputFormatDigestRequiresEpub: zh
-      ? "摘要版由 EPUB 生成，需先勾选 EPUB"
-      : "The digest edition is built from the EPUB, so EPUB has to be selected first",
     chooseFolder: zh ? "选择文件夹" : "Choose folder",
-    chooseMarkdown: zh ? "选择源文件" : "Choose source",
-    selectedMarkdown: zh ? "已选源文件" : "Selected source",
-    missingMarkdown: zh ? "尚未选择 Markdown/TXT 源文件。" : "No Markdown/TXT source selected.",
     selector: zh ? "精确定位（key / itemType=）" : "Exact selector (key / itemType=)",
     zoteroTitleSearch: zh ? "按书名搜索" : "Search by title",
     zoteroTitleSearchPlaceholder: zh ? "书名、作者或年份" : "Title, author, or year",
     zoteroTitleSearchButton: zh ? "搜索" : "Search",
     paddleCreds: zh ? "PaddleOCR 凭据" : "PaddleOCR credentials",
     mineruCreds: zh ? "MinerU 凭据" : "MinerU credentials",
-    discoverZotero: zh ? "发现 Zotero" : "Discover Zotero",
-    discoveredSources: zh ? "已发现来源" : "Discovered sources",
     handoff: zh ? "翻译交接" : "Handoff",
-    overviewTitle: zh ? "书籍流水线预览" : "Book Pipeline preview",
-    latestJob: zh ? "最近任务" : "Latest job",
-    openPipeline: zh ? "打开模块" : "Open module",
-    routePreview: zh ? "路线预览" : "Route preview",
     jobs: zh ? "任务" : "Jobs",
     artifacts: zh ? "产物" : "Artifacts",
     logs: zh ? "Logs" : "Logs",
     retry: zh ? "重试" : "Retry",
     openOutput: zh ? "打开输出" : "Open output",
     noPreview: zh ? "先预览路线。" : "Preview a route first.",
-    noJobs: zh ? "还没有任务。" : "No jobs yet.",
-    selectedFolder: zh ? "已选文件夹" : "Selected folder",
-    missingFolder: zh ? "尚未选择 PDF 文件夹。" : "No PDF folder selected.",
 
     // Shelf frame
-    inboxTitle: zh ? "书架" : "Bookshelf",
     newJob: zh ? "添加书" : "Add a book",
-    inboxEmptyTitle: zh ? "你的书架还空着" : "Your shelf is empty",
     inboxEmptyBody: zh
       ? "放一本书上来，BiblioSmith 会整理文字、翻译成中文、做成电子书。开始翻译前、成书前会各问你一次，其余都自动。"
       : "Add a book and BiblioSmith will tidy up the text, translate it, and build a reading copy. It asks you once before translating and once before finalizing; everything else is automatic.",
-    inboxEmptyFormats: zh
-      ? "支持 PDF 扫描件 · 电子书 · Markdown · Zotero 书库"
-      : "PDF scans · ebooks · Markdown · your Zotero library",
 
-    // Four-step vocabulary
-    step1: zh ? "读入书" : "Read in",
-    step2: zh ? "整理文字" : "Tidy up text",
-    step3: zh ? "翻译" : "Translate",
-    step4: zh ? "生成阅读版" : "Build reading copy",
+    // Three user-facing phases the fifteen internal stages fold into
+    phase1: zh ? "转换" : "Convert",
+    phase2: zh ? "翻译" : "Translate",
+    phase3: zh ? "成书" : "Build",
     capQueued: zh ? "排队中" : "Queued",
     capWorking: zh ? "进行中" : "In progress",
     capCompleted: zh ? "已完成" : "Complete",
@@ -84,9 +52,9 @@ export function pipelineCopy(locale: PipelineLocale) {
     capPromotionApprovedPending: zh
       ? "生成阅读版：已确认；等待开始"
       : "Build reading copy: approved; not started",
-    stepCurrentPrefix: zh ? "当前：" : "Now: ",
-    stepNotInJob: zh ? "本次任务不包含这一步" : "Not part of this job",
-    stepSummaryPair: (completedStep: string, currentCaption: string) =>
+    phaseCurrentPrefix: zh ? "当前：" : "Now: ",
+    phaseNotInJob: zh ? "本次任务不包含这一段" : "Not part of this job",
+    phaseSummaryPair: (completedStep: string, currentCaption: string) =>
       zh
         ? `${completedStep}：已完成；${currentCaption.replace(" · ", "：")}`
         : `${completedStep}: Complete; ${currentCaption.replace(" · ", ": ")}`,
@@ -174,24 +142,6 @@ export function pipelineCopy(locale: PipelineLocale) {
       : "Translate a few passages with the current model, compare source and target, then approve the full book.",
     sampleProvider: zh ? "抽样模型" : "Sample provider",
     // Diagnostic bundle export
-    diagnosticTitle: zh ? "导出诊断包" : "Export diagnostic bundle",
-    diagnosticIntro: zh
-      ? "把这本书的阶段、状态与错误代码写成一个 JSON 文件，报障时附上。三档披露范围递增，任何一档都不含凭证、正文、stdout/stderr 与提供方响应。"
-      : "Writes this book's stages, statuses, and error codes to a JSON file to attach to a report. The three profiles disclose progressively more; none of them includes credentials, body text, stdout/stderr, or provider payloads.",
-    diagnosticProfile: zh ? "披露档位" : "Disclosure profile",
-    diagnosticPublicIssue: zh ? "公开 issue（默认）" : "Public issue (default)",
-    diagnosticRedactedSupport: zh ? "支持渠道 · 已脱敏" : "Support · redacted",
-    diagnosticLocalFull: zh ? "本机自查 · 完整" : "Local · full",
-    diagnosticPublicIssueNote: zh
-      ? "阶段、状态、错误代码。不含错误摘要，不含工件清单，不含任何路径。可直接贴进公开 issue。"
-      : "Stages, statuses, and error codes. No error summaries, no artifact list, no paths at all. Safe to paste into a public issue.",
-    diagnosticRedactedSupportNote: zh
-      ? "加上错误摘要，以及工件清单（类型、sha256、大小、校验结果）；路径替换为 <JOB_ROOT> / <PROJECT_ROOT> 占位。适合发给支持渠道。"
-      : "Adds error summaries and an artifact list (kind, sha256, size, validation); paths are replaced with <JOB_ROOT> / <PROJECT_ROOT> placeholders. For a support channel.",
-    diagnosticLocalFullNote: zh
-      ? "加上工件的真实绝对路径与全部字段。会暴露本机目录结构，建议只留在本机自查。"
-      : "Adds each artifact's real absolute path and every field. This reveals your local directory layout, so keep it on this machine.",
-    diagnosticExport: zh ? "选择文件夹并导出" : "Choose a folder and export",
     jobProvider: zh ? "本书正式模型" : "This book's model",
     sampleProviderDiffers: zh
       ? "样张用的模型和本书正式模型不是同一个。批准后全书会用正式模型翻译，不是你在样张里看到的那个。"
@@ -224,7 +174,6 @@ export function pipelineCopy(locale: PipelineLocale) {
     statusQueued: zh ? "排队" : "Queued",
     statusReady: zh ? "就绪" : "Ready",
     statusSkipped: zh ? "已跳过" : "Skipped",
-    statusInvalidated: zh ? "审批失效" : "Approval invalidated",
 
     // Detail tabs
     tabOverview: zh ? "总览" : "Overview",
@@ -330,22 +279,6 @@ export function pipelineCopy(locale: PipelineLocale) {
     // Artifacts tab
     // Story 18's other half: EPUBCheck says the file is well-formed, a person
     // says it actually reads. Only the second half needs a human to record it.
-    readerEvidenceTitle: zh ? "阅读器实测" : "Reader verification",
-    readerEvidenceHint: zh
-      ? "在真实阅读器里打开成品 EPUB 后，把结论记在这里。可选 —— 不记不影响晋升。记录会绑定当时的产物摘要，重新构建后自动标记为失效。"
-      : "After opening the built EPUB in a real reader, record what happened. Optional — leaving it blank blocks nothing. The record binds the artifact digest it was taken against and is marked stale once the book is rebuilt.",
-    readerEvidenceEmpty: zh ? "尚未记录任何阅读器实测。" : "No reader verification recorded yet.",
-    readerEvidenceName: zh ? "阅读器" : "Reader",
-    readerEvidenceVersion: zh ? "版本" : "Version",
-    readerEvidenceArtifact: zh ? "被检产物" : "Artifact",
-    readerEvidenceConclusion: zh ? "结论" : "Conclusion",
-    readerEvidenceRecord: zh ? "记录" : "Record",
-    readerEvidencePassed: zh ? "通过" : "passed",
-    readerEvidenceFailed: zh ? "未通过" : "failed",
-    readerEvidenceStale: zh ? "已失效（产物已变更）" : "stale (the artifact changed)",
-    readerEvidenceNeedsBuild: zh
-      ? "需要先构建出成品 EPUB 才能记录实测。"
-      : "A built EPUB is needed before reader verification can be recorded.",
     thArtifact: zh ? "工件" : "Artifact",
     thPath: zh ? "路径 / 位置" : "Path / location",
     thSha: zh ? "SHA-256" : "SHA-256",
@@ -416,29 +349,27 @@ export function pipelineCopy(locale: PipelineLocale) {
     logRedactionNote: zh ? "日志已脱敏：不含源文本、提供方原始响应与凭证；导出遵循 redacted-support 档。" : "Logs are redacted: no source text, provider payloads, or credentials; exports follow the redacted-support profile.",
     logsEmpty: zh ? "暂无日志。" : "No log lines yet.",
 
-    // Wizard
-    wizardTitle: zh ? "新建任务" : "New job",
-    wizardSub: zh ? "全屏三步 · 完成后回到收件箱 · Esc 取消" : "Full-screen three steps · returns to inbox when done · Esc to cancel",
-    wizStepSource: zh ? "选择来源" : "Choose source",
-    wizStepPreflight: zh ? "路由预检" : "Route preflight",
-    wizStepConfirm: zh ? "确认发车" : "Confirm & launch",
-    wizBack: zh ? "← 上一步" : "← Back",
-    wizNextPreflight: zh ? "下一步：路由预检 →" : "Next: route preflight →",
-    wizNextConfirm: zh ? "下一步：确认发车 →" : "Next: confirm & launch →",
-    wizCancel: zh ? "取消" : "Cancel",
-    wizLaunch: zh ? "发车 · 创建任务 →" : "Launch · create job →",
-    srcLocalPdfTitle: zh ? "本地 PDF 文件夹" : "Local PDF folder",
-    srcLocalPdfDesc: zh ? "整个文件夹逐本探测，自动分配 OCR 路线" : "Probe every PDF in a folder and assign OCR routes automatically",
-    srcZoteroTitle: zh ? "Zotero 集合" : "Zotero collection",
-    srcZoteroDesc: zh ? "发现集合下所有 PDF 附件，成品回挂条目" : "Discover all PDF attachments in a collection; outputs attach back",
-    srcMarkdownTitle: zh ? "已有 Markdown" : "Existing Markdown",
-    srcMarkdownDesc: zh ? "跳过 OCR，直接进入翻译流程" : "Skip OCR and go straight into the translation flow",
-    intentMode: zh ? "模式" : "Mode",
-    intentTier: zh ? "翻译档" : "Translation tier",
-    tierExpert: zh ? "专家（staged-gates）" : "Expert (staged-gates)",
-    tierFast: zh ? "快速" : "Fast",
-    intentOutput: zh ? "输出" : "Output",
-    preflightZotero: zh ? "Zotero API" : "Zotero API",
+    // Input island — the single "add a book" surface that replaced the wizard
+    islandDropHint: zh
+      ? "把 PDF 拖到这里，或按书名搜索 Zotero"
+      : "Drop a PDF here, or search Zotero by title",
+    islandDropActive: zh ? "松手即可加入书架" : "Release to add to the shelf",
+    islandDroppedFolder: zh ? "已选文件夹" : "Chosen folder",
+    islandFolderBatchNote: zh
+      ? "这个文件夹里的 PDF 会一起转换，下面列出的就是全部。"
+      : "Every PDF in this folder is converted together; the list below is all of them.",
+    islandZoteroResults: zh ? "Zotero 搜索结果" : "Zotero results",
+    islandOcrReady: zh ? "已配置" : "ready",
+    islandOcrMissing: zh ? "未配置" : "no key",
+    islandOcrHint: zh
+      ? "OCR 密钥在「设置 → OCR」里配置。"
+      : "OCR keys are configured under Settings → OCR.",
+    islandEnqueue: (n: number) => (zh ? `开始 · ${n} 本` : `Start · ${n} book(s)`),
+    islandEnqueueEmpty: zh ? "开始" : "Start",
+    islandPreflightBusy: zh ? "正在预检路线…" : "Checking routes…",
+    shelfCount: (n: number) => (zh ? `书架 · ${n} 本` : `Bookshelf · ${n} book(s)`),
+
+    // Route preflight (shown inline in the input island)
     preflightReady: zh ? "可发车" : "Ready",
     preflightBlocked: zh ? "需人工裁决" : "Needs decision",
     preflightSkip: zh ? "跳过" : "Skip",
@@ -451,25 +382,7 @@ export function pipelineCopy(locale: PipelineLocale) {
     overrideForcePaddle: zh ? "强制 PaddleOCR" : "Force PaddleOCR",
     overrideForceMineru: zh ? "强制 MinerU" : "Force MinerU",
     overrideKeep: zh ? "保留现有结果" : "Keep existing result",
-    overridePendingNote: zh ? "路线覆写等待 runner 支持，当前按自动路由发车。" : "Route override waits on runner support; jobs launch with auto routing for now.",
-    confirmBatch: zh ? "批次" : "Batch",
-    confirmIntent: zh ? "意图" : "Intent",
-    confirmStructure: zh ? "将创建的任务结构" : "Job structure to create",
     batchSource: zh ? "来源" : "Source",
-    batchLaunch: zh ? "发车" : "Launch",
-    batchHeld: zh ? "留守" : "Held back",
-    batchHeldNote: zh ? "已拦截 · 等你裁决后可单独补发" : "blocked · can be launched later after your decision",
-    intentTargetLang: zh ? "目标语言" : "Target language",
-    structureParentCollection: zh ? "集合任务 × 1" : "Collection job × 1",
-    structureParentSingle: zh ? "单一任务 × 1" : "Single job × 1",
-    structureParentNote: zh ? "冻结成员 · 聚合状态 · 只重试失败子任务" : "frozen membership · aggregated status · retries failed children only",
-    structureChildren: (n: number) => (zh ? `子任务 × ${n}` : `Child jobs × ${n}`),
-    structureChildrenNote: zh ? "每本书独立阶段 / 重试 / 工件登记" : "each book gets independent stages, retries, and artifact registration",
-    structureGates: zh ? "人工门 × 2 / 书" : "Human gates × 2 / book",
-    structureGatesNote: zh ? "译前披露、成品晋升——到门即暂停，不会自动越过" : "translation disclosure & final promotion — the pipeline pauses at gates, never crosses them automatically",
-    structureNoGates: zh ? "本批不经过人工门（仅转换）" : "No human gates in this batch (conversion only)",
-    sourceMissing: zh ? "先在第 1 步补全来源。" : "Complete the source in step 1 first.",
-    routesUnit: (n: number) => (zh ? `${n} 本` : `${n} book(s)`),
   };
 }
 

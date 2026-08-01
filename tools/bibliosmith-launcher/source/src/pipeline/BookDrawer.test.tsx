@@ -6,7 +6,6 @@ import { BookDrawer, type BookDrawerProps } from "./BookDrawer";
 import { pipelineCopy } from "./copy";
 import type { BookUnit } from "./model";
 import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
-import { BOOK_PIPELINE_DIAGNOSTIC_PROFILES } from "../types";
 import { approvalRef, artifact, bookUnit, stage, unitSummary } from "../test/fixtures";
 
 // The drawer reads an artifact excerpt and a sample report on mount. Both are
@@ -33,11 +32,9 @@ function drawerProps(unit: BookUnit, over: Partial<BookDrawerProps> = {}): BookD
     onAdvance: vi.fn(),
     onSampleTranslation: vi.fn(),
     onApplySampleProvider: vi.fn(),
-    onExportDiagnostic: vi.fn(),
     onSaveCustomInstructions: vi.fn(),
     onApproveGate: vi.fn(),
     onRouteOverride: vi.fn(),
-    onRecordReaderEvidence: vi.fn(),
     onOpenOutput: vi.fn(),
     onHandoff: vi.fn(),
     ...over,
@@ -388,61 +385,6 @@ describe("BookDrawer gate card", () => {
     expect(screen.queryByText(copy.deleteBookConfirmHint)).toBeNull();
   });
 
-  // The record command, its wrapper and its types all shipped; nothing called
-  // them, so the one thing this feature asks a human for could not be given.
-  it("records reader verification against the built EPUB", async () => {
-    const user = userEvent.setup();
-    const built = bookUnit({
-      status: "completed",
-      stages: [stage("validate_reading", "completed")],
-      childOver: {
-        artifacts: [artifact("reading_epub", { artifactId: "art-epub", sha256: "abcd1234" })],
-        readerEvidence: [
-          {
-            reader: "Calibre",
-            readerVersion: "8.4",
-            artifactKind: "reading_epub",
-            artifactSha256: "0000",
-            conclusion: "passed",
-            recordedAt: "2026-07-26T00:00:00Z",
-            stale: true,
-          },
-        ],
-      },
-    });
-    const { container, props } = renderDrawer(built);
-    await user.click(within(container).getByRole("tab", { name: copy.tabArtifacts }));
-
-    // An existing record is shown, and one taken against an older build says so.
-    const row = screen.getByText(/Calibre 8\.4/).closest(".pl-evi-row");
-    expect(row).toBeTruthy();
-    expect(row!.textContent).toContain(copy.readerEvidenceStale);
-
-    await user.type(screen.getByLabelText(copy.readerEvidenceName), "Apple Books");
-    await user.type(screen.getByLabelText(copy.readerEvidenceVersion), "7.2");
-    await user.click(screen.getByRole("button", { name: copy.readerEvidenceRecord }));
-
-    expect(props.onRecordReaderEvidence).toHaveBeenCalledWith(
-      "job-1",
-      "child-1",
-      "reading_epub",
-      "Apple Books",
-      "7.2",
-      "passed",
-    );
-  });
-
-  // Nothing to open means nothing to verify; the form must not invite a record
-  // that the backend would only reject.
-  it("cannot record reader verification before an EPUB is built", async () => {
-    const user = userEvent.setup();
-    const { container } = renderDrawer(bookUnit({ status: "running" }));
-    await user.click(within(container).getByRole("tab", { name: copy.tabArtifacts }));
-
-    expect(screen.getByText(copy.readerEvidenceNeedsBuild)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: copy.readerEvidenceRecord })).toBeNull();
-  });
-
   it("reports the gate's approval to the caller with the focused child", async () => {
     const user = userEvent.setup();
     const { card, props } = renderDrawer(gateUnit());
@@ -458,12 +400,6 @@ describe("BookDrawer gate card", () => {
   });
 });
 
-/**
- * The backend has had three redaction profiles, configured and covered by a
- * monotonic-disclosure test, since the diagnostic command landed — with no way
- * to reach any of them from the UI, so a user reporting a problem had only
- * screenshots.
- */
 // The excerpt used to be blanked by an effect that ran a render after the
 // artifact changed, so one frame showed the previous book's text. It now
 // carries the artifact id it was read for and is filtered during render.
@@ -510,44 +446,3 @@ describe("BookDrawer gate sample preview", () => {
   });
 });
 
-describe("BookDrawer diagnostic export", () => {
-  const section = () => screen.getByLabelText(copy.diagnosticTitle);
-  const profileSelect = () => screen.getByLabelText(copy.diagnosticProfile) as HTMLSelectElement;
-
-  it("offers every profile the backend accepts", () => {
-    renderDrawer(gateUnit());
-    expect(Array.from(profileSelect().options).map((option) => option.value)).toEqual([
-      ...BOOK_PIPELINE_DIAGNOSTIC_PROFILES,
-    ]);
-  });
-
-  // The default has to be the one that can be pasted anywhere without reading
-  // it first: no artifact list, no paths, no error summaries.
-  it("defaults to the public-issue profile", () => {
-    renderDrawer(gateUnit());
-    expect(profileSelect().value).toBe("public-issue");
-    expect(within(section()).getByText(copy.diagnosticPublicIssueNote)).toBeTruthy();
-  });
-
-  it("says what each profile discloses as it is chosen", async () => {
-    const user = userEvent.setup();
-    renderDrawer(gateUnit());
-
-    await user.selectOptions(profileSelect(), "redacted-support");
-    expect(within(section()).getByText(copy.diagnosticRedactedSupportNote)).toBeTruthy();
-    expect(within(section()).queryByText(copy.diagnosticPublicIssueNote)).toBeNull();
-
-    await user.selectOptions(profileSelect(), "local-full");
-    expect(within(section()).getByText(copy.diagnosticLocalFullNote)).toBeTruthy();
-  });
-
-  it("exports the chosen profile for this book", async () => {
-    const user = userEvent.setup();
-    const { props } = renderDrawer(gateUnit());
-
-    await user.selectOptions(profileSelect(), "local-full");
-    await user.click(within(section()).getByRole("button", { name: copy.diagnosticExport }));
-
-    expect(props.onExportDiagnostic).toHaveBeenCalledWith("job-1", "local-full");
-  });
-});

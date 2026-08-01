@@ -7,7 +7,6 @@ import {
   BookPipelineCleanupCandidate,
   BookPipelineCleanupPreview,
   BookPipelineCustomInstructions,
-  BookPipelineDiagnosticProfile,
   BookPipelineJob,
   BookPipelinePreviewConfig,
   BookPipelineRouteItem,
@@ -40,7 +39,9 @@ declare global {
   }
 }
 
-function isTauriRuntime() {
+// Exported because the input island registers the native drag-drop listener
+// only under Tauri; in the browser preview there are no file paths to receive.
+export function isTauriRuntime() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
 }
 
@@ -1210,24 +1211,6 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
 }
 
 /** Record that a person opened the built book in a real reader. */
-export async function recordBookPipelineReaderEvidence(
-  jobId: string,
-  childId: string,
-  artifactKind: string,
-  reader: string,
-  readerVersion: string,
-  conclusion: string,
-): Promise<BookPipelineJob> {
-  return invoke<BookPipelineJob>("record_book_pipeline_reader_evidence", {
-    jobId,
-    childId,
-    artifactKind,
-    reader,
-    readerVersion,
-    conclusion,
-  });
-}
-
 /** Re-route a book the pipeline held back, without deleting and re-queueing it. */
 export async function setBookPipelineRouteOverride(
   jobId: string,
@@ -1264,13 +1247,6 @@ export function runBookPipelineTranslationSample(
     providerConfigId,
     applyToJob,
   });
-}
-
-export function saveBookPipelineDiagnostic(jobId: string, profile: BookPipelineDiagnosticProfile) {
-  if (!isTauriRuntime()) {
-    return Promise.reject(new Error("Exporting a diagnostic bundle requires the desktop runtime."));
-  }
-  return invoke<BookPipelineActionResult>("save_book_pipeline_diagnostic", { jobId, profile });
 }
 
 export function setBookPipelineTranslationProvider(
@@ -1375,17 +1351,6 @@ export function chooseBookPipelinePdfFolder() {
     });
   }
   return invoke<BookPipelineSource | null>("choose_book_pipeline_pdf_folder");
-}
-
-export function chooseBookPipelineMarkdownSource() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<BookPipelineSource | null>({
-      kind: "markdown_source",
-      title: "Preview Markdown source",
-      path: "/tmp/bibliosmith-preview/source.md",
-    });
-  }
-  return invoke<BookPipelineSource | null>("choose_book_pipeline_markdown_source");
 }
 
 export function openBookPipelineOutput(jobId: string) {

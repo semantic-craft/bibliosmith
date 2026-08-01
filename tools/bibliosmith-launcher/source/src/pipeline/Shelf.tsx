@@ -1,6 +1,5 @@
-import { Plus } from "lucide-react";
 import type { PipelineCopy } from "./copy";
-import { stepSummaryCaption, type BookUnit } from "./model";
+import { phaseSummaryCaption, type BookUnit } from "./model";
 import { OperationProgressBar } from "./OperationProgress";
 
 function coverHue(title: string): number {
@@ -37,16 +36,16 @@ export function Shelf({
   units,
   selectedKey,
   onSelect,
-  onNewJob,
+  dimmed,
 }: {
   copy: PipelineCopy;
   units: BookUnit[];
   selectedKey: string | null;
   onSelect: (key: string) => void;
-  onNewJob: () => void;
+  dimmed?: boolean;
 }) {
   return (
-    <div className="pl-shelf">
+    <div className={dimmed ? "pl-shelf dimmed" : "pl-shelf"}>
       {units.map((unit) => {
         const ribbon = ribbonFor(unit, copy);
         return (
@@ -67,7 +66,7 @@ export function Shelf({
             {ribbon && <span className={`pl-ribbon ${ribbon.cls}`}>{ribbon.label}</span>}
             <div className="pl-bmeta">
               <div className="pl-bt">{unit.title}</div>
-              <div className="pl-bs">{stepSummaryCaption(unit, copy)}</div>
+              <div className="pl-bs">{phaseSummaryCaption(unit, copy)}</div>
             </div>
             {unit.status === "running" ? (
               <OperationProgressBar unit={unit} copy={copy} compact />
@@ -75,10 +74,6 @@ export function Shelf({
           </div>
         );
       })}
-      <button className="pl-addtile" type="button" onClick={onNewJob}>
-        <Plus size={26} strokeWidth={1.6} />
-        <span>{copy.newJob}</span>
-      </button>
     </div>
   );
 }

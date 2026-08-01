@@ -1,57 +1,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
-  BookOpen,
-  Download,
-  FolderOpen,
-} from "lucide-react";
-import {
   BOOK_PIPELINE_STATE_SCHEMA_VERSION,
   autoDetectProxySettings,
-  cancelBiblioSmithUpdate,
-  cancelNodeModulesInstall,
-  chooseRepoFolder,
-  chooseBookPipelineMarkdownSource,
   chooseBookPipelinePdfFolder,
   advanceBookPipelineJob,
   setBookPipelineRouteOverride,
-  recordBookPipelineReaderEvidence,
   approveBookPipelineGate,
   deleteBookPipelineJob,
   discoverBookPipelineZoteroSources,
-  exportLauncherLogs,
   getBookPipelineState,
   getModelCatalog,
   getOcrCredentialsStatus,
-  getDiagnosticLogSettings,
-  getLauncherState,
   getNodeModulesStatus,
   getProxySettings,
   getRuntimeStatus,
   handoffBookPipelineMarkdown,
-  listenBiblioSmithProgress,
   listenNodeModulesProgress,
   listenRuntimeProgress,
-  openBooksFolder,
   openBookPipelineOutput,
-  openRepoFolder,
   prepareBiblioSmithProject,
   previewBookPipelineRoute,
   queueBookPipelineJob,
-  readProjectDocument,
-  readProjectDocumentPath,
   recordFrontendActivity,
   retryBookPipelineJob,
   runBookPipelineTranslationSample,
-  saveBookPipelineDiagnostic,
   setBookPipelineTranslationProvider,
   runBookPipelineJob,
   saveBookPipelineCustomInstructions,
-  setRepoFolder,
-  setSaveLogsEnabled,
-  setAutoInstallNodeModules,
   saveProxySettings,
-  syncBiblioSmithProject,
   startNodeModulesInstall,
   startRuntimePrepare,
   testProxySettings,
@@ -61,47 +38,18 @@ import {
   BookPipelineCustomInstructions,
   BookPipelineJob,
   BookPipelinePreviewConfig,
-  BookPipelineDiagnosticProfile,
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
-  DiagnosticLogSettings,
   LauncherSettings,
-  LauncherState,
-  BiblioSmithUpdateInfo,
   ModelSlotView,
   NetworkProxySettings,
-  NodeModulesStatus,
-  DownloadProgress,
-  ProjectDocument,
   ProxyTestResult,
-  RuntimeStatus,
-  RuntimeToolStatus,
 } from "./types";
 import { copies, detectLocale, type LanguageSetting, type Locale } from "./i18n";
-import { type ProductCardProps } from "./components";
-import { OverviewPage } from "./pages/overview";
-import { UpdatesPage } from "./pages/updates";
-import { GuidePage } from "./pages/guide";
-import { SettingsPage } from "./pages/settings";
-import { LogsPage } from "./pages/logs";
+import { SettingsOverlay } from "./pages/settings";
 import { pipelineJobOutcomeSucceeded, translationHandoffReady } from "./lib/pipeline-status";
-import {
-  ConfirmDialog,
-  FloatingFeedback,
-  RuntimeBootstrapScreen,
-  Sidebar,
-  Titlebar,
-  type ConfirmDialogState,
-  type DownloadHudState,
-  type FloatingToast,
-  type RuntimeBootstrapState,
-  type TabId,
-  type ToastTone,
-  type TutorialHistoryEntry,
-  type TutorialKind,
-} from "./shell";
-import { UNKNOWN_VALUE, commitDate, formatDownloadProgress, nowLabel, sleep, versionFromDate } from "./lib/format";
+import { FloatingFeedback, Titlebar, type FloatingToast, type ToastTone } from "./shell";
 import launcherVersionManifest from "../launcher-version.json";
 import {
   PipelineWorkbench,
@@ -116,43 +64,14 @@ const SETTINGS_KEY = "bibliosmith-launcher-settings";
 const LANGUAGE_KEY = "bibliosmith-launcher-language";
 const LAUNCHER_VERSION = `v${launcherVersionManifest.version}`;
 
-
 const defaultSettings: LauncherSettings = {
   autoStart: false,
   saveLogsToLocal: true,
 };
 
-// A guide document is only valid for the project root it was read from.
-type TutorialDocState = { repoRoot: string; document: ProjectDocument };
-
 function upsertPipelineJob(state: BookPipelineState, job: BookPipelineJob): BookPipelineState {
   const existing = state.jobs.filter((item) => item.id !== job.id);
   return { ...state, revision: state.revision + 1, jobs: [job, ...existing] };
-}
-
-function runtimeToolStatusLog(tool: RuntimeToolStatus) {
-  return `ready=${tool.ready} privateReady=${tool.privateReady} source=${tool.source ?? "-"} path=${tool.path ?? "-"} version=${tool.version || "-"}`;
-}
-
-function runtimeStatusLogKey(status: RuntimeStatus) {
-  return [
-    status.ready,
-    status.privateReady,
-    status.running,
-    status.runtimeRoot,
-    status.python.ready,
-    status.python.privateReady,
-    status.python.source ?? "",
-    status.python.path ?? "",
-    status.java.ready,
-    status.java.privateReady,
-    status.java.source ?? "",
-    status.java.path ?? "",
-  ].join("|");
-}
-
-function runtimeStatusLogMessage(status: RuntimeStatus) {
-  return `runtime status ready=${status.ready} privateReady=${status.privateReady} running=${status.running} root=${status.runtimeRoot} python=[${runtimeToolStatusLog(status.python)}] java=[${runtimeToolStatusLog(status.java)}]`;
 }
 
 function loadSettings(): LauncherSettings {
@@ -194,21 +113,8 @@ export default function App() {
     }
   }, []);
   const bookPipelineCopy = useMemo(() => pipelineCopy(locale), [locale]);
-  const [activeTab, setActiveTab] = useState<TabId>("overview");
-  const [state, setState] = useState<LauncherState | null>(null);
-  // Everything below that only makes sense for a ready project is filtered
-  // during render rather than nulled out by an effect. The effects that used to
-  // do it ran a render late, so one frame still showed the previous project's
-  // guide document and commit list.
-  const [biblioSmithUpdateState, setBiblioSmithUpdate] = useState<BiblioSmithUpdateInfo | null>(null);
-  const [tutorialKind, setTutorialKind] = useState<TutorialKind>("howto");
-  // The cached guide document is tagged with the project root it was read from,
-  // so switching projects invalidates it without a reset effect.
-  const [tutorialDocState, setTutorialDocState] = useState<TutorialDocState | null>(null);
-  const [tutorialHistory, setTutorialHistory] = useState<TutorialHistoryEntry[]>([]);
-  const [tutorialLoadingState, setTutorialLoading] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<LauncherSettings>(loadSettings);
-  const [diagnosticLogSettings, setDiagnosticLogSettings] = useState<DiagnosticLogSettings | null>(null);
   const [proxySettings, setProxySettings] = useState<NetworkProxySettings>({
     enabled: false,
     scheme: "http",
@@ -217,42 +123,7 @@ export default function App() {
   });
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
   const [proxyBusy, setProxyBusy] = useState<"test" | "detect" | null>(null);
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
-  const [runtimeProgress, setRuntimeProgress] = useState<DownloadProgress | null>(null);
-  const [runtimeBootstrapState, setRuntimeBootstrapState] = useState<RuntimeBootstrapState>("ready");
-  const [runtimeBootstrapMessage, setRuntimeBootstrapMessage] = useState<string | null>(null);
-  const [runtimeBootstrapBlocking, setRuntimeBootstrapBlocking] = useState(false);
-  const [nodeModulesStatus, setNodeModulesStatus] = useState<NodeModulesStatus | null>(null);
-  const [nodeModulesProgress, setNodeModulesProgress] = useState<DownloadProgress | null>(null);
-  const [nodeModulesDownloadState, setNodeModulesDownloadState] = useState<DownloadHudState>("idle");
-  const [nodeModulesDownloadMessage, setNodeModulesDownloadMessage] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [refreshInProgress, setRefreshInProgress] = useState(false);
-  const [lastRefreshAt, setLastRefreshAt] = useState("");
-  const [biblioSmithPreparing, setBiblioSmithPreparing] = useState(false);
-  const [biblioSmithSyncing, setBiblioSmithSyncing] = useState(false);
-  const [biblioSmithProgress, setBiblioSmithProgress] = useState<DownloadProgress | null>(null);
-  const [biblioSmithDownloadState, setBiblioSmithDownloadState] = useState<DownloadHudState>("idle");
-  const [biblioSmithDownloadMessage, setBiblioSmithDownloadMessage] = useState<string | null>(null);
-  const [biblioSmithDownloadDismissed, setBiblioSmithDownloadDismissed] = useState(false);
-  const [biblioSmithRetryMode, setBiblioSmithRetryMode] = useState<"prepare" | "sync">("sync");
-  const [showAllCommitsState, setShowAllCommits] = useState(true);
-  const repoRoot = state?.repoRoot ?? "";
-  const repoReady = Boolean(state?.repoReady);
-  const biblioSmithUpdate = repoReady ? biblioSmithUpdateState : null;
-  const tutorialDoc =
-    repoReady && tutorialDocState?.repoRoot === repoRoot ? tutorialDocState.document : null;
-  const tutorialLoading = repoReady && tutorialLoadingState;
-  const showAllCommits = repoReady ? showAllCommitsState : true;
-  const setTutorialDoc = useCallback(
-    (document: ProjectDocument | null) => {
-      setTutorialDocState(document ? { repoRoot, document } : null);
-    },
-    [repoRoot],
-  );
-  const [quickActionsOpen, setQuickActionsOpen] = useState(false);
   const [floatingToast, setFloatingToast] = useState<FloatingToast | null>(null);
-  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [pipelineState, setPipelineState] = useState<BookPipelineState>({
     schemaVersion: BOOK_PIPELINE_STATE_SCHEMA_VERSION,
     revision: 0,
@@ -278,10 +149,10 @@ export default function App() {
       })
       .catch(() => undefined);
   }, []);
-  // Seed the wizard's OCR-credential chips from what is actually configured
-  // (Keychain or repo-root .env) instead of hard-coded defaults. The chips
-  // stay clickable as manual overrides for the route preview.
-  useEffect(() => {
+  // What is actually configured (Keychain or repo-root .env) drives the input
+  // island's OCR chips and, through the preview config, the routes the backend
+  // hands back.
+  const refreshOcrCredentialStatus = useCallback(() => {
     void getOcrCredentialsStatus()
       .then((status) => {
         setPipelineDraft((draft) => ({
@@ -292,37 +163,26 @@ export default function App() {
       })
       .catch(() => undefined);
   }, []);
+  useEffect(() => refreshOcrCredentialStatus(), [refreshOcrCredentialStatus]);
+  // Settings is the only place OCR keys can be entered, so closing it is the
+  // moment the chips (and the preflight they feed) can be stale.
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    refreshOcrCredentialStatus();
+  }, [refreshOcrCredentialStatus]);
   const [pipelinePreview, setPipelinePreview] = useState<BookPipelineRouteItem[]>([]);
   const [pipelineRouteOverrides, setPipelineRouteOverrides] = useState<Record<string, RouteOverride>>({});
   const [pipelineZoteroSources, setPipelineZoteroSources] = useState<BookPipelineSource[]>([]);
   const [pipelineBusy, setPipelineBusy] = useState<PipelineBusy>("loading");
-  const [activities, setActivities] = useState<ActivityItem[]>([
-    { id: "welcome", time: nowLabel(), level: "info", message: copy.welcome },
-  ]);
-  const runtimeBootstrapReleaseTimer = useRef<number | null>(null);
-  const runtimeBootstrapStartedRef = useRef(false);
-  const runtimeStatusLogKeyRef = useRef<string | null>(null);
-  const refreshInProgressRef = useRef(false);
-  const biblioSmithSyncingRef = useRef(false);
-  const biblioSmithDownloadDismissedRef = useRef(false);
+  const runtimePrepareStartedRef = useRef(false);
   const nodeModulesAutoStartRef = useRef(false);
   const startupInitializedRef = useRef(false);
-  const tutorialAutoLoadRef = useRef<string | null>(null);
   const floatingToastTimer = useRef<number | null>(null);
 
+  // Activity lines go straight to the backend log; the in-app activity feed
+  // retired together with the logs page. The floating toast is the visible half.
   const addActivity = useCallback((level: ActivityItem["level"], message: string) => {
     void recordFrontendActivity(level, message).catch(() => undefined);
-    setActivities((items) => [
-      { id: `${Date.now()}-${Math.random()}`, time: nowLabel(), level, message },
-      ...items,
-    ].slice(0, 80));
-  }, []);
-
-  const logRuntimeStatusIfChanged = useCallback((status: RuntimeStatus) => {
-    const key = runtimeStatusLogKey(status);
-    if (runtimeStatusLogKeyRef.current === key) return;
-    runtimeStatusLogKeyRef.current = key;
-    void recordFrontendActivity("info", runtimeStatusLogMessage(status)).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -359,35 +219,15 @@ export default function App() {
     routeOverrides: pipelineRouteOverrides,
   }), [pipelineDraft.hasMineruCredentials, pipelineDraft.hasPaddleocrCredentials, pipelineRouteOverrides]);
 
+  // Two shapes only: the folder the island was given, or the Zotero item picked
+  // from a title search. The fake, external-adapter and Markdown source kinds
+  // stay in the backend contract but no longer have a way in from the UI.
   const buildPipelineSource = useCallback((): BookPipelineSource => {
-    if (pipelineDraft.sourceKind === "fake") {
-      return {
-        kind: "fake",
-        title: "Fake source",
-        selector: "fake://source",
-        runnerBehavior: pipelineDraft.fakeBehavior,
-      };
-    }
     if (pipelineDraft.sourceKind === "local_pdf_folder") {
       return {
         kind: "local_pdf_folder",
         title: pipelineDraft.localPdfTitle || "Local PDF folder",
         path: pipelineDraft.localPdfFolder,
-      };
-    }
-    if (pipelineDraft.sourceKind === "markdown_source") {
-      return {
-        kind: "markdown_source",
-        title: pipelineDraft.markdownTitle || "Markdown source",
-        path: pipelineDraft.markdownPath,
-      };
-    }
-    if (pipelineDraft.sourceKind === "external_adapter") {
-      return {
-        kind: "external_adapter",
-        title: "External adapter",
-        path: pipelineDraft.externalAdapterInput,
-        adapterCommand: pipelineDraft.externalAdapterCommand,
       };
     }
     const discovered = pipelineZoteroSources.find((source) => source.kind === pipelineDraft.sourceKind && source.selector === pipelineDraft.zoteroSelector);
@@ -435,14 +275,13 @@ export default function App() {
     setPipelineBusy("queue");
     try {
       const source = buildPipelineSource();
-      // Fake routes stay zero-cost; real fast routes use the versioned provider
-      // registry IDs introduced by #60.
+      // Fast routes use the versioned provider registry IDs introduced by #60.
+      // Every job now translates, so the flags no longer have to be masked off
+      // for a conversion-only run.
       const translationIntent =
         pipelineDraft.translationMode === "expert"
-          ? { translationMode: "expert" as const, profileId: "expert-agent", configId: "default", skillIds: ["expert-translation-quality"], secondPassEnabled: false, textCleanup: false, digestMode: pipelineDraft.mode !== "conversion_only" && pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
-          : source.kind === "fake"
-            ? { translationMode: "fast" as const, profileId: "fake-provider-profile", configId: "fake-provider-config", skillIds: [], secondPassEnabled: pipelineDraft.mode !== "conversion_only" && pipelineDraft.secondPassEnabled, textCleanup: pipelineDraft.mode !== "conversion_only" && pipelineDraft.textCleanup, digestMode: pipelineDraft.mode !== "conversion_only" && pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
-            : { translationMode: "fast" as const, profileId: pipelineDraft.providerProfileId, configId: pipelineDraft.providerConfigId, skillIds: [], secondPassEnabled: pipelineDraft.mode !== "conversion_only" && pipelineDraft.secondPassEnabled, textCleanup: pipelineDraft.mode !== "conversion_only" && pipelineDraft.textCleanup, digestMode: pipelineDraft.mode !== "conversion_only" && pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats };
+          ? { translationMode: "expert" as const, profileId: "expert-agent", configId: "default", skillIds: ["expert-translation-quality"], secondPassEnabled: false, textCleanup: false, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
+          : { translationMode: "fast" as const, profileId: pipelineDraft.providerProfileId, configId: pipelineDraft.providerConfigId, skillIds: [], secondPassEnabled: pipelineDraft.secondPassEnabled, textCleanup: pipelineDraft.textCleanup, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats };
       const queued = await queueBookPipelineJob(source, pipelineDraft.mode, translationIntent, pipelineConfig);
       setPipelineState((current) => upsertPipelineJob(current, queued));
       setPipelinePreview(queued.route);
@@ -539,38 +378,6 @@ export default function App() {
     }
   }, [addActivity, bookPipelineCopy.customInstructionsSaved, showFloatingToast]);
 
-  // Re-route a held book in place. The credentials the backend needs to decide
-  // whether a forced provider is usable are the same ones the wizard sends.
-  const recordReaderEvidence = useCallback(async (
-    jobId: string,
-    childId: string,
-    artifactKind: string,
-    reader: string,
-    readerVersion: string,
-    conclusion: string,
-  ) => {
-    setPipelineBusy("readerEvidence");
-    try {
-      const job = await recordBookPipelineReaderEvidence(
-        jobId,
-        childId,
-        artifactKind,
-        reader,
-        readerVersion,
-        conclusion,
-      );
-      setPipelineState((current) => upsertPipelineJob(current, job));
-      addActivity("info", `Book Pipeline reader evidence recorded: ${reader} ${readerVersion}`);
-      showFloatingToast(job.currentStep, "success");
-    } catch (error) {
-      const message = String(error);
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setPipelineBusy(null);
-    }
-  }, [addActivity, showFloatingToast]);
-
   const overridePipelineRoute = useCallback(async (
     jobId: string,
     childId: string,
@@ -660,26 +467,6 @@ export default function App() {
     }
   }, [addActivity, bookPipelineCopy.appliedSampleProvider, showFloatingToast]);
 
-  // The three redaction profiles were configured and tested on the backend with
-  // no way to reach them, so a user reporting a problem had only screenshots.
-  const exportPipelineDiagnostic = useCallback(async (
-    jobId: string,
-    profile: BookPipelineDiagnosticProfile,
-  ) => {
-    setPipelineBusy("diagnostic");
-    try {
-      const result = await saveBookPipelineDiagnostic(jobId, profile);
-      addActivity(result.ok ? "success" : "info", result.message);
-      showFloatingToast(result.message, result.ok ? "success" : "info");
-    } catch (error) {
-      const message = String(error);
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setPipelineBusy(null);
-    }
-  }, [addActivity, showFloatingToast]);
-
   const handoffPipelineMarkdown = useCallback(async (jobId: string, artifactPath?: string | null) => {
     setPipelineBusy("handoff");
     try {
@@ -719,61 +506,8 @@ export default function App() {
     }
   }, [addActivity, showFloatingToast]);
 
-  const choosePipelineMarkdownSource = useCallback(async () => {
-    setPipelineBusy("markdown");
-    try {
-      const source = await chooseBookPipelineMarkdownSource();
-      if (!source) return;
-      setPipelineDraft((draft) => ({
-        ...draft,
-        sourceKind: "markdown_source",
-        mode: "translate_only",
-        markdownPath: source.path || "",
-        markdownTitle: source.title || "Markdown source",
-      }));
-      setPipelinePreview([]);
-      addActivity("info", `Selected Markdown source: ${source.path || ""}`);
-    } catch (error) {
-      const message = String(error);
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setPipelineBusy(null);
-    }
-  }, [addActivity, showFloatingToast]);
-
-  const discoverPipelineZoteroSources = useCallback(async () => {
-    setPipelineBusy("zotero");
-    try {
-      const result = await discoverBookPipelineZoteroSources(buildPipelineSource(), 20);
-      setPipelineZoteroSources(result.sources);
-      setPipelinePreview([]);
-      for (const line of result.logSummary.slice(-3)) {
-        addActivity("info", line);
-      }
-      if (result.sources[0]) {
-        setPipelineDraft((draft) => ({
-          ...draft,
-          sourceKind: result.sources[0].kind,
-          zoteroSelector: result.sources[0].selector || result.sources[0].title || draft.zoteroSelector,
-        }));
-      }
-      addActivity("success", `Discovered ${result.sources.length} Zotero source(s)`);
-      showFloatingToast(`Discovered ${result.sources.length} Zotero source(s)`, "success");
-    } catch (error) {
-      const message = String(error);
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setPipelineBusy(null);
-    }
-  }, [addActivity, buildPipelineSource, showFloatingToast]);
-
-  // A dedicated search, not a reuse of discoverPipelineZoteroSources: that one
-  // reads the current draft via buildPipelineSource(), so calling it right
-  // after onDraftChange({ zoteroSelector }) in the same handler would race the
-  // draft update and discover with the previous selector. Building the request
-  // from the typed query directly sidesteps that.
+  // The request is built from the typed query rather than from the draft, so a
+  // search never races the selector the draft is carrying.
   const discoverZoteroByQuery = useCallback(async (query: string) => {
     setPipelineBusy("zotero");
     try {
@@ -788,11 +522,17 @@ export default function App() {
       for (const line of result.logSummary.slice(-3)) {
         addActivity("info", line);
       }
-      setPipelineDraft((draft) => ({
-        ...draft,
-        sourceKind: result.sources[0]?.kind ?? "zotero_filter",
-        zoteroSelector: result.sources[0]?.selector || result.sources[0]?.title || source.selector || draft.zoteroSelector,
-      }));
+      // Preselect the top hit so a single-match search is one action, and leave
+      // the draft alone when nothing matched — falling back to the "query=…"
+      // selector used to hand the preflight a source that cannot resolve.
+      const best = result.sources[0];
+      if (best) {
+        setPipelineDraft((draft) => ({
+          ...draft,
+          sourceKind: best.kind,
+          zoteroSelector: best.selector || best.title || draft.zoteroSelector,
+        }));
+      }
       addActivity("success", `Found ${result.sources.length} Zotero source(s) for "${query}"`);
       showFloatingToast(`Found ${result.sources.length} Zotero source(s)`, "success");
     } catch (error) {
@@ -818,20 +558,6 @@ export default function App() {
     }
   }, [addActivity, showFloatingToast]);
 
-  const refreshDiagnosticLogSettings = useCallback(async () => {
-    try {
-      const info = await getDiagnosticLogSettings();
-      setDiagnosticLogSettings(info);
-      setSettings((current) => {
-        const next = { ...current, saveLogsToLocal: info.saveLogs };
-        saveSettings(next);
-        return next;
-      });
-    } catch (error) {
-      addActivity("warning", copy.logSettingsLoadFailed(String(error)));
-    }
-  }, [addActivity, copy]);
-
   const refreshProxySettings = useCallback(async () => {
     try {
       const proxy = await getProxySettings();
@@ -841,594 +567,11 @@ export default function App() {
     }
   }, [addActivity]);
 
-  const refreshRuntimeStatus = useCallback(async () => {
-    try {
-      const status = await getRuntimeStatus();
-      setRuntimeStatus(status);
-      logRuntimeStatusIfChanged(status);
-      return status;
-    } catch (error) {
-      addActivity("warning", copy.runtimeStatusLoadFailed(String(error)));
-      return null;
-    }
-  }, [addActivity, copy, logRuntimeStatusIfChanged]);
-
-  const startRuntimeBootstrap = useCallback(async (blocking: boolean) => {
-    if (runtimeBootstrapReleaseTimer.current) {
-      window.clearTimeout(runtimeBootstrapReleaseTimer.current);
-      runtimeBootstrapReleaseTimer.current = null;
-    }
-    setRuntimeBootstrapBlocking(blocking);
-    setRuntimeBootstrapState("checking");
-    setRuntimeBootstrapMessage(copy.runtimeBootstrapChecking);
-    setRuntimeProgress({
-      percent: 0.01,
-      downloadedBytes: 0,
-      totalBytes: 100,
-      message: copy.runtimeBootstrapChecking,
-      state: "downloading",
-    });
-    try {
-      void recordFrontendActivity("info", `runtime bootstrap start blocking=${blocking}`).catch(() => undefined);
-      const status = await getRuntimeStatus();
-      setRuntimeStatus(status);
-      logRuntimeStatusIfChanged(status);
-      if (status.ready) {
-        setRuntimeBootstrapState("ready");
-        setRuntimeBootstrapMessage(copy.runtimeBootstrapReady);
-        setRuntimeProgress({
-          percent: 100,
-          downloadedBytes: 100,
-          totalBytes: 100,
-          message: copy.runtimeBootstrapReady,
-          state: "success",
-        });
-        runtimeBootstrapReleaseTimer.current = window.setTimeout(() => {
-          setRuntimeBootstrapBlocking(false);
-          setRuntimeProgress(null);
-          runtimeBootstrapReleaseTimer.current = null;
-        }, blocking ? 450 : 800);
-        return;
-      }
-      setRuntimeBootstrapState("preparing");
-      setRuntimeBootstrapMessage(copy.runtimeBootstrapPreparing);
-      const result = await startRuntimePrepare();
-      if (result.requiresDownload === false) {
-        const refreshed = await refreshRuntimeStatus();
-        setRuntimeBootstrapState("ready");
-        setRuntimeBootstrapMessage(refreshed?.ready ? copy.runtimeBootstrapReady : result.message);
-        setRuntimeProgress({
-          percent: 100,
-          downloadedBytes: 100,
-          totalBytes: 100,
-          message: refreshed?.ready ? copy.runtimeBootstrapReady : result.message,
-          state: "success",
-        });
-        runtimeBootstrapReleaseTimer.current = window.setTimeout(() => {
-          setRuntimeBootstrapBlocking(false);
-          setRuntimeProgress(null);
-          runtimeBootstrapReleaseTimer.current = null;
-        }, blocking ? 450 : 800);
-        return;
-      }
-      addActivity("info", copy.runtimePrepareStarted);
-    } catch (error) {
-      const message = copy.runtimePrepareFailed(String(error));
-      setRuntimeBootstrapState("failed");
-      setRuntimeBootstrapMessage(message);
-      setRuntimeProgress({
-        percent: 100,
-        downloadedBytes: 0,
-        totalBytes: 0,
-        message,
-        state: "failed",
-      });
-      addActivity("warning", message);
-      if (blocking) {
-        runtimeBootstrapReleaseTimer.current = window.setTimeout(() => {
-          setRuntimeBootstrapBlocking(false);
-          runtimeBootstrapReleaseTimer.current = null;
-        }, 1400);
-      }
-    }
-  }, [addActivity, copy, logRuntimeStatusIfChanged, refreshRuntimeStatus]);
-
-  const refreshNodeModulesStatus = useCallback(async () => {
-    try {
-      const status = await getNodeModulesStatus();
-      setNodeModulesStatus(status);
-      if (status.ready) {
-        setNodeModulesDownloadState("idle");
-        setNodeModulesDownloadMessage(null);
-        setNodeModulesProgress(null);
-      } else if (status.running) {
-        setNodeModulesDownloadState("downloading");
-      } else {
-        setNodeModulesDownloadState((current) => {
-          if (current === "downloading" || current === "cancelling") return "failed";
-          return current;
-        });
-        setNodeModulesDownloadMessage((current) => current || (status.repoReady ? copy.nodeModulesIncomplete : null));
-      }
-    } catch (error) {
-      addActivity("warning", copy.nodeModulesStatusFailed(String(error)));
-    }
-  }, [addActivity, copy]);
-
-  const startBiblioSmithProgress = useCallback((mode: "prepare" | "sync") => {
-    setBiblioSmithRetryMode(mode);
-    setBiblioSmithDownloadDismissed(false);
-    biblioSmithDownloadDismissedRef.current = false;
-    setBiblioSmithDownloadState("downloading");
-    setBiblioSmithDownloadMessage(null);
-    setBiblioSmithProgress({
-      percent: 0.01,
-      downloadedBytes: 0,
-      totalBytes: 100,
-      message: mode === "prepare" ? copy.preparingBiblioSmith : copy.biblioSmithUpdateStarted,
-    });
-  }, [copy.biblioSmithUpdateStarted, copy.preparingBiblioSmith]);
-
-  const finishBiblioSmithProgress = useCallback((message: string) => {
-    setBiblioSmithProgress(() => ({
-      percent: 100,
-      downloadedBytes: 100,
-      totalBytes: 100,
-      message,
-    } satisfies DownloadProgress));
-    setBiblioSmithDownloadState("idle");
-    window.setTimeout(() => {
-      setBiblioSmithProgress(null);
-      setBiblioSmithDownloadMessage(null);
-    }, 900);
-  }, []);
-
-  const failBiblioSmithProgress = useCallback((error: unknown) => {
-    const raw = String(error);
-    const stopped = raw.includes("已停止") || raw.toLowerCase().includes("stopped");
-    const message = stopped ? copy.biblioSmithDownloadStopped : copy.biblioSmithDownloadFailed;
-    setBiblioSmithDownloadMessage(message);
-    setBiblioSmithDownloadState(stopped ? "stopped" : "failed");
-    addActivity(stopped ? "warning" : "error", stopped ? message : copy.biblioSmithUpdateStopped(raw));
-    if (biblioSmithDownloadDismissedRef.current) {
-      window.setTimeout(() => setBiblioSmithDownloadState("idle"), 900);
-    } else {
-      showFloatingToast(message, stopped ? "warning" : "error");
-    }
-  }, [addActivity, copy, showFloatingToast]);
-
-  const startNodeModulesInBackground = useCallback(async (silent = false) => {
-    if (nodeModulesDownloadState === "downloading" || nodeModulesDownloadState === "cancelling") return;
-    setNodeModulesDownloadState("downloading");
-    setNodeModulesDownloadMessage(null);
-    setNodeModulesProgress({
-      percent: 0.01,
-      downloadedBytes: 0,
-      totalBytes: 100,
-      message: copy.nodeModulesInstalling,
-      state: "downloading",
-    });
-    try {
-      const result = await startNodeModulesInstall();
-      if (!silent) {
-        addActivity("info", result.message || copy.nodeModulesInstallStarted);
-        showFloatingToast(copy.nodeModulesInstallStarted, "info");
-      }
-      await refreshNodeModulesStatus();
-    } catch (error) {
-      const message = copy.nodeModulesInstallFailed(String(error));
-      setNodeModulesDownloadMessage(message);
-      setNodeModulesDownloadState("failed");
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    }
-  }, [
-    addActivity,
-    copy,
-    nodeModulesDownloadState,
-    refreshNodeModulesStatus,
-    showFloatingToast,
-  ]);
-
-  const stopNodeModulesInstall = useCallback(async (removePartial = false) => {
-    setNodeModulesDownloadState("cancelling");
-    try {
-      await cancelNodeModulesInstall(removePartial);
-    } catch (error) {
-      const message = copy.nodeModulesInstallFailed(String(error));
-      setNodeModulesDownloadMessage(message);
-      setNodeModulesDownloadState("failed");
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    }
-  }, [addActivity, copy, showFloatingToast]);
-
-  const retryRuntimePrepare = useCallback(() => {
-    runtimeBootstrapStartedRef.current = true;
-    void startRuntimeBootstrap(false);
-  }, [startRuntimeBootstrap]);
-
-  const continueAfterRuntimeBootstrap = useCallback(() => {
-    if (runtimeBootstrapReleaseTimer.current) {
-      window.clearTimeout(runtimeBootstrapReleaseTimer.current);
-      runtimeBootstrapReleaseTimer.current = null;
-    }
-    setRuntimeBootstrapBlocking(false);
-  }, []);
-
-  const askConfirm = useCallback((options: Omit<ConfirmDialogState, "resolve">) => {
-    return new Promise<boolean>((resolve) => {
-      setConfirmDialog({ ...options, resolve });
-    });
-  }, []);
-
-  const resolveConfirmDialog = useCallback((value: boolean) => {
-    setConfirmDialog((dialog) => {
-      dialog?.resolve(value);
-      return null;
-    });
-  }, []);
-
-  const refreshState = useCallback(async () => {
-    try {
-      setState(await getLauncherState());
-    } catch (error) {
-      setState(null);
-      addActivity("error", String(error));
-    }
-  }, [addActivity]);
-
-  const chooseRepo = useCallback(async () => {
-    setBusy("repo-choose");
-    try {
-      const selected = await chooseRepoFolder();
-      addActivity(selected.ok ? "info" : "info", selected.message);
-      if (selected.ok && selected.repoRoot) {
-        const confirmed = await askConfirm({
-          title: copy.confirmProjectDirectoryTitle,
-          message: selected.requiresDownload
-            ? copy.confirmProjectDirectoryDownload(selected.repoRoot)
-            : copy.confirmProjectDirectoryUse(selected.repoRoot),
-          confirmLabel: copy.yes,
-          cancelLabel: copy.no,
-        });
-        if (!confirmed) {
-          addActivity("info", copy.projectDirectoryChangeCancelled);
-          return;
-        }
-        const result = await setRepoFolder(selected.repoRoot);
-        addActivity(result.ok ? "success" : "info", result.message);
-        setTutorialDoc(null);
-        await refreshState();
-        if (biblioSmithSyncingRef.current) return;
-        biblioSmithSyncingRef.current = true;
-        setBiblioSmithPreparing(true);
-        startBiblioSmithProgress("prepare");
-        addActivity("info", copy.preparingBiblioSmith);
-        try {
-          const info = await prepareBiblioSmithProject(locale);
-          setBiblioSmithUpdate(info);
-          finishBiblioSmithProgress(copy.biblioSmithReady);
-          addActivity("success", copy.biblioSmithReady);
-        } catch (error) {
-          failBiblioSmithProgress(error);
-        } finally {
-          biblioSmithSyncingRef.current = false;
-          setBiblioSmithPreparing(false);
-        }
-        await refreshState();
-        await refreshNodeModulesStatus();
-      }
-    } catch (error) {
-      const message = String(error);
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setBusy(null);
-    }
-  }, [addActivity, askConfirm, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, setTutorialDoc, showFloatingToast, startBiblioSmithProgress]);
-
-  const doOpenRepoFolder = useCallback(async () => {
-    try {
-      const result = await openRepoFolder();
-      addActivity(result.ok ? "success" : "warning", result.message);
-    } catch (error) {
-      addActivity("error", String(error));
-    }
-  }, [addActivity]);
-
-  const doOpenBooksFolder = useCallback(async () => {
-    try {
-      const result = await openBooksFolder();
-      addActivity(result.ok ? "success" : "warning", result.message);
-    } catch (error) {
-      addActivity("error", String(error));
-    }
-  }, [addActivity]);
-
-  const prepareBiblioSmith = useCallback(async () => {
-    if (biblioSmithSyncingRef.current) return;
-    biblioSmithSyncingRef.current = true;
-    setBiblioSmithPreparing(true);
-    startBiblioSmithProgress("prepare");
-    addActivity("info", copy.preparingBiblioSmith);
-    try {
-      const info = await prepareBiblioSmithProject(locale);
-      setBiblioSmithUpdate(info);
-      finishBiblioSmithProgress(copy.biblioSmithReady);
-      addActivity("success", copy.biblioSmithReady);
-      await refreshState();
-      await refreshNodeModulesStatus();
-    } catch (error) {
-      failBiblioSmithProgress(error);
-      await refreshState();
-      await refreshNodeModulesStatus();
-    } finally {
-      biblioSmithSyncingRef.current = false;
-      setBiblioSmithPreparing(false);
-    }
-  }, [addActivity, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, startBiblioSmithProgress]);
-
-  const prepareBiblioSmithInBackground = useCallback(async () => {
-    if (biblioSmithSyncingRef.current) return;
-    biblioSmithSyncingRef.current = true;
-    startBiblioSmithProgress("prepare");
-    addActivity("info", copy.preparingBiblioSmith);
-    try {
-      const info = await prepareBiblioSmithProject(locale);
-      setBiblioSmithUpdate(info);
-      finishBiblioSmithProgress(copy.biblioSmithReady);
-      addActivity("success", copy.biblioSmithReady);
-      await refreshState();
-      await refreshNodeModulesStatus();
-    } catch (error) {
-      failBiblioSmithProgress(error);
-      await refreshState();
-      await refreshNodeModulesStatus();
-    } finally {
-      biblioSmithSyncingRef.current = false;
-    }
-  }, [addActivity, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, startBiblioSmithProgress]);
-
-  const syncBiblioSmithNow = useCallback(async () => {
-    if (biblioSmithSyncingRef.current) return;
-    biblioSmithSyncingRef.current = true;
-    setBiblioSmithSyncing(true);
-    startBiblioSmithProgress("sync");
-    addActivity("info", copy.biblioSmithUpdateStarted);
-    try {
-      const info = await syncBiblioSmithProject(locale);
-      setBiblioSmithUpdate(info);
-      const doneMessage = info.hasUpdate ? copy.biblioSmithFound(info.behindCount) : copy.biblioSmithUpdateComplete;
-      finishBiblioSmithProgress(doneMessage);
-      addActivity(info.hasUpdate ? "warning" : "success", doneMessage);
-      await refreshState();
-      await refreshNodeModulesStatus();
-    } catch (error) {
-      failBiblioSmithProgress(error);
-      await refreshState();
-      await refreshNodeModulesStatus();
-    } finally {
-      biblioSmithSyncingRef.current = false;
-      setBiblioSmithSyncing(false);
-    }
-  }, [addActivity, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, startBiblioSmithProgress]);
-
-  useEffect(() => {
-    const unlistenRuntime = listenRuntimeProgress((progress) => {
-      setRuntimeProgress(progress);
-      setRuntimeBootstrapMessage(progress.message ?? null);
-      if (progress.state === "success") {
-        setRuntimeBootstrapState("ready");
-        void refreshRuntimeStatus();
-        if (runtimeBootstrapReleaseTimer.current) window.clearTimeout(runtimeBootstrapReleaseTimer.current);
-        runtimeBootstrapReleaseTimer.current = window.setTimeout(() => {
-          setRuntimeBootstrapBlocking(false);
-          setRuntimeProgress(null);
-          runtimeBootstrapReleaseTimer.current = null;
-        }, 650);
-      } else if (progress.state === "failed") {
-        setRuntimeBootstrapState("failed");
-        addActivity("warning", progress.message || copy.runtimeBootstrapFailed);
-        void refreshRuntimeStatus();
-        if (runtimeBootstrapReleaseTimer.current) window.clearTimeout(runtimeBootstrapReleaseTimer.current);
-        runtimeBootstrapReleaseTimer.current = window.setTimeout(() => {
-          setRuntimeBootstrapBlocking(false);
-          runtimeBootstrapReleaseTimer.current = null;
-        }, 1400);
-      } else if (progress.percent > 0 && progress.percent < 100) {
-        setRuntimeBootstrapState("preparing");
-      }
-    });
-    if (!runtimeBootstrapStartedRef.current) {
-      runtimeBootstrapStartedRef.current = true;
-      void startRuntimeBootstrap(false);
-    }
-    return () => {
-      unlistenRuntime.then((fn) => fn()).catch(() => undefined);
-    };
-  }, [addActivity, copy, refreshRuntimeStatus, startRuntimeBootstrap]);
-
-  useEffect(() => {
-    if (runtimeBootstrapState !== "preparing") return undefined;
-    const timer = window.setInterval(async () => {
-      const status = await refreshRuntimeStatus();
-      if (!status) return;
-      if (status.ready) {
-        setRuntimeBootstrapState("ready");
-        setRuntimeBootstrapMessage(copy.runtimeBootstrapReady);
-        setRuntimeProgress({
-          percent: 100,
-          downloadedBytes: 100,
-          totalBytes: 100,
-          message: copy.runtimeBootstrapReady,
-          state: "success",
-        });
-        if (runtimeBootstrapReleaseTimer.current) window.clearTimeout(runtimeBootstrapReleaseTimer.current);
-        runtimeBootstrapReleaseTimer.current = window.setTimeout(() => {
-          setRuntimeBootstrapBlocking(false);
-          setRuntimeProgress(null);
-          runtimeBootstrapReleaseTimer.current = null;
-        }, 450);
-      } else if (!status.running) {
-        const message = copy.runtimeBootstrapFailed;
-        setRuntimeBootstrapState("failed");
-        setRuntimeBootstrapMessage(message);
-        setRuntimeProgress({
-          percent: 100,
-          downloadedBytes: 0,
-          totalBytes: 0,
-          message,
-          state: "failed",
-        });
-        addActivity("warning", message);
-        if (runtimeBootstrapReleaseTimer.current) window.clearTimeout(runtimeBootstrapReleaseTimer.current);
-        runtimeBootstrapReleaseTimer.current = window.setTimeout(() => {
-          setRuntimeBootstrapBlocking(false);
-          runtimeBootstrapReleaseTimer.current = null;
-        }, 1400);
-      }
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, [addActivity, copy, refreshRuntimeStatus, runtimeBootstrapState]);
-
-  const loadTutorial = useCallback(async (kind: TutorialKind) => {
-    setTutorialKind(kind);
-    setTutorialHistory([]);
-    if (!state?.repoReady) {
-      setTutorialDoc(null);
-      showFloatingToast(copy.tutorialUnavailable, "warning");
-      return;
-    }
-    setTutorialLoading(true);
-    try {
-      const doc = await readProjectDocument(kind, locale);
-      setTutorialDoc(doc);
-    } catch (error) {
-      addActivity("error", copy.tutorialLoadFailed(String(error)));
-      showFloatingToast(copy.tutorialLoadFailed(String(error)), "error");
-    } finally {
-      setTutorialLoading(false);
-    }
-  }, [addActivity, copy, locale, setTutorialDoc, showFloatingToast, state?.repoReady]);
-
-  const openTutorialLink = useCallback(async (href: string) => {
-    if (!state?.repoReady) {
-      setTutorialDoc(null);
-      showFloatingToast(copy.tutorialUnavailable, "warning");
-      return;
-    }
-    setTutorialLoading(true);
-    try {
-      const doc = await readProjectDocumentPath(href, locale);
-      if (tutorialDoc) {
-        setTutorialHistory((items) => [...items.slice(-19), { kind: tutorialKind, document: tutorialDoc }]);
-      }
-      setTutorialKind(doc.kind === "howto" ? "howto" : "readme");
-      setTutorialDoc(doc);
-    } catch (error) {
-      addActivity("error", copy.tutorialLoadFailed(String(error)));
-      showFloatingToast(copy.tutorialLoadFailed(String(error)), "error");
-    } finally {
-      setTutorialLoading(false);
-    }
-  }, [addActivity, copy, locale, setTutorialDoc, showFloatingToast, state?.repoReady, tutorialDoc, tutorialKind]);
-
-  // The other two updates used to run inside the history updater, which React
-  // may call more than once; they belong outside it.
-  const goBackTutorial = useCallback(() => {
-    const previous = tutorialHistory[tutorialHistory.length - 1];
-    if (!previous) return;
-    setTutorialHistory((items) => items.slice(0, -1));
-    setTutorialKind(previous.kind);
-    setTutorialDoc(previous.document);
-  }, [setTutorialDoc, tutorialHistory]);
-
-  const refreshAllStatus = useCallback(async () => {
-    setActiveTab("updates");
-    if (refreshInProgressRef.current) return;
-    refreshInProgressRef.current = true;
-    setRefreshInProgress(true);
-    addActivity("info", copy.refreshAllStarted);
-    await sleep(80);
-    try {
-      await refreshState();
-      if (!biblioSmithSyncingRef.current) {
-        biblioSmithSyncingRef.current = true;
-        startBiblioSmithProgress("sync");
-        try {
-          const info = await syncBiblioSmithProject(locale);
-          setBiblioSmithUpdate(info);
-          const doneMessage = info.hasUpdate ? copy.biblioSmithFound(info.behindCount) : copy.biblioSmithLatest;
-          finishBiblioSmithProgress(doneMessage);
-          addActivity(info.hasUpdate ? "warning" : "success", doneMessage);
-        } catch (error) {
-          failBiblioSmithProgress(error);
-        } finally {
-          biblioSmithSyncingRef.current = false;
-        }
-      }
-      await refreshState();
-      await refreshNodeModulesStatus();
-      addActivity("success", copy.refreshAllDone);
-    } catch (error) {
-      addActivity("error", copy.biblioSmithUpdateStopped(String(error)));
-      await refreshState();
-      await refreshNodeModulesStatus();
-    } finally {
-      refreshInProgressRef.current = false;
-      setRefreshInProgress(false);
-      setLastRefreshAt(nowLabel());
-    }
-  }, [addActivity, copy, failBiblioSmithProgress, finishBiblioSmithProgress, locale, refreshNodeModulesStatus, refreshState, startBiblioSmithProgress]);
-
-  const stopBiblioSmithDownload = useCallback(async (dismissAfterStop = false) => {
-    if (biblioSmithDownloadState !== "downloading" && biblioSmithDownloadState !== "cancelling") return;
-    biblioSmithDownloadDismissedRef.current = dismissAfterStop;
-    setBiblioSmithDownloadDismissed(dismissAfterStop);
-    setBiblioSmithDownloadState("cancelling");
-    try {
-      const result = await cancelBiblioSmithUpdate();
-      addActivity(result.ok ? "warning" : "error", result.message);
-    } catch (error) {
-      addActivity("error", copy.biblioSmithUpdateStopped(String(error)));
-      showFloatingToast(copy.biblioSmithUpdateStopped(String(error)), "error");
-    }
-  }, [addActivity, copy, biblioSmithDownloadState, showFloatingToast]);
-
-  const retryBiblioSmithDownload = useCallback(() => {
-    setBiblioSmithDownloadDismissed(false);
-    biblioSmithDownloadDismissedRef.current = false;
-    if (biblioSmithRetryMode === "prepare") {
-      void prepareBiblioSmith();
-    } else {
-      void syncBiblioSmithNow();
-    }
-  }, [biblioSmithRetryMode, prepareBiblioSmith, syncBiblioSmithNow]);
-
-  const closeBiblioSmithDownloadHud = useCallback(() => {
-    setBiblioSmithDownloadDismissed(true);
-    biblioSmithDownloadDismissedRef.current = true;
-    if (biblioSmithDownloadState !== "downloading" && biblioSmithDownloadState !== "cancelling") {
-      setBiblioSmithDownloadState("idle");
-    }
-  }, [biblioSmithDownloadState]);
-
   const updateSetting = useCallback(
     async (key: keyof LauncherSettings, value: boolean) => {
       const next = { ...settings, [key]: value };
       setSettings(next);
       saveSettings(next);
-      if (key === "saveLogsToLocal") {
-        try {
-          const info = await setSaveLogsEnabled(value);
-          setDiagnosticLogSettings(info);
-          addActivity("success", copy.logSettingsSaved);
-        } catch (error) {
-          addActivity("error", copy.logSettingsSaveFailed(String(error)));
-          void refreshDiagnosticLogSettings();
-        }
-      }
       if (key === "autoStart") {
         try {
           if (value) {
@@ -1443,19 +586,8 @@ export default function App() {
         }
       }
     },
-    [addActivity, copy, refreshDiagnosticLogSettings, settings],
+    [addActivity, copy, settings],
   );
-
-  const doExportLauncherLogs = useCallback(async () => {
-    addActivity("info", copy.exportingLogs);
-    try {
-      const result = await exportLauncherLogs();
-      addActivity(result.ok ? "success" : "info", result.message);
-    } catch (error) {
-      addActivity("error", copy.logExportFailed(String(error)));
-      showFloatingToast(copy.logExportFailed(String(error)), "error");
-    }
-  }, [addActivity, copy, showFloatingToast]);
 
   const updateProxySettingsDraft = useCallback((next: NetworkProxySettings) => {
     setProxySettings(next);
@@ -1464,7 +596,6 @@ export default function App() {
       void saveProxySettings(next)
         .then((saved) => {
           setProxySettings(saved);
-          void refreshState();
           addActivity("info", copy.proxyDisabledStatus);
         })
         .catch((error) => {
@@ -1473,7 +604,7 @@ export default function App() {
           showFloatingToast(message, "error");
         });
     }
-  }, [addActivity, copy, refreshState, showFloatingToast]);
+  }, [addActivity, copy, showFloatingToast]);
 
   const doTestProxySettings = useCallback(async () => {
     setProxyBusy("test");
@@ -1490,7 +621,6 @@ export default function App() {
       }
       const saved = await saveProxySettings(proxySettings);
       setProxySettings(saved);
-      await refreshState();
       const elapsed = result.elapsedMs ?? 0;
       const version = result.httpVersion ?? "";
       const message = copy.proxyTestAndApplied(elapsed, version);
@@ -1504,7 +634,7 @@ export default function App() {
     } finally {
       setProxyBusy(null);
     }
-  }, [addActivity, copy, proxySettings, refreshState, showFloatingToast]);
+  }, [addActivity, copy, proxySettings, showFloatingToast]);
 
   const doAutoDetectProxySettings = useCallback(async (force = true, silent = false) => {
     if (proxyBusy) return;
@@ -1524,7 +654,6 @@ export default function App() {
       if (result.test) {
         setProxyTestResult(result.test);
       }
-      await refreshState();
       const message = result.detected ? copy.proxyAutoDetected : result.message || copy.proxyAutoDetectNotFound;
       if (!silent || Boolean(result.test)) {
         addActivity(result.detected ? "success" : "warning", message);
@@ -1540,140 +669,93 @@ export default function App() {
     } finally {
       setProxyBusy(null);
     }
-  }, [addActivity, copy, proxyBusy, refreshState, showFloatingToast]);
+  }, [addActivity, copy, proxyBusy, showFloatingToast]);
 
-  const updateAutoInstallNodeModules = useCallback(async (enabled: boolean) => {
+  // Runtime and node_modules preparation run silently in the background; only a
+  // failure surfaces, as a toast. The blocking bootstrap screen and the download
+  // HUD retired with the island redesign (docs/planning/island-ui-minimal-redesign.md).
+  const maybeAutoInstallNodeModules = useCallback(async () => {
     try {
-      if (!enabled && (nodeModulesDownloadState === "downloading" || nodeModulesDownloadState === "cancelling")) {
-        void stopNodeModulesInstall(false);
-      }
-      const status = await setAutoInstallNodeModules(enabled);
-      setNodeModulesStatus(status);
-      if (!enabled) {
-        setNodeModulesProgress(null);
-        setNodeModulesDownloadMessage(null);
-        setNodeModulesDownloadState("idle");
-        nodeModulesAutoStartRef.current = false;
-        return;
-      }
-      if (enabled && status.repoReady && !status.ready && !status.running) {
-        nodeModulesAutoStartRef.current = false;
-        void startNodeModulesInBackground(false);
-      }
+      const status = await getNodeModulesStatus();
+      if (!status.repoReady || status.ready || status.running || !status.autoInstall) return;
+      if (nodeModulesAutoStartRef.current) return;
+      nodeModulesAutoStartRef.current = true;
+      await startNodeModulesInstall();
     } catch (error) {
-      const message = copy.nodeModulesStatusFailed(String(error));
-      addActivity("error", message);
-      showFloatingToast(message, "error");
+      addActivity("warning", copy.nodeModulesStatusFailed(String(error)));
     }
-  }, [
-    addActivity,
-    copy,
-    nodeModulesDownloadState,
-    showFloatingToast,
-    startNodeModulesInBackground,
-    stopNodeModulesInstall,
-  ]);
+  }, [addActivity, copy]);
 
   useEffect(() => {
-    if (runtimeBootstrapBlocking) return undefined;
-    if (!startupInitializedRef.current) {
-      startupInitializedRef.current = true;
-      void recordFrontendActivity("info", "frontend startup initialization begin").catch(() => undefined);
-      refreshState();
-      void refreshProxySettings();
-      void doAutoDetectProxySettings(false, true);
-      void refreshRuntimeStatus();
-      void refreshNodeModulesStatus();
-      isEnabled()
-        .then((enabled) => {
-          setSettings((old) => {
-            const next = { ...old, autoStart: enabled };
-            saveSettings(next);
-            return next;
-          });
-        })
-        .catch(() => undefined);
-    }
-
-    const unlistenBiblioSmith = listenBiblioSmithProgress((progress) => {
-      setBiblioSmithProgress(progress);
-      setBiblioSmithDownloadMessage(progress.message ?? null);
-      if (progress.percent > 0 && progress.percent < 100) {
-        setBiblioSmithDownloadState((current) => current === "idle" ? "downloading" : current);
-      } else if (progress.percent >= 100 || progress.state === "success") {
-        setBiblioSmithDownloadState("idle");
-      } else if (progress.state === "failed") {
-        setBiblioSmithDownloadState("failed");
-      } else if (progress.state === "stopped") {
-        setBiblioSmithDownloadState("stopped");
+    const unlistenRuntime = listenRuntimeProgress((progress) => {
+      if (progress.state === "failed") {
+        const message = progress.message || copy.runtimeBootstrapFailed;
+        addActivity("warning", message);
+        showFloatingToast(message, "warning");
       }
     });
     const unlistenNodeModules = listenNodeModulesProgress((progress) => {
-      setNodeModulesProgress(progress);
-      setNodeModulesDownloadMessage(progress.message ?? null);
-      if (progress.state === "success") {
-        setNodeModulesDownloadState("idle");
-        void refreshNodeModulesStatus();
-        showFloatingToast(copy.nodeModulesReady, "success");
-      } else if (progress.state === "failed") {
-        setNodeModulesDownloadState("failed");
-        addActivity("error", progress.message || copy.nodeModulesMissing);
-        void refreshNodeModulesStatus();
-      } else if (progress.state === "stopped") {
-        setNodeModulesDownloadState("stopped");
-        addActivity("warning", copy.nodeModulesInstallStopped);
-        void refreshNodeModulesStatus();
-      } else if (progress.percent > 0 && progress.percent < 100) {
-        setNodeModulesDownloadState((current) => current === "idle" ? "downloading" : current);
+      if (progress.state === "failed") {
+        const message = progress.message || copy.nodeModulesMissing;
+        addActivity("error", message);
+        showFloatingToast(message, "error");
       }
     });
+    if (!runtimePrepareStartedRef.current) {
+      runtimePrepareStartedRef.current = true;
+      void getRuntimeStatus()
+        .then((status) => {
+          if (status.ready) return undefined;
+          return startRuntimePrepare().then(() => undefined);
+        })
+        .catch((error) => addActivity("warning", copy.runtimePrepareFailed(String(error))));
+    }
     return () => {
-      unlistenBiblioSmith.then((fn) => fn()).catch(() => undefined);
+      unlistenRuntime.then((fn) => fn()).catch(() => undefined);
       unlistenNodeModules.then((fn) => fn()).catch(() => undefined);
     };
-  }, [
-    addActivity,
-    copy,
-    doAutoDetectProxySettings,
-    refreshNodeModulesStatus,
-    refreshProxySettings,
-    refreshRuntimeStatus,
-    refreshState,
-    runtimeBootstrapBlocking,
-    showFloatingToast,
-  ]);
+  }, [addActivity, copy, showFloatingToast]);
 
   useEffect(() => {
-    if (nodeModulesDownloadState !== "downloading" && nodeModulesDownloadState !== "cancelling") return undefined;
-    const timer = window.setInterval(() => {
-      void refreshNodeModulesStatus();
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, [nodeModulesDownloadState, refreshNodeModulesStatus]);
-
-  // Both mount loads read their state in the promise continuation instead of
-  // calling the shared refreshers, whose first statement flips a busy flag
-  // synchronously. `pipelineBusy` starts at "loading" for the same reason.
-  useEffect(() => {
-    let cancelled = false;
-    void getDiagnosticLogSettings()
-      .then((info) => {
-        if (cancelled) return;
-        setDiagnosticLogSettings(info);
-        setSettings((current) => {
-          const next = { ...current, saveLogsToLocal: info.saveLogs };
+    if (startupInitializedRef.current) return;
+    startupInitializedRef.current = true;
+    void recordFrontendActivity("info", "frontend startup initialization begin").catch(() => undefined);
+    void refreshProxySettings();
+    void doAutoDetectProxySettings(false, true);
+    isEnabled()
+      .then((enabled) => {
+        setSettings((old) => {
+          const next = { ...old, autoStart: enabled };
           saveSettings(next);
           return next;
         });
       })
-      .catch((error: unknown) => {
-        if (!cancelled) addActivity("warning", copy.logSettingsLoadFailed(String(error)));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [addActivity, copy]);
+      .catch(() => undefined);
+  }, [doAutoDetectProxySettings, refreshProxySettings]);
 
+  // The project repository still prepares itself on startup — books live in it —
+  // it just no longer has a page. Success stays quiet; failure raises a toast.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void recordFrontendActivity("info", "frontend startup automation begin").catch(() => undefined);
+      void prepareBiblioSmithProject(locale)
+        .then(() => {
+          addActivity("success", copy.biblioSmithReady);
+          void maybeAutoInstallNodeModules();
+        })
+        .catch((error) => {
+          addActivity("error", copy.biblioSmithUpdateStopped(String(error)));
+          showFloatingToast(copy.biblioSmithDownloadFailed, "error");
+        });
+    }, 600);
+    return () => window.clearTimeout(timer);
+    // Startup automation should run once after first paint using the initial persisted settings.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // The mount load reads its state in the promise continuation instead of
+  // calling the shared refreshers, whose first statement flips a busy flag
+  // synchronously. `pipelineBusy` starts at "loading" for the same reason.
   useEffect(() => {
     let cancelled = false;
     void getBookPipelineState()
@@ -1717,57 +799,6 @@ export default function App() {
   }, [pipelineBusy]);
 
   useEffect(() => {
-    if (!nodeModulesStatus?.repoReady) {
-      nodeModulesAutoStartRef.current = false;
-      return;
-    }
-    if (nodeModulesStatus.ready) {
-      nodeModulesAutoStartRef.current = true;
-      return;
-    }
-    if (!nodeModulesStatus.autoInstall || nodeModulesStatus.running || nodeModulesAutoStartRef.current) return;
-    nodeModulesAutoStartRef.current = true;
-    void startNodeModulesInBackground(true);
-  }, [nodeModulesStatus, startNodeModulesInBackground]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void recordFrontendActivity("info", "frontend startup automation begin").catch(() => undefined);
-      void prepareBiblioSmithInBackground();
-    }, 600);
-    return () => window.clearTimeout(timer);
-    // Startup automation should run once after first paint using the initial persisted settings.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // The guide document is read from the project on disk, so the auto-load stays
-  // in an effect — it also has to fire when a project finishes preparing while
-  // the guide tab is already open. Dispatching through a microtask keeps the
-  // loader's state updates out of this render.
-  //
-  // The guard holds what is being read, not a plain "in flight" flag. A project
-  // switch mid-read has to start the new project's load instead of being
-  // swallowed by the old request's guard, and nothing would re-arm it: the old
-  // request releasing the guard changes no dependency, so the effect would not
-  // run again and the page would sit empty. A stale result that lands late is
-  // discarded by its root tag.
-  // Kind first: it is a two-value enum, so the boundary is unambiguous however
-  // the project path is spelled.
-  const tutorialRequest = `${tutorialKind}:${repoRoot}`;
-  useEffect(() => {
-    if (!repoReady || activeTab !== "tutorial" || tutorialDoc) return;
-    if (tutorialAutoLoadRef.current === tutorialRequest) return;
-    tutorialAutoLoadRef.current = tutorialRequest;
-    void Promise.resolve()
-      .then(() => loadTutorial(tutorialKind))
-      .finally(() => {
-        if (tutorialAutoLoadRef.current === tutorialRequest) {
-          tutorialAutoLoadRef.current = null;
-        }
-      });
-  }, [activeTab, loadTutorial, repoReady, tutorialDoc, tutorialKind, tutorialRequest]);
-
-  useEffect(() => {
     return () => {
       if (floatingToastTimer.current) {
         window.clearTimeout(floatingToastTimer.current);
@@ -1775,203 +806,20 @@ export default function App() {
     };
   }, []);
 
-  const commits = biblioSmithUpdate?.commits ?? [];
-  const displayedCommits = showAllCommits ? commits : commits.slice(0, 1);
-  const firstCommit = commits[0];
-  const repoStatus = state?.repoStatus ?? "missing";
-  // Only empty when the launcher state could not be read at all, so there is no
-  // path to name. It used to fall back to a Windows path, which Settings and the
-  // workspace-unavailable copy then showed verbatim on macOS.
-  const repoPath = state?.repoRoot || UNKNOWN_VALUE;
-  const repoCanAutoPrepare = !repoReady && (repoStatus === "missing" || repoStatus === "empty");
-  const repoIsEmpty = !repoReady && repoStatus === "empty";
-  const repoIsOccupied = !repoReady && repoStatus === "occupied";
-  const workspaceUnavailableDescription = repoIsOccupied
-    ? copy.workspaceOccupiedDescription(repoPath)
-    : repoIsEmpty
-      ? copy.workspaceEmptyDescription(repoPath)
-    : copy.workspaceMissingDescription(repoPath);
-  const workspaceUnavailableHelp = repoIsOccupied
-    ? copy.workspaceOccupiedHelp
-    : repoIsEmpty
-      ? copy.workspaceEmptyHelp
-      : copy.workspaceMissingHelp;
-  const biblioSmithBusy = biblioSmithPreparing || biblioSmithSyncing;
-  const unavailableRepoLabel = repoIsOccupied ? copy.repoInvalid : repoIsEmpty ? copy.repoEmpty : copy.repoMissing;
-  const latestBiblioSmithVersion = firstCommit ? versionFromDate(firstCommit.date) : repoReady ? copy.projectReady : unavailableRepoLabel;
-  const currentBiblioSmithVersion = repoReady
-    ? state?.localCommitShort === "preview"
-      ? "v2025.05.25"
-      : state?.localCommitShort || copy.projectReady
-    : biblioSmithBusy
-      ? copy.preparing
-      : unavailableRepoLabel;
-  const biblioSmithStatus = biblioSmithBusy ? copy.preparing : repoReady ? copy.projectReady : unavailableRepoLabel;
-  const biblioSmithStatusTone: "success" | "warning" | "muted" = biblioSmithBusy ? "warning" : repoReady ? "success" : "muted";
-  // A ready repo with no commit list yet has no timestamp to show. This used to
-  // call commitDate(undefined) on purpose, which returned a hardcoded date the
-  // card then presented as the project's real last-updated time.
-  const latestBiblioSmithUpdated = firstCommit
-    ? commitDate(firstCommit)
-    : repoReady
-      ? UNKNOWN_VALUE
-      : unavailableRepoLabel;
-  const biblioSmithPrimaryLabel = repoReady ? copy.openBooks : repoCanAutoPrepare ? copy.prepareProject : copy.changeProjectPath;
-  const BiblioSmithPrimaryIcon = repoReady ? FolderOpen : repoCanAutoPrepare ? Download : FolderOpen;
-  const biblioSmithSecondaryLabel = repoReady ? copy.viewProject : repoCanAutoPrepare ? copy.changeProjectPath : copy.viewProject;
-  const biblioSmithSecondaryIcon = FolderOpen;
-  const biblioSmithMoreLabel = repoReady ? copy.updateBiblioSmithProject : repoCanAutoPrepare ? copy.prepareProject : copy.changeProjectPath;
-  const showingBiblioSmithDownloadHud = biblioSmithDownloadState !== "idle" && !biblioSmithDownloadDismissed;
-  const biblioSmithProgressLabel = formatDownloadProgress(copy, biblioSmithProgress);
-  const biblioSmithHudMessage = biblioSmithDownloadMessage || biblioSmithProgressLabel || copy.biblioSmithProgressDefault;
-  const nodeModulesProgressLabel = formatDownloadProgress(copy, nodeModulesProgress);
-  const nodeModulesHudMessage = nodeModulesDownloadMessage || nodeModulesProgressLabel || copy.nodeModulesInstalling;
-  const runtimeProgressLabel = formatDownloadProgress(copy, runtimeProgress);
-
-  const visibleActivities = useMemo(() => activities.slice(0, 5), [activities]);
-
-  const biblioSmithCard: ProductCardProps = {
-    accent: "blue",
-    icon: BookOpen,
-    title: copy.biblioSmithTitle,
-    subtitle: copy.biblioSmithSubtitle,
-    current: currentBiblioSmithVersion,
-    latest: latestBiblioSmithVersion,
-    status: biblioSmithStatus,
-    statusTone: biblioSmithStatusTone,
-    latestUpdated: latestBiblioSmithUpdated,
-    primaryLabel: biblioSmithPrimaryLabel,
-    primaryIcon: BiblioSmithPrimaryIcon,
-    secondaryLabel: biblioSmithSecondaryLabel,
-    secondaryIcon: biblioSmithSecondaryIcon,
-    busy: busy === "repo-choose",
-    busyText: copy.working,
-    onPrimary: repoReady ? doOpenBooksFolder : repoCanAutoPrepare ? prepareBiblioSmith : chooseRepo,
-    onSecondary: repoReady ? doOpenRepoFolder : repoCanAutoPrepare ? chooseRepo : doOpenRepoFolder,
-    onMore: repoReady ? syncBiblioSmithNow : repoCanAutoPrepare ? prepareBiblioSmith : chooseRepo,
-    moreLabel: biblioSmithMoreLabel,
-    moreBusy: biblioSmithSyncing,
-    moreDisabled: biblioSmithSyncing,
-    copy,
-  };
-
-  if (runtimeBootstrapBlocking) {
-    return (
-      <RuntimeBootstrapScreen
-        copy={copy}
-        state={runtimeBootstrapState}
-        progress={runtimeProgress}
-        message={runtimeBootstrapMessage || runtimeProgressLabel || copy.runtimeBootstrapChecking}
-        onRetry={retryRuntimePrepare}
-        onContinue={continueAfterRuntimeBootstrap}
-      />
-    );
-  }
-
   return (
     <div className="launcher-frame">
       <Titlebar
-        copy={copy}
         version={LAUNCHER_VERSION}
-        proxyConfigured={Boolean(state?.proxyConfigured)}
-        autoStart={settings.autoStart}
-        projectReady={repoReady}
-        projectStatusValue={biblioSmithStatus}
-        quickActionsOpen={quickActionsOpen}
-        onToggleQuickActions={() => setQuickActionsOpen((value) => !value)}
-        onSelectRepo={() => {
-          setQuickActionsOpen(false);
-          void chooseRepo();
-        }}
-        onOpenRepo={() => {
-          setQuickActionsOpen(false);
-          void doOpenRepoFolder();
-        }}
-        onOpenBooks={() => {
-          setQuickActionsOpen(false);
-          void doOpenBooksFolder();
-        }}
+        settingsLabel={copy.settingsTitle}
+        settingsActive={settingsOpen}
+        onToggleSettings={() => (settingsOpen ? closeSettings() : setSettingsOpen(true))}
       />
 
       <main className="app-shell">
-        <Sidebar
-          copy={copy}
-          pipelineNavLabel={bookPipelineCopy.nav}
-          version={LAUNCHER_VERSION}
-          activeTab={activeTab}
-          pipelineLoading={pipelineBusy === "loading"}
-          updateAvailable={Boolean(biblioSmithUpdate?.hasUpdate)}
-          onSelectTab={setActiveTab}
-        />
+        <section className={settingsOpen ? "workspace settings-open" : "workspace"}>
+          <FloatingFeedback toast={floatingToast} />
 
-        <section className="workspace">
-          <FloatingFeedback
-            toast={floatingToast}
-            biblioSmithVisible={showingBiblioSmithDownloadHud}
-            biblioSmithTitle={copy.biblioSmithProgressTitle}
-            biblioSmithState={biblioSmithDownloadState}
-            biblioSmithProgress={biblioSmithProgress}
-            biblioSmithMessage={biblioSmithHudMessage}
-            copy={copy}
-            onStopBiblioSmith={() => void stopBiblioSmithDownload(false)}
-            onCancelBiblioSmith={() => void stopBiblioSmithDownload(true)}
-            onRetryBiblioSmith={retryBiblioSmithDownload}
-            onCloseBiblioSmith={closeBiblioSmithDownloadHud}
-          />
-
-          {activeTab === "overview" && (
-            <OverviewPage
-              copy={copy}
-              pipelineCopy={bookPipelineCopy}
-              projectStatusLine={repoReady ? copy.running : biblioSmithStatus}
-              biblioSmithCard={biblioSmithCard}
-              biblioSmithUpdateAvailable={Boolean(biblioSmithUpdate?.hasUpdate)}
-              visibleActivities={visibleActivities}
-              pipelineState={pipelineState}
-              onViewLogs={() => setActiveTab("logs")}
-              onOpenPipeline={() => setActiveTab("pipeline")}
-              onGoUpdates={() => setActiveTab("updates")}
-            />
-          )}
-
-          {activeTab === "updates" && (
-            <UpdatesPage
-              copy={copy}
-              biblioSmithCard={biblioSmithCard}
-              launcherVersion={LAUNCHER_VERSION}
-              commits={commits}
-              displayedCommits={displayedCommits}
-              latestBiblioSmithVersion={latestBiblioSmithVersion}
-              showAllCommits={showAllCommits}
-              commitEmptyMessage={repoReady ? copy.noCommits : copy.noCommitsUnavailable}
-              refreshInProgress={refreshInProgress}
-              lastRefreshAt={lastRefreshAt}
-              onToggleShowAllCommits={() => setShowAllCommits((value) => !value)}
-              onCheckAll={() => void refreshAllStatus()}
-            />
-          )}
-
-          {activeTab === "tutorial" && (
-            <GuidePage
-              copy={copy}
-              kind={tutorialKind}
-              document={tutorialDoc}
-              loading={tutorialLoading}
-              canGoBack={tutorialHistory.length > 0}
-              repoReady={repoReady}
-              unavailableTitle={copy.workspaceUnavailableTitle}
-              unavailableDescription={workspaceUnavailableDescription}
-              unavailableHelp={workspaceUnavailableHelp}
-              recoverLabel={repoCanAutoPrepare ? copy.prepareProject : copy.changeProjectPath}
-              onRecover={repoCanAutoPrepare ? prepareBiblioSmith : chooseRepo}
-              onChangeProject={chooseRepo}
-              onSelect={(kind) => void loadTutorial(kind)}
-              onBack={goBackTutorial}
-              onOpenLink={(href) => void openTutorialLink(href)}
-            />
-          )}
-
-          {activeTab === "pipeline" && (
+          {(
             <PipelineWorkbench
               copy={bookPipelineCopy}
               state={pipelineState}
@@ -1987,8 +835,6 @@ export default function App() {
               onPreview={() => void previewPipeline()}
               onQueueRun={queueAndRunPipeline}
               onChooseFolder={() => void choosePipelinePdfFolder()}
-              onChooseMarkdown={() => void choosePipelineMarkdownSource()}
-              onDiscoverZotero={() => void discoverPipelineZoteroSources()}
               onSearchZotero={(query) => void discoverZoteroByQuery(query)}
               onRetry={(jobId) => void retryPipeline(jobId)}
               onDelete={(jobId, childId) => void deletePipeline(jobId, childId)}
@@ -2001,16 +847,12 @@ export default function App() {
               onApplySampleProvider={(jobId, childId, providerProfileId, providerConfigId) =>
                 void applyPipelineTranslationProvider(jobId, childId, providerProfileId, providerConfigId)
               }
-              onExportDiagnostic={(jobId, profile) => void exportPipelineDiagnostic(jobId, profile)}
               onSaveCustomInstructions={(jobId, childId, customInstructions) =>
                 void savePipelineCustomInstructions(jobId, childId, customInstructions)
               }
               onApproveGate={(jobId, childId, stageId) => void approvePipelineGate(jobId, childId, stageId)}
               onRouteOverride={(jobId, childId, routeItemId, routeOverride) =>
                 void overridePipelineRoute(jobId, childId, routeItemId, routeOverride)
-              }
-              onRecordReaderEvidence={(jobId, childId, artifactKind, reader, readerVersion, conclusion) =>
-                void recordReaderEvidence(jobId, childId, artifactKind, reader, readerVersion, conclusion)
               }
               onOpenOutput={(jobId) => void openPipelineOutput(jobId)}
               routeOverrides={pipelineRouteOverrides}
@@ -2019,40 +861,25 @@ export default function App() {
             />
           )}
 
-          {activeTab === "settings" && (
-            <SettingsPage
+          {settingsOpen && (
+            <SettingsOverlay
               copy={copy}
               locale={locale}
               languageSetting={languageSetting}
               onLanguageChange={updateLanguageSetting}
               settings={settings}
-              repoPath={repoPath}
               proxySettings={proxySettings}
               proxyBusy={proxyBusy}
               proxyTestResult={proxyTestResult}
-              runtimeStatus={runtimeStatus}
-              nodeModulesStatus={nodeModulesStatus}
-              nodeModulesProgress={nodeModulesProgress}
-              nodeModulesDownloadState={nodeModulesDownloadState}
-              nodeModulesMessage={nodeModulesHudMessage}
-              diagnosticLogSettings={diagnosticLogSettings}
               onUpdateSetting={updateSetting}
-              onChooseRepo={() => void chooseRepo()}
               onProxyChange={updateProxySettingsDraft}
               onProxyTest={() => void doTestProxySettings()}
               onProxyAutoDetect={() => void doAutoDetectProxySettings(true, false)}
-              onRuntimeRetry={retryRuntimePrepare}
-              onNodeModulesToggle={(value) => void updateAutoInstallNodeModules(value)}
-              onNodeModulesStop={() => void stopNodeModulesInstall(false)}
-              onNodeModulesCancel={() => void stopNodeModulesInstall(true)}
-              onExportLogs={() => void doExportLauncherLogs()}
+              onClose={closeSettings}
             />
           )}
-
-          {activeTab === "logs" && <LogsPage copy={copy} activities={activities} />}
         </section>
       </main>
-      <ConfirmDialog dialog={confirmDialog} onCancel={() => resolveConfirmDialog(false)} onConfirm={() => resolveConfirmDialog(true)} />
     </div>
   );
 }
