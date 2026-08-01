@@ -4787,7 +4787,9 @@ pub fn run() {
             book_pipeline::save_book_pipeline_diagnostic,
             book_pipeline::open_book_pipeline_output,
             book_pipeline::read_book_pipeline_artifact_excerpt,
-            book_pipeline::read_book_pipeline_translation_sample
+            book_pipeline::read_book_pipeline_translation_sample,
+            book_pipeline::run_book_pipeline_ocr_sample,
+            book_pipeline::read_book_pipeline_ocr_sample
         ])
         .build(tauri::generate_context!())
         .expect("error while running BiblioSmith Launcher")
