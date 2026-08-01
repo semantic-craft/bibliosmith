@@ -26,6 +26,20 @@ pub(crate) const ITEM_INDEX_PROFILE_COMMAND_LABEL: &str = "Zotero item index pro
 pub(crate) const ZOTERO_COLLECTION_SNAPSHOT_COMMAND_LABEL: &str = "Zotero collection snapshot";
 pub(crate) const ZOTERO_COLLECTION_SNAPSHOT_SCHEMA: &str = "zotero-collection-snapshot-v1";
 pub(crate) const ZOTERO_CONVERSION_COMMAND_LABEL: &str = "Zotero conversion worker";
+pub(crate) const ZOTERO_ATTACH_COMMAND_LABEL: &str = "Zotero attachment upload";
+/// Exit codes `zsearch` uses for its typed error categories (runtime, auth,
+/// validation, not-found, network, conflict). The attach command accepts them
+/// so it can fail with the CLI's own reason -- which the agent contract writes
+/// to stdout, not stderr -- instead of a bare exit status. A code outside this
+/// set, or a run that emits no envelope, still fails as an unexplained crash.
+pub(crate) const ZOTERO_ATTACH_ACCEPTED_EXIT_CODES: [i32; 7] = [0, 1, 2, 3, 4, 5, 6];
+/// Finished books that can be pushed back into Zotero as imported-file
+/// attachments. Deliberately not every artifact: intermediate chapter files and
+/// reports are working state, and the Markdown the conversion worker already
+/// uploaded has its own attachment. BabelDOC's bilingual PDF joins this list
+/// with the kind that ships alongside it (#99).
+pub(crate) const ZOTERO_ATTACHABLE_ARTIFACT_KINDS: [&str; 3] =
+    ["reading_epub", "reading_bilingual_epub", "reading_html"];
 pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_SCHEMA: &str =
     "zotero-worker-attachment-evidence-v1";
 pub(crate) const ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION: &str = "zotero-worker-extraction-v1";

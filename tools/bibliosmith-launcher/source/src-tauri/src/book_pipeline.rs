@@ -937,7 +937,17 @@ fn enrich_artifact(
         pdf_attachment_key: (source.kind == "zotero_attachment")
             .then(|| source.selector.clone())
             .flatten(),
-        markdown_attachment_key: artifact.zotero_key.clone(),
+        // `zotero_key` carries two different facts depending on the artifact.
+        // On the extracted Markdown and everything derived from it, it names
+        // the Markdown attachment the content came from -- which is what this
+        // field is for. On a finished book pushed back into the library it
+        // names that book's *own* attachment, and copying it here would both
+        // mislabel it and, because `sourceRefs` is one of the fields the state
+        // file refuses to see change, make the write-back unsaveable.
+        markdown_attachment_key: (!ZOTERO_ATTACHABLE_ARTIFACT_KINDS
+            .contains(&artifact.kind.as_str()))
+        .then(|| artifact.zotero_key.clone())
+        .flatten(),
         source_ref_sha256,
     };
     if artifact.privacy.is_empty() {
@@ -3032,6 +3042,35 @@ pub async fn read_book_pipeline_ocr_sample(
             .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
         let sample_dir = ocr_sample_dir(&store, &job_id, &child_id);
         read_ocr_sample_report(job, &child_id, &sample_dir)
+    })
+    .await
+}
+
+/// Put a finished book back into Zotero, under the item it was made from.
+///
+/// `replace_existing` is the deliberate second click: an artifact that already
+/// carries an attachment key is refused without it, because Zotero would take
+/// a rebuilt EPUB as a new file and end up holding two of the same book.
+#[tauri::command]
+pub async fn attach_book_pipeline_artifact_to_zotero(
+    job_id: String,
+    artifact_id: String,
+    replace_existing: Option<bool>,
+) -> Result<BookPipelineJob, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let mut allowed_roots = vec![store.job_output_dir(&job_id)];
+        if let Ok(repo_root) = local_reading_repo_root() {
+            allowed_roots.push(repo_root.join("books").join("local"));
+        }
+        attach_artifact_to_zotero_with_executor(
+            &store,
+            &job_id,
+            &artifact_id,
+            replace_existing.unwrap_or(false),
+            &allowed_roots,
+            &SystemCommandExecutor,
+        )
     })
     .await
 }
@@ -6661,6 +6700,16 @@ fn inject_embedding_credential(command: &mut RunnerCommand) {
 /// paddle-ocr and missing-paddleocr-token routes by looking at these vars.
 fn inject_ocr_credentials(command: &mut RunnerCommand) {
     for (key_env, value) in crate::ocr_settings::resolve_credential_env() {
+        command.env.push((key_env, value));
+    }
+}
+
+/// Inject the Keychain-stored Zotero Web API credentials into a `zsearch`
+/// write command. A no-op when nothing is stored; the CLI's own repo-root
+/// `.env` lookup remains the fallback, and it never overrides an injected
+/// variable.
+fn inject_zotero_credentials(command: &mut RunnerCommand) {
+    for (key_env, value) in crate::zotero_settings::resolve_credential_env() {
         command.env.push((key_env, value));
     }
 }
@@ -11331,6 +11380,238 @@ fn run_ocr_sample_with_executor(
         let _ = fs::remove_file(previous_path);
     }
     Ok(result)
+}
+
+/// The success envelope `zsearch add file` emits in agent mode.
+#[derive(Debug, Deserialize)]
+struct ZoteroAttachEnvelope {
+    ok: bool,
+    #[serde(default)]
+    data: Option<ZoteroAttachEvidence>,
+    #[serde(default)]
+    error: Option<ZoteroAttachEnvelopeError>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ZoteroAttachEvidence {
+    attachment_key: String,
+    #[serde(default)]
+    parent_item_key: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZoteroAttachEnvelopeError {
+    message: String,
+}
+
+fn build_zotero_attach_command(
+    artifact_path: &Path,
+    parent_item_key: &str,
+) -> Result<RunnerCommand, String> {
+    let repo_root = local_reading_repo_root()?;
+    Ok(RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: ZOTERO_ATTACH_COMMAND_LABEL.into(),
+        program: PathBuf::from("uv"),
+        args: vec![
+            "run".into(),
+            "--package".into(),
+            "zotero-cli-agent".into(),
+            "zsearch".into(),
+            "add".into(),
+            "file".into(),
+            display_path(artifact_path),
+            "--parent".into(),
+            parent_item_key.into(),
+        ],
+        // Asked for rather than inferred from stdout being a pipe: what the
+        // launcher reads back is the machine envelope, and a machine-facing
+        // caller should not depend on tty detection to get it.
+        env: vec![("ZSEARCH_FORMAT".into(), "json".into())],
+        cwd: Some(repo_root.clone()),
+        output_dir: repo_root,
+        attempts: 1,
+        accepted_exit_codes: ZOTERO_ATTACH_ACCEPTED_EXIT_CODES.into(),
+    })
+}
+
+/// The Zotero item the finished book belongs under.
+///
+/// Three sources because the pipeline records the parent in three shapes. A
+/// collection child freezes an attachment identity, which `derive_job` stamps
+/// onto every artifact it produces -- reading output included. A job queued
+/// against a single Zotero item has no frozen identity, so its reading
+/// artifacts carry none either, and the parent survives only where the
+/// conversion worker wrote it: the extracted Markdown's frontmatter, which
+/// `markdown_parent_item_key` falls back to. A book from a local file has no
+/// parent at all, and picking one is the UI's job, not this function's.
+fn attach_parent_item_key(
+    job: &BookPipelineJob,
+    artifact: &BookPipelineArtifact,
+) -> Option<String> {
+    non_empty(artifact.source_refs.parent_item_key.as_deref())
+        .map(str::to_string)
+        .or_else(|| {
+            job.children
+                .iter()
+                .filter(|child| child.removed_at.is_none())
+                .find_map(|child| {
+                    child
+                        .source_identity
+                        .as_ref()
+                        .map(|identity| identity.parent_item_key.clone())
+                })
+        })
+        .or_else(|| {
+            job.artifacts
+                .iter()
+                .chain(job.children.iter().flat_map(|child| child.artifacts.iter()))
+                .filter(|candidate| candidate.kind == "markdown")
+                .find_map(markdown_parent_item_key)
+        })
+        .filter(|parent_item_key| !parent_item_key.trim().is_empty())
+}
+
+fn find_job_artifact_mut<'a>(
+    job: &'a mut BookPipelineJob,
+    artifact_id: &str,
+) -> Option<&'a mut BookPipelineArtifact> {
+    job.artifacts
+        .iter_mut()
+        .chain(
+            job.children
+                .iter_mut()
+                .flat_map(|child| child.artifacts.iter_mut()),
+        )
+        .chain(
+            job.collection_items
+                .iter_mut()
+                .flat_map(|item| item.artifacts.iter_mut()),
+        )
+        .find(|artifact| artifact.artifact_id == artifact_id)
+}
+
+/// Put one finished book into the user's Zotero library as an imported-file
+/// attachment under the item it was made from, and record the attachment key
+/// on the artifact.
+///
+/// That key is the only thing standing between one click and a library full of
+/// duplicates: Zotero deduplicates uploaded *bytes* by MD5, so a rebuilt EPUB
+/// -- which differs in its timestamps alone -- is a new file to it and would
+/// attach again quite happily. Hence `replace_existing`: re-attaching an
+/// artifact that already has a key has to be asked for.
+fn attach_artifact_to_zotero_with_executor(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    artifact_id: &str,
+    replace_existing: bool,
+    allowed_roots: &[PathBuf],
+    executor: &dyn RunnerCommandExecutor,
+) -> Result<BookPipelineJob, String> {
+    let mut state = store.load()?;
+    let job_index = find_job_index(&state, job_id)?;
+    let job = &state.jobs[job_index];
+    let artifact = find_job_artifact(job, artifact_id)
+        .ok_or_else(|| "This artifact is not registered on this job.".to_string())?;
+    if !ZOTERO_ATTACHABLE_ARTIFACT_KINDS.contains(&artifact.kind.as_str()) {
+        return Err(format!(
+            "{} is not a finished book; only {} can be attached to Zotero.",
+            artifact.kind,
+            ZOTERO_ATTACHABLE_ARTIFACT_KINDS.join(", ")
+        ));
+    }
+    if let Some(existing) = non_empty(artifact.zotero_key.as_deref()) {
+        if !replace_existing {
+            return Err(format!(
+                "This artifact is already attached to Zotero as {existing}. Attaching it again would add a second copy."
+            ));
+        }
+    }
+    let parent_item_key = attach_parent_item_key(job, artifact)
+        .ok_or_else(|| "This book has no Zotero parent item to attach to.".to_string())?;
+
+    // The state file names the path, so the allowlist is what keeps a tampered
+    // artifact record from uploading some unrelated file to a Zotero library.
+    let path =
+        fs::canonicalize(&artifact.path).map_err(|_| "The built file is missing.".to_string())?;
+    if !allowed_roots.iter().any(|allowed_root| {
+        fs::canonicalize(allowed_root)
+            .ok()
+            .is_some_and(|allowed_root| path.starts_with(allowed_root))
+    }) {
+        return Err("The built file is outside the job/project allowlist.".into());
+    }
+    let expected_sha256 = artifact
+        .sha256
+        .as_deref()
+        .ok_or_else(|| "The built file has no SHA-256 to check it against.".to_string())?;
+    if sha256_file(&path)? != expected_sha256 {
+        return Err("The built file changed after it was registered.".into());
+    }
+
+    let mut command = build_zotero_attach_command(&path, &parent_item_key)?;
+    inject_zotero_credentials(&mut command);
+    let command_result = executor
+        .execute(&command)
+        .map_err(|error| redact_runner_message(&format!("Zotero attach failed: {error}")))?;
+    let evidence = read_zotero_attach_evidence(&command_result, &parent_item_key, &path)?;
+
+    let job = &mut state.jobs[job_index];
+    let artifact = find_job_artifact_mut(job, artifact_id)
+        .ok_or_else(|| "This artifact is not registered on this job.".to_string())?;
+    let artifact_kind = artifact.kind.clone();
+    artifact.zotero_key = Some(evidence.attachment_key.clone());
+    job.current_step = "Attached the finished book to Zotero".into();
+    job.log_summary
+        .extend(redact_log_lines(&command_result.log_summary));
+    job.log_summary.push(format!(
+        "Attached {artifact_kind} to Zotero item {parent_item_key} as attachment {}",
+        evidence.attachment_key
+    ));
+    job.log_summary = trim_log_summary(&job.log_summary);
+    job.updated_at = now_label();
+    derive_job(job);
+    let result = job.clone();
+    store.save(&state)?;
+    Ok(result)
+}
+
+/// `zsearch` writes its typed failures to stdout as an envelope rather than to
+/// stderr, so the reason a one-click attach did not happen -- no API key yet,
+/// a parent item that no longer exists -- only reaches the user from here.
+fn read_zotero_attach_evidence(
+    command_result: &RunnerCommandResult,
+    parent_item_key: &str,
+    path: &Path,
+) -> Result<ZoteroAttachEvidence, String> {
+    let envelope: ZoteroAttachEnvelope = serde_json::from_str(command_result.stdout.trim())
+        .map_err(|_| "Zotero attach returned no result.".to_string())?;
+    if !envelope.ok {
+        let reason = envelope
+            .error
+            .map(|error| error.message)
+            .unwrap_or_else(|| "no reason given".into());
+        return Err(redact_runner_message(&format!(
+            "Zotero refused the attachment: {reason}"
+        )));
+    }
+    let evidence = envelope
+        .data
+        .ok_or_else(|| "Zotero attach reported success with no attachment.".to_string())?;
+    if clean_zotero_key(&evidence.attachment_key).as_deref() != Some(&evidence.attachment_key) {
+        return Err("Zotero attach returned an invalid attachment key.".into());
+    }
+    // What came back has to be what was asked for: a mismatch means the key
+    // about to be recorded belongs to some other item's attachment.
+    if evidence.parent_item_key.as_deref() != Some(parent_item_key)
+        || evidence.filename.as_deref() != path.file_name().and_then(|filename| filename.to_str())
+    {
+        return Err("Zotero attach evidence does not match the requested upload.".into());
+    }
+    Ok(evidence)
 }
 
 fn read_ocr_sample_report(

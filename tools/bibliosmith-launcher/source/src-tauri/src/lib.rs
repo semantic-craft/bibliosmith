@@ -25,6 +25,7 @@ mod book_pipeline;
 mod embedding_settings;
 mod model_settings;
 mod ocr_settings;
+mod zotero_settings;
 
 const BIBLIOSMITH_HOME_ENV: &str = "BIBLIOSMITH_HOME";
 const BIBLIOSMITH_PYTHON_ENV: &str = "BIBLIOSMITH_PYTHON";
@@ -4746,6 +4747,9 @@ pub fn run() {
             ocr_settings::save_ocr_credential,
             ocr_settings::delete_ocr_credential,
             ocr_settings::test_ocr_connection,
+            zotero_settings::get_zotero_credentials_status,
+            zotero_settings::save_zotero_credential,
+            zotero_settings::delete_zotero_credential,
             get_runtime_status,
             start_runtime_prepare,
             get_node_modules_status,
@@ -4789,7 +4793,8 @@ pub fn run() {
             book_pipeline::read_book_pipeline_artifact_excerpt,
             book_pipeline::read_book_pipeline_translation_sample,
             book_pipeline::run_book_pipeline_ocr_sample,
-            book_pipeline::read_book_pipeline_ocr_sample
+            book_pipeline::read_book_pipeline_ocr_sample,
+            book_pipeline::attach_book_pipeline_artifact_to_zotero
         ])
         .build(tauri::generate_context!())
         .expect("error while running BiblioSmith Launcher")

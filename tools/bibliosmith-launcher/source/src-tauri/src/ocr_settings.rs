@@ -82,7 +82,10 @@ fn env_file_declares(content: &str, keys: &[&str]) -> bool {
     })
 }
 
-fn env_fallback_declares(keys: &[&str]) -> bool {
+/// Shared with `zotero_settings`: both panels have to tell a person whether a
+/// credential is already coming from the repository-root `.env`, and the
+/// worker/CLI both read that file the same way.
+pub(crate) fn env_fallback_declares(keys: &[&str]) -> bool {
     let Ok(repo_root) = translation_engine_repo_root() else {
         return false;
     };
