@@ -10985,7 +10985,6 @@ fn read_translation_sample_report(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BookPipelineOcrSampleReport {
     schema: String,
-    source_pdf_sha256: String,
     total_pages: u32,
     sampled_pages: Vec<u32>,
     character_budget: usize,
@@ -10999,7 +10998,6 @@ pub struct BookPipelineOcrSampleEngine {
     status: String,
     markdown_excerpt: String,
     character_count: usize,
-    page_count: Option<u32>,
     elapsed_ms: u64,
     error: Option<String>,
 }
@@ -11086,7 +11084,6 @@ fn ocr_sample_dir(store: &dyn BookPipelineStateStore, job_id: &str, child_id: &s
 fn build_ocr_sample_command(
     manifest_path: &Path,
     sample_dir: &Path,
-    attempts: u32,
 ) -> Result<RunnerCommand, String> {
     let root = book_ocr_conversion_root();
     let script = root.join("sample_compare.py");
@@ -11106,7 +11103,9 @@ fn build_ocr_sample_command(
         env: Vec::new(),
         cwd: Some(root),
         output_dir: sample_dir.to_path_buf(),
-        attempts,
+        // Only the fake-command runner reads this, and the OCR sample is always
+        // a real process.
+        attempts: 0,
         accepted_exit_codes: vec![0],
     })
 }
@@ -11249,12 +11248,7 @@ fn run_ocr_sample_with_executor(
     let manifest_path = sample_dir.join(format!("manifest-{run_tag}.json"));
     fs::write(&manifest_path, manifest_json).map_err(|err| err.to_string())?;
 
-    let attempts = child
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.kind == "ocr_sample_report")
-        .count() as u32;
-    let mut command = build_ocr_sample_command(&manifest_path, &sample_dir, attempts)?;
+    let mut command = build_ocr_sample_command(&manifest_path, &sample_dir)?;
     inject_ocr_credentials(&mut command);
     let command_result = match executor.execute(&command) {
         Ok(result) => {

@@ -20,7 +20,6 @@ of the user's book, which the caller's run log is not the place for.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -56,7 +55,6 @@ class EngineOutcome:
     """One engine's answer for the sampled pages."""
 
     markdown: str
-    page_count: int | None = None
 
 
 # (sample_pdf, work_dir) -> EngineOutcome. Injected by the tests so the offline
@@ -92,15 +90,7 @@ def select_internal_pages(total_pages: int, count: int) -> list[int]:
     return [pages[index] for index in selected_indices]
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def paddle_markdown_from_jsonl(jsonl_text: str) -> tuple[str, int]:
+def paddle_markdown_from_jsonl(jsonl_text: str) -> str:
     """Concatenate the per-page Markdown out of a PaddleOCR result stream.
 
     The same fields paddle.write_outputs writes to disk, minus the referenced
@@ -119,7 +109,7 @@ def paddle_markdown_from_jsonl(jsonl_text: str) -> tuple[str, int]:
         result = payload.get("result", payload)
         for entry in result.get("layoutParsingResults", []):
             pages.append((entry.get("markdown") or {}).get("text", ""))
-    return "\n\n".join(pages), len(pages)
+    return "\n\n".join(pages)
 
 
 def run_paddleocr_sample(sample_pdf: Path, work_dir: Path) -> EngineOutcome:
@@ -130,18 +120,12 @@ def run_paddleocr_sample(sample_pdf: Path, work_dir: Path) -> EngineOutcome:
     # defaults -- model, endpoint and timeouts -- instead of a second copy that
     # can drift away from the run the sample is meant to preview.
     args = paddle.build_parser().parse_args([str(sample_pdf)])
-    args.output_dir = str(work_dir)
     headers = {"Authorization": f"bearer {token}"}
     optional_payload = dict(paddle.DEFAULT_OPTIONAL_PAYLOAD)
     job_id = paddle.submit_job(args, headers, optional_payload)
     json_url = paddle.poll_json_url(args, headers, job_id)
     jsonl_text = paddle.download_jsonl(json_url, args.timeout_seconds)
-    work_dir.mkdir(parents=True, exist_ok=True)
-    # Scratch, like everything else under work_dir: the caller removes the tree
-    # once the report is written.
-    (work_dir / "paddleocr.jsonl").write_text(jsonl_text, encoding="utf-8")
-    markdown, pages = paddle_markdown_from_jsonl(jsonl_text)
-    return EngineOutcome(markdown=markdown, page_count=pages)
+    return EngineOutcome(markdown=paddle_markdown_from_jsonl(jsonl_text))
 
 
 def run_mineru_sample(sample_pdf: Path, work_dir: Path) -> EngineOutcome:
@@ -172,8 +156,7 @@ def run_mineru_sample(sample_pdf: Path, work_dir: Path) -> EngineOutcome:
     parts = mineru.download_results(args, batch_id, results, [item])
     if not parts:
         raise SampleCompareError("mineru returned no Markdown for the sampled pages")
-    markdown = parts[0].markdown_path.read_text(encoding="utf-8")
-    return EngineOutcome(markdown=markdown, page_count=item.source_pages)
+    return EngineOutcome(markdown=parts[0].markdown_path.read_text(encoding="utf-8"))
 
 
 DEFAULT_ENGINE_RUNNERS: Mapping[str, EngineRunner] = {
@@ -284,7 +267,6 @@ def run_sample_manifest(
 
     report = {
         "schema": REPORT_SCHEMA,
-        "sourcePdfSha256": sha256_file(source_pdf),
         "totalPages": total_pages,
         "sampledPages": selected_pages,
         "characterBudget": character_budget,
@@ -342,7 +324,6 @@ def _run_one_engine(
             "status": "failed",
             "markdownExcerpt": "",
             "characterCount": 0,
-            "pageCount": None,
             "elapsedMs": round((time.monotonic() - started) * 1000),
             "error": redact_engine_error(f"{type(error).__name__}: {error}"),
         }
@@ -352,7 +333,6 @@ def _run_one_engine(
         "status": "ok",
         "markdownExcerpt": markdown[:character_budget],
         "characterCount": len(markdown),
-        "pageCount": outcome.page_count,
         "elapsedMs": round((time.monotonic() - started) * 1000),
         "error": None,
     }
@@ -370,10 +350,11 @@ def main(argv: list[str] | None = None) -> int:
     paddle.load_root_dotenv()
     args = build_parser().parse_args(argv)
     report = run_sample_manifest(Path(args.manifest).expanduser().resolve())
-    # Progress only. The excerpts are pages of the user's book -- the launcher
-    # classifies the report as private text and reads it from disk -- and the
-    # caller captures this stream into its run log, so the report itself must
-    # not travel through it.
+    # For a human running this by hand. Nothing parses stdout: the launcher reads
+    # the report from disk, and its live-progress channel is a file the worker
+    # would have to write at $BIBLIOSMITH_PROGRESS_PATH, which this one does not.
+    # The report stays off this stream either way -- the excerpts are pages of
+    # the user's book, which the caller's run log is not the place for.
     for result in report["engines"]:
         print(
             "engine={} status={} characters={}".format(

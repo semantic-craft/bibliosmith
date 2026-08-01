@@ -80,7 +80,7 @@ class RecordingRunner:
         if self.failure is not None:
             raise self.failure
         return sample_compare.EngineOutcome(
-            markdown=self.markdown, page_count=len(PdfReader(str(sample_pdf)).pages)
+            markdown=self.markdown
         )
 
 
@@ -159,9 +159,6 @@ class RunSampleManifestTests(unittest.TestCase):
         # page count is read through the report because the runners saw the
         # scratch PDF while it existed and this assertion runs after cleanup.
         self.assertEqual(paddle_runner.calls[0][0], mineru_runner.calls[0][0])
-        self.assertEqual(
-            [entry["pageCount"] for entry in report["engines"]], [3, 3]
-        )
         # The bytes each engine received are the pages the report names. A page
         # count alone would not catch an extraction that is off by one, which
         # would bill both APIs for pages the comparison misattributes.
@@ -189,22 +186,8 @@ class RunSampleManifestTests(unittest.TestCase):
         self.assertEqual(engines["paddleocr"]["status"], "ok")
         self.assertEqual(engines["paddleocr"]["markdownExcerpt"], "# Paddle")
         self.assertEqual(engines["paddleocr"]["characterCount"], len("# Paddle"))
-        self.assertEqual(engines["paddleocr"]["pageCount"], 3)
         self.assertIsNone(engines["paddleocr"]["error"])
         self.assertIsInstance(engines["paddleocr"]["elapsedMs"], int)
-
-    def test_the_report_records_the_source_digest(self) -> None:
-        fixture = ManifestFixture(self.root)
-        report = sample_compare.run_sample_manifest(
-            fixture.path,
-            engine_runners={
-                "paddleocr": RecordingRunner("a"),
-                "mineru": RecordingRunner("b"),
-            },
-        )
-        self.assertEqual(
-            report["sourcePdfSha256"], sample_compare.sha256_file(fixture.source_pdf)
-        )
 
     def test_excerpts_honour_the_character_budget(self) -> None:
         fixture = ManifestFixture(self.root, characterBudget=5)
@@ -316,15 +299,6 @@ class RunSampleManifestTests(unittest.TestCase):
             )
         self.assertIn("path_outside_project_root", str(caught.exception))
 
-    def test_scratch_pdfs_do_not_outlive_the_run(self) -> None:
-        fixture = ManifestFixture(self.root)
-        runner = RecordingRunner("# Paddle")
-        sample_compare.run_sample_manifest(
-            fixture.path,
-            engine_runners={"paddleocr": runner, "mineru": RecordingRunner("# MinerU")},
-        )
-        self.assertFalse(runner.calls[0][0].exists())
-
     def test_no_engine_output_survives_the_run(self) -> None:
         # The launcher's conversion stage recursively scans the job output tree
         # for artifacts, and this work directory sits inside it. A surviving
@@ -337,7 +311,7 @@ class RunSampleManifestTests(unittest.TestCase):
             work_dir.mkdir(parents=True, exist_ok=True)
             (work_dir / "part.md").write_text("sampled page text", encoding="utf-8")
             (work_dir / "result.jsonl").write_text("{}", encoding="utf-8")
-            return sample_compare.EngineOutcome(markdown="# Paddle", page_count=3)
+            return sample_compare.EngineOutcome(markdown="# Paddle")
 
         sample_compare.run_sample_manifest(
             fixture.path,
@@ -447,7 +421,6 @@ class ReportContractTests(unittest.TestCase):
                 "engines",
                 "sampledPages",
                 "schema",
-                "sourcePdfSha256",
                 "totalPages",
             ],
         )
@@ -456,7 +429,6 @@ class ReportContractTests(unittest.TestCase):
         # Rust types: String, String, u32, Vec<u32>, usize, Vec<_>. A float or
         # a stringified number here deserializes nowhere.
         self.assertIsInstance(self.report["schema"], str)
-        self.assertIsInstance(self.report["sourcePdfSha256"], str)
         self.assertIsInstance(self.report["totalPages"], int)
         self.assertNotIsInstance(self.report["totalPages"], bool)
         self.assertTrue(all(isinstance(page, int) for page in self.report["sampledPages"]))
@@ -474,7 +446,6 @@ class ReportContractTests(unittest.TestCase):
                     "engine",
                     "error",
                     "markdownExcerpt",
-                    "pageCount",
                     "status",
                 ],
             )
@@ -490,15 +461,10 @@ class ReportContractTests(unittest.TestCase):
                 self.assertIsInstance(entry["elapsedMs"], int)
                 self.assertNotIsInstance(entry["elapsedMs"], bool)
                 self.assertGreaterEqual(entry["elapsedMs"], 0)
-                # Option<u32> / Option<String>: None, never 0 or "".
-                self.assertIn(
-                    type(entry["pageCount"]), (int, type(None)), entry["pageCount"]
-                )
                 if entry["status"] == "ok":
                     self.assertIsNone(entry["error"])
                 else:
                     self.assertIsInstance(entry["error"], str)
-                    self.assertIsNone(entry["pageCount"])
 
 
 class EngineRunnerWiringTests(unittest.TestCase):
@@ -551,7 +517,6 @@ class EngineRunnerWiringTests(unittest.TestCase):
             outcome = sample_compare.run_paddleocr_sample(self.sample_pdf, self.work_dir)
 
         self.assertEqual(outcome.markdown, "page body")
-        self.assertEqual(outcome.page_count, 1)
         self.assertEqual(seen["input"], str(self.sample_pdf))
         self.assertEqual(seen["model"], sample_compare.paddle.DEFAULT_MODEL)
         self.assertEqual(seen["job_url"], sample_compare.paddle.DEFAULT_JOB_URL)
@@ -560,8 +525,6 @@ class EngineRunnerWiringTests(unittest.TestCase):
             seen["optional_payload"], sample_compare.paddle.DEFAULT_OPTIONAL_PAYLOAD
         )
         self.assertEqual(seen["job_id"], "job-1")
-        # The raw engine response is kept beside the report for diagnosis.
-        self.assertTrue((self.work_dir / "paddleocr.jsonl").is_file())
 
     def test_paddleocr_runner_refuses_without_a_token(self) -> None:
         with mock.patch.dict(os.environ, {"BAIDU_PADDLEOCR_TOKEN": ""}, clear=False):
@@ -619,7 +582,6 @@ class EngineRunnerWiringTests(unittest.TestCase):
             outcome = sample_compare.run_mineru_sample(self.sample_pdf, self.work_dir)
 
         self.assertEqual(outcome.markdown, "# MinerU body")
-        self.assertEqual(outcome.page_count, 3)
         self.assertEqual(seen["token"], "mineru-tok")
         # vlm is what the launcher's local-PDF MinerU route already runs.
         self.assertEqual(seen["model_version"], "vlm")
@@ -681,15 +643,13 @@ class PaddleMarkdownTests(unittest.TestCase):
                 {"result": {"layoutParsingResults": [{"markdown": {"text": "page three"}}]}},
             ]
         )
-        markdown, pages = sample_compare.paddle_markdown_from_jsonl(jsonl)
+        markdown = sample_compare.paddle_markdown_from_jsonl(jsonl)
         self.assertEqual(markdown, "page one\n\npage two\n\npage three")
-        self.assertEqual(pages, 3)
 
     def test_blank_lines_and_missing_markdown_are_tolerated(self) -> None:
         jsonl = '\n{"result": {"layoutParsingResults": [{}]}}\n\n'
-        markdown, pages = sample_compare.paddle_markdown_from_jsonl(jsonl)
+        markdown = sample_compare.paddle_markdown_from_jsonl(jsonl)
         self.assertEqual(markdown, "")
-        self.assertEqual(pages, 1)
 
     def test_invalid_jsonl_is_reported_as_a_sample_error(self) -> None:
         with self.assertRaises(sample_compare.SampleCompareError):

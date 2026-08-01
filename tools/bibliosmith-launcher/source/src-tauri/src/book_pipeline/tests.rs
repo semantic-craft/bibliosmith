@@ -12499,7 +12499,6 @@ impl OcrSampleFixtureExecutor {
                     "status": "failed",
                     "markdownExcerpt": "",
                     "characterCount": 0,
-                    "pageCount": serde_json::Value::Null,
                     "elapsedMs": 12,
                     "error": error,
                 });
@@ -12510,7 +12509,6 @@ impl OcrSampleFixtureExecutor {
             "status": "ok",
             "markdownExcerpt": markdown.chars().take(budget).collect::<String>(),
             "characterCount": markdown.chars().count(),
-            "pageCount": 3,
             "elapsedMs": 34,
             "error": serde_json::Value::Null,
         })
@@ -12603,7 +12601,6 @@ impl RunnerCommandExecutor for OcrSampleFixtureExecutor {
             .collect();
         let report = serde_json::json!({
             "schema": OCR_SAMPLE_COMPARE_REPORT_SCHEMA,
-            "sourcePdfSha256": "0".repeat(64),
             "totalPages": self.total_pages,
             "sampledPages": sampled,
             "characterBudget": budget,
@@ -12971,7 +12968,6 @@ fn ocr_sample_report_excerpts_stay_out_of_the_log() {
 fn ocr_sample_report_rejects_a_drifted_shape() {
     let base = BookPipelineOcrSampleReport {
         schema: OCR_SAMPLE_COMPARE_REPORT_SCHEMA.into(),
-        source_pdf_sha256: "0".repeat(64),
         total_pages: 40,
         sampled_pages: vec![10, 20, 30],
         character_budget: OCR_SAMPLE_CHARACTER_BUDGET,
@@ -12981,7 +12977,6 @@ fn ocr_sample_report_rejects_a_drifted_shape() {
                 status: "ok".into(),
                 markdown_excerpt: "paddle".into(),
                 character_count: 6,
-                page_count: Some(3),
                 elapsed_ms: 1,
                 error: None,
             },
@@ -12990,7 +12985,6 @@ fn ocr_sample_report_rejects_a_drifted_shape() {
                 status: "ok".into(),
                 markdown_excerpt: "mineru".into(),
                 character_count: 6,
-                page_count: Some(3),
                 elapsed_ms: 1,
                 error: None,
             },
@@ -13064,7 +13058,6 @@ fn ocr_sample_report_rejects_a_drifted_shape() {
 // so the payload contains the sequence that would close the shorter delimiter.
 const REAL_OCR_SAMPLE_REPORT: &str = r##"{
   "schema": "ocr-sample-compare-report-v1",
-  "sourcePdfSha256": "5b9723f218a7987011368f632c8595572fedee1580411c750f5da0f4f61c61a2",
   "totalPages": 40,
   "sampledPages": [11, 21, 30],
   "characterBudget": 4000,
@@ -13074,7 +13067,6 @@ const REAL_OCR_SAMPLE_REPORT: &str = r##"{
       "status": "ok",
       "markdownExcerpt": "# Paddle heading\n\nPaddle body.",
       "characterCount": 30,
-      "pageCount": 3,
       "elapsedMs": 0,
       "error": null
     },
@@ -13083,7 +13075,6 @@ const REAL_OCR_SAMPLE_REPORT: &str = r##"{
       "status": "failed",
       "markdownExcerpt": "",
       "characterCount": 0,
-      "pageCount": null,
       "elapsedMs": 0,
       "error": "RuntimeError: MINERU_API_TOKEN is not configured"
     }
@@ -13098,7 +13089,6 @@ fn a_real_python_sample_report_deserializes_and_validates() {
     assert_eq!(report.sampled_pages, vec![11, 21, 30]);
     assert_eq!(report.engines[0].engine, OCR_SAMPLE_ENGINE_PADDLEOCR);
     assert_eq!(report.engines[1].engine, OCR_SAMPLE_ENGINE_MINERU);
-    assert_eq!(report.engines[1].page_count, None);
     validate_ocr_sample_report(&report, OCR_SAMPLE_PAGE_COUNT).unwrap();
 }
 
@@ -13359,8 +13349,7 @@ fn ocr_sample_reports_a_worker_that_produced_no_usable_report() {
             Box::new(|path: &Path| {
                 let report = serde_json::json!({
                     "schema": "ocr-sample-compare-report-v0",
-                    "sourcePdfSha256": "0".repeat(64),
-                    "totalPages": 40,
+                            "totalPages": 40,
                     "sampledPages": [11, 21, 30],
                     "characterBudget": OCR_SAMPLE_CHARACTER_BUDGET,
                     "engines": [],
