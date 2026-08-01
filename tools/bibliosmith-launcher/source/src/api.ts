@@ -144,6 +144,21 @@ function previewBookPipelineRoutes(source: BookPipelineSource, mode: string, con
     }];
   }
   if (source.kind === "local_pdf_folder") {
+    // Mirrors the backend: a path that is itself an .epub routes to extraction
+    // and never waits on an OCR credential. The browser cannot stat a folder,
+    // so only the single-file shape is previewable here.
+    if (/\.epub$/i.test(source.path || "")) {
+      return withTranslationHandoff(source, mode, [{
+        id: "local-epub-1",
+        title: source.path?.split(/[/\\]/).pop() || "EPUB",
+        sourceKind: "local_pdf_folder",
+        sourceRef: source.path || "",
+        routeKind: "epub_source",
+        canRun: true,
+        blockedReason: null,
+        summary: "Extract EPUB chapters straight to Markdown through scripts/epub_to_markdown.py; no OCR engine runs.",
+      }]);
+    }
     return withTranslationHandoff(source, mode, [{
       id: "local-pdf-folder",
       title: source.title || "Local PDF folder",
