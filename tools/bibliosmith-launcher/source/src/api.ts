@@ -7,7 +7,6 @@ import {
   BookPipelineCleanupCandidate,
   BookPipelineCleanupPreview,
   BookPipelineCustomInstructions,
-  BookPipelineDiagnosticProfile,
   BookPipelineJob,
   BookPipelinePreviewConfig,
   BookPipelineRouteItem,
