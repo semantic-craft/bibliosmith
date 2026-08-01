@@ -319,7 +319,7 @@ select:focus-visible,
 
 .app-shell {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-columns: 1fr;
   height: calc(100vh - var(--toolbar-h));
   height: calc(100dvh - var(--toolbar-h));
   min-height: 0;
