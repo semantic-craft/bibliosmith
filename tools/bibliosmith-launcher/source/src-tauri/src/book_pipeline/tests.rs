@@ -731,6 +731,10 @@ fn every_converted_book_reaches_the_translation_track() {
         3,
         "each converted book needs its own child"
     );
+    assert_eq!(
+        handed_off.current_stage_id, "children",
+        "a multi-book job must aggregate its children, not mirror the first"
+    );
     let project_roots = handed_off
         .children
         .iter()
@@ -790,6 +794,76 @@ fn each_book_project_is_named_after_its_own_book() {
         );
     }
     assert_eq!(names.len(), 3, "{names:?}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Fails the first book's handoff and lets the rest through.
+struct FirstBookHandoffFailingRunner;
+
+impl TranslationHandoffRunner for FirstBookHandoffFailingRunner {
+    fn handoff(
+        &self,
+        job: &BookPipelineJob,
+        artifact_path: Option<&str>,
+        repo_root: &Path,
+    ) -> Result<TranslationHandoffOutput, String> {
+        if artifact_path.is_some_and(|path| path.contains(MULTI_BOOK_TITLES[0])) {
+            return Err("Fixture handoff failure".into());
+        }
+        LocalProjectHandoffRunner.handoff(job, artifact_path, repo_root)
+    }
+}
+
+#[test]
+fn one_failed_handoff_does_not_strand_the_remaining_books() {
+    let root = temp_root("multi-book-partial-failure");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    for title in MULTI_BOOK_TITLES {
+        fs::write(input.join(format!("{title}.pdf")), "%PDF fixture").unwrap();
+    }
+    let repo = handoff_repo_fixture(&root);
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let finished = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            MultiBookLayoutExecutor,
+            wrapper_root,
+        ),
+        &FirstBookHandoffFailingRunner,
+        &job.id,
+        Some(&repo),
+    )
+    .unwrap();
+
+    // The two books whose handoff succeeded still reached a local project.
+    let projects = finished
+        .children
+        .iter()
+        .filter(|child| child.local_project_root.is_some())
+        .count();
+    assert_eq!(projects, 2, "a failure stranded the books after it");
+    // And the job still reports the failure rather than hiding it.
+    assert_eq!(finished.current_step, "Translation handoff failed");
+    // The parent aggregates over every book instead of mirroring the first, so
+    // one book's failure stays visible however the children happen to be
+    // ordered, and the job cannot report completion while siblings are pending.
+    assert_eq!(finished.current_stage_id, "children");
+    assert_eq!(finished.summary.failed, 1, "{:?}", finished.summary);
+    assert_eq!(finished.summary.ready, 2, "{:?}", finished.summary);
+    assert!(finished
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.contains("Fixture handoff failure")));
     let _ = fs::remove_dir_all(root);
 }
 

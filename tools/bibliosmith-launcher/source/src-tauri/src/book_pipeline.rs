@@ -412,6 +412,12 @@ fn derive_job(job: &mut BookPipelineJob) {
             job.status = aggregate_parent_status(&job.summary);
             job.current_stage_id = "children".into();
         }
+    } else if job.children.len() > 1 {
+        // A local PDF folder splits into one child per converted book. Copying
+        // the first child's state would let the parent report completion while
+        // its siblings are still pending or already failed.
+        job.status = aggregate_parent_status(&job.summary);
+        job.current_stage_id = "children".into();
     } else if let Some(child) = job.children.first() {
         job.status = child.status.clone();
         job.current_stage_id = child.current_stage_id.clone();
@@ -4163,8 +4169,11 @@ fn handoff_job_markdown_with_runner(
         .push("Translation handoff started".into());
     state.jobs[index].updated_at = now_label();
     let execution_owner = store.execution_owner()?;
-    let handoff_child_id = mark_handoff_running(&mut state.jobs[index], execution_owner)
-        .ok_or_else(|| "No completed extraction is ready for translation handoff.".to_string())?;
+    let handoff_child_id =
+        mark_handoff_running(&mut state.jobs[index], execution_owner, &BTreeSet::new())
+            .ok_or_else(|| {
+                "No completed extraction is ready for translation handoff.".to_string()
+            })?;
     store.save(&state)?;
 
     let result = handoff_runner.handoff(&state.jobs[index], artifact_path, repo_root);
@@ -4829,14 +4838,25 @@ fn ensure_translation_stages(child: &mut BookPipelineChildJob, digest_mode: bool
     }
 }
 
-fn mark_handoff_running(job: &mut BookPipelineJob, execution_owner: &str) -> Option<String> {
+/// Start the next child's handoff stage, skipping any child in `attempted`.
+///
+/// A failed handoff leaves the stage `failed`, which this predicate accepts so
+/// a retry can pick it up. Within one run that would re-select the child that
+/// just failed and leave it `running`, so the caller's set of children it has
+/// already tried has to be honoured here, before any state is touched.
+fn mark_handoff_running(
+    job: &mut BookPipelineJob,
+    execution_owner: &str,
+    attempted: &BTreeSet<String>,
+) -> Option<String> {
     let digest_mode = job.digest_mode;
     let index = job.children.iter().position(|child| {
-        child
-            .stages
-            .iter()
-            .find(|stage| stage.stage_id == "extract")
-            .is_some_and(|stage| stage.status == STATUS_COMPLETED)
+        !attempted.contains(&child.id)
+            && child
+                .stages
+                .iter()
+                .find(|stage| stage.stage_id == "extract")
+                .is_some_and(|stage| stage.status == STATUS_COMPLETED)
             && child
                 .stages
                 .iter()
@@ -6270,7 +6290,12 @@ fn run_job_with_handoff_mode(
                 // translation track with nothing saying so.
                 let mut state = state;
                 let mut index = index;
-                let mut handed_off_any = false;
+                // Every failure is kept so the job still reports one, but the
+                // loop carries on: the books are independent, and a child whose
+                // extract already completed cannot be resumed by a retry —
+                // mark_extract_running only picks up `ready` or `failed`
+                // extractions, so an early return would strand them for good.
+                let mut failures: Vec<String> = Vec::new();
                 // A child is handed off at most once per run. The stage status
                 // should already guarantee that, but this loop drives the whole
                 // conversion's return path and must terminate on its own terms.
@@ -6283,9 +6308,9 @@ fn run_job_with_handoff_mode(
                     // re-OCR just to retry a handoff. Persist the run, then
                     // record the handoff as failed.
                     let Some(handoff_child_id) =
-                        mark_handoff_running(&mut state.jobs[index], execution_owner)
+                        mark_handoff_running(&mut state.jobs[index], execution_owner, &attempted)
                     else {
-                        if handed_off_any {
+                        if !attempted.is_empty() {
                             break;
                         }
                         let error = "No completed extraction is ready for translation handoff.";
@@ -6302,9 +6327,7 @@ fn run_job_with_handoff_mode(
                         store.save(&state)?;
                         return Ok(finished);
                     };
-                    if !attempted.insert(handoff_child_id.clone()) {
-                        break;
-                    }
+                    attempted.insert(handoff_child_id.clone());
                     // Hand off this child's own book. Without it every child
                     // would select the job's first Markdown artifact and the
                     // same book would be handed off again and again.
@@ -6334,8 +6357,6 @@ fn run_job_with_handoff_mode(
                         })?;
                     match handoff_result {
                         Ok(handoff) => {
-                            state.jobs[index].current_step = "Translation handoff ready".into();
-                            state.jobs[index].last_error = None;
                             state.jobs[index]
                                 .artifacts
                                 .extend(handoff.artifacts.clone());
@@ -6347,31 +6368,27 @@ fn run_job_with_handoff_mode(
                                 Some(&handoff_child_id),
                                 Ok(&handoff),
                             );
-                            handed_off_any = true;
                         }
                         Err(error) => {
-                            state.jobs[index].current_step = "Translation handoff failed".into();
-                            state.jobs[index].last_error = Some(redact_runner_message(&error));
+                            let redacted = redact_runner_message(&error);
                             state.jobs[index]
                                 .log_summary
-                                .push(redact_runner_message(&format!(
-                                    "Translation handoff failed: {error}"
-                                )));
+                                .push(format!("Translation handoff failed: {redacted}"));
+                            failures.push(redacted);
                             mark_handoff_finished(
                                 &mut state.jobs[index],
                                 Some(&handoff_child_id),
                                 Err(&error),
                             );
-                            // One book failing must not strand the others, but
-                            // the job keeps the failure so the user sees it.
-                            state.jobs[index].log_summary =
-                                trim_log_summary(&state.jobs[index].log_summary);
-                            state.jobs[index].updated_at = now_label();
-                            let finished = state.jobs[index].clone();
-                            store.save(&state)?;
-                            return Ok(finished);
                         }
                     }
+                }
+                if failures.is_empty() {
+                    state.jobs[index].current_step = "Translation handoff ready".into();
+                    state.jobs[index].last_error = None;
+                } else {
+                    state.jobs[index].current_step = "Translation handoff failed".into();
+                    state.jobs[index].last_error = Some(failures.join(" | "));
                 }
                 state.jobs[index].log_summary = trim_log_summary(&state.jobs[index].log_summary);
                 state.jobs[index].updated_at = now_label();
