@@ -641,6 +641,44 @@ impl RunnerCommandExecutor for LocalPdfFixtureExecutor {
     }
 }
 
+// Shaped like the real wrapper output, page-break div included, so the handoff
+// is checked against what pdf_to_html_paddleocr.py actually assembles.
+const PADDLE_WRAPPER_MARKDOWN: &str =
+    "# Sample Book\n\n\n<div class=\"page-break\">— Page 1 —</div>\n\nChapter One\n";
+
+/// Mirrors the on-disk layout of `packages/ocr/scripts/pdf_to_html_paddleocr.py`.
+struct PaddleWrapperLayoutExecutor;
+
+impl RunnerCommandExecutor for PaddleWrapperLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.kind, RunnerCommandKind::Process);
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        let assets_dir = book_dir.join("Sample_Book_assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(book_dir.join("Sample_Book.md"), PADDLE_WRAPPER_MARKDOWN).unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        fs::write(
+            book_dir.join("_state.json"),
+            "{\"markdown_path\":\"Sample_Book.md\"}\n",
+        )
+        .unwrap();
+        fs::write(assets_dir.join("img_1.png"), "png bytes").unwrap();
+        let chunks = command
+            .output_dir
+            .join(".temp")
+            .join("Sample_Book")
+            .join("chunks");
+        fs::create_dir_all(&chunks).unwrap();
+        fs::write(chunks.join("pages-0001-0002.jsonl"), "{\"page\":1}\n").unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Paddle wrapper completed".into()],
+        })
+    }
+}
+
 struct LocalPdfFailingExecutor;
 
 impl RunnerCommandExecutor for LocalPdfFailingExecutor {
@@ -6158,6 +6196,73 @@ fn local_pdf_runner_contract_records_wrapper_artifacts() {
     assert!(log.contains("Runner command prepared: local PDF conversion wrapper"));
     assert!(log.contains("Local PDF fixture wrapper completed"));
     assert!(!log.contains("DONE: sample.pdf -> sample.html"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn local_pdf_paddle_layout_hands_the_wrapper_markdown_to_translation() {
+    let root = temp_root("local-pdf-paddle-handoff");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("Sample Book.pdf"), "%PDF fixture").unwrap();
+    let repo_root = root.join("repo");
+    fs::create_dir_all(repo_root.join("tools")).unwrap();
+    fs::write(repo_root.join("AGENTS.md"), "fixture").unwrap();
+    fs::write(
+        repo_root.join("tools").join("create_local_book_project.py"),
+        "fixture",
+    )
+    .unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    assert!(job
+        .route
+        .iter()
+        .any(|item| item.route_kind == "remote_paddleocr"));
+
+    let completed = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            PaddleWrapperLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo_root),
+    )
+    .unwrap();
+
+    assert_eq!(completed.status, STATUS_READY);
+    assert_eq!(completed.current_step, "Translation handoff ready");
+    assert!(completed.last_error.is_none());
+    let markdown = completed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "markdown")
+        .expect("the wrapper Markdown is registered as a markdown artifact");
+    assert!(
+        markdown.path.ends_with("Sample_Book.md"),
+        "{}",
+        markdown.path
+    );
+    let project_root = PathBuf::from(
+        completed
+            .children
+            .iter()
+            .find_map(|child| child.local_project_root.as_deref())
+            .expect("registered local project root"),
+    );
+    assert_eq!(
+        fs::read_to_string(project_root.join("source").join("source.md")).unwrap(),
+        PADDLE_WRAPPER_MARKDOWN
+    );
     let _ = fs::remove_dir_all(root);
 }
 
