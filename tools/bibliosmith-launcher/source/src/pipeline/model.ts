@@ -79,12 +79,13 @@ export type RouteOverride = "auto" | "direct" | "paddle" | "mineru" | "keep";
 
 export type PipelineDraft = {
   sourceKind: BookPipelineSource["kind"];
+  // The union is the backend contract and keeps its three arms, but the input
+  // island never sets anything other than convert_then_translate: conversion
+  // without translation left the UI with the mode selector, and translate_only
+  // waits on the EPUB input route.
   mode: "conversion_only" | "convert_then_translate" | "translate_only";
-  fakeBehavior: "succeed" | "fail_once" | "always_fail";
   localPdfFolder: string;
   localPdfTitle: string;
-  markdownPath: string;
-  markdownTitle: string;
   translationMode: "fast" | "expert";
   // A provider slot: profile picks the brand/client, config the billing plan.
   // Open strings, not a union, because the set of slots lives in the engine
@@ -95,23 +96,18 @@ export type PipelineDraft = {
   textCleanup: boolean;
   digestMode: boolean;
   outputFormats: BookPipelineOutputFormat[];
-  externalAdapterCommand: string;
-  externalAdapterInput: string;
   zoteroSelector: string;
   hasPaddleocrCredentials: boolean;
   hasMineruCredentials: boolean;
 };
 
-// The wizard only offers local PDF / Zotero / Markdown cards, so the default
-// must be one of them; "fake" would be selectable-by-omission and launchable.
+// The island offers a local PDF folder or a Zotero item, so the default must be
+// one of them; "fake" would be selectable-by-omission and launchable.
 export const defaultPipelineDraft: PipelineDraft = {
   sourceKind: "local_pdf_folder",
-  mode: "conversion_only",
-  fakeBehavior: "succeed",
+  mode: "convert_then_translate",
   localPdfFolder: "",
   localPdfTitle: "Local PDF folder",
-  markdownPath: "",
-  markdownTitle: "Markdown source",
   translationMode: "fast",
   providerProfileId: "openai-compatible",
   providerConfigId: "openai-default",
@@ -119,9 +115,7 @@ export const defaultPipelineDraft: PipelineDraft = {
   textCleanup: false,
   digestMode: false,
   outputFormats: ["md", "html", "epub"],
-  externalAdapterCommand: "",
-  externalAdapterInput: "",
-  zoteroSelector: "reading-queue",
+  zoteroSelector: "",
   hasPaddleocrCredentials: false,
   hasMineruCredentials: true,
 };

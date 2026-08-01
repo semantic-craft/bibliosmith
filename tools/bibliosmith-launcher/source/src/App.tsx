@@ -3,7 +3,6 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
   BOOK_PIPELINE_STATE_SCHEMA_VERSION,
   autoDetectProxySettings,
-  chooseBookPipelineMarkdownSource,
   chooseBookPipelinePdfFolder,
   advanceBookPipelineJob,
   setBookPipelineRouteOverride,
@@ -216,35 +215,15 @@ export default function App() {
     routeOverrides: pipelineRouteOverrides,
   }), [pipelineDraft.hasMineruCredentials, pipelineDraft.hasPaddleocrCredentials, pipelineRouteOverrides]);
 
+  // Two shapes only: the folder the island was given, or the Zotero item picked
+  // from a title search. The fake, external-adapter and Markdown source kinds
+  // stay in the backend contract but no longer have a way in from the UI.
   const buildPipelineSource = useCallback((): BookPipelineSource => {
-    if (pipelineDraft.sourceKind === "fake") {
-      return {
-        kind: "fake",
-        title: "Fake source",
-        selector: "fake://source",
-        runnerBehavior: pipelineDraft.fakeBehavior,
-      };
-    }
     if (pipelineDraft.sourceKind === "local_pdf_folder") {
       return {
         kind: "local_pdf_folder",
         title: pipelineDraft.localPdfTitle || "Local PDF folder",
         path: pipelineDraft.localPdfFolder,
-      };
-    }
-    if (pipelineDraft.sourceKind === "markdown_source") {
-      return {
-        kind: "markdown_source",
-        title: pipelineDraft.markdownTitle || "Markdown source",
-        path: pipelineDraft.markdownPath,
-      };
-    }
-    if (pipelineDraft.sourceKind === "external_adapter") {
-      return {
-        kind: "external_adapter",
-        title: "External adapter",
-        path: pipelineDraft.externalAdapterInput,
-        adapterCommand: pipelineDraft.externalAdapterCommand,
       };
     }
     const discovered = pipelineZoteroSources.find((source) => source.kind === pipelineDraft.sourceKind && source.selector === pipelineDraft.zoteroSelector);
@@ -292,14 +271,13 @@ export default function App() {
     setPipelineBusy("queue");
     try {
       const source = buildPipelineSource();
-      // Fake routes stay zero-cost; real fast routes use the versioned provider
-      // registry IDs introduced by #60.
+      // Fast routes use the versioned provider registry IDs introduced by #60.
+      // Every job now translates, so the flags no longer have to be masked off
+      // for a conversion-only run.
       const translationIntent =
         pipelineDraft.translationMode === "expert"
-          ? { translationMode: "expert" as const, profileId: "expert-agent", configId: "default", skillIds: ["expert-translation-quality"], secondPassEnabled: false, textCleanup: false, digestMode: pipelineDraft.mode !== "conversion_only" && pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
-          : source.kind === "fake"
-            ? { translationMode: "fast" as const, profileId: "fake-provider-profile", configId: "fake-provider-config", skillIds: [], secondPassEnabled: pipelineDraft.mode !== "conversion_only" && pipelineDraft.secondPassEnabled, textCleanup: pipelineDraft.mode !== "conversion_only" && pipelineDraft.textCleanup, digestMode: pipelineDraft.mode !== "conversion_only" && pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
-            : { translationMode: "fast" as const, profileId: pipelineDraft.providerProfileId, configId: pipelineDraft.providerConfigId, skillIds: [], secondPassEnabled: pipelineDraft.mode !== "conversion_only" && pipelineDraft.secondPassEnabled, textCleanup: pipelineDraft.mode !== "conversion_only" && pipelineDraft.textCleanup, digestMode: pipelineDraft.mode !== "conversion_only" && pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats };
+          ? { translationMode: "expert" as const, profileId: "expert-agent", configId: "default", skillIds: ["expert-translation-quality"], secondPassEnabled: false, textCleanup: false, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
+          : { translationMode: "fast" as const, profileId: pipelineDraft.providerProfileId, configId: pipelineDraft.providerConfigId, skillIds: [], secondPassEnabled: pipelineDraft.secondPassEnabled, textCleanup: pipelineDraft.textCleanup, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats };
       const queued = await queueBookPipelineJob(source, pipelineDraft.mode, translationIntent, pipelineConfig);
       setPipelineState((current) => upsertPipelineJob(current, queued));
       setPipelinePreview(queued.route);
@@ -572,61 +550,8 @@ export default function App() {
     }
   }, [addActivity, showFloatingToast]);
 
-  const choosePipelineMarkdownSource = useCallback(async () => {
-    setPipelineBusy("markdown");
-    try {
-      const source = await chooseBookPipelineMarkdownSource();
-      if (!source) return;
-      setPipelineDraft((draft) => ({
-        ...draft,
-        sourceKind: "markdown_source",
-        mode: "translate_only",
-        markdownPath: source.path || "",
-        markdownTitle: source.title || "Markdown source",
-      }));
-      setPipelinePreview([]);
-      addActivity("info", `Selected Markdown source: ${source.path || ""}`);
-    } catch (error) {
-      const message = String(error);
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setPipelineBusy(null);
-    }
-  }, [addActivity, showFloatingToast]);
-
-  const discoverPipelineZoteroSources = useCallback(async () => {
-    setPipelineBusy("zotero");
-    try {
-      const result = await discoverBookPipelineZoteroSources(buildPipelineSource(), 20);
-      setPipelineZoteroSources(result.sources);
-      setPipelinePreview([]);
-      for (const line of result.logSummary.slice(-3)) {
-        addActivity("info", line);
-      }
-      if (result.sources[0]) {
-        setPipelineDraft((draft) => ({
-          ...draft,
-          sourceKind: result.sources[0].kind,
-          zoteroSelector: result.sources[0].selector || result.sources[0].title || draft.zoteroSelector,
-        }));
-      }
-      addActivity("success", `Discovered ${result.sources.length} Zotero source(s)`);
-      showFloatingToast(`Discovered ${result.sources.length} Zotero source(s)`, "success");
-    } catch (error) {
-      const message = String(error);
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setPipelineBusy(null);
-    }
-  }, [addActivity, buildPipelineSource, showFloatingToast]);
-
-  // A dedicated search, not a reuse of discoverPipelineZoteroSources: that one
-  // reads the current draft via buildPipelineSource(), so calling it right
-  // after onDraftChange({ zoteroSelector }) in the same handler would race the
-  // draft update and discover with the previous selector. Building the request
-  // from the typed query directly sidesteps that.
+  // The request is built from the typed query rather than from the draft, so a
+  // search never races the selector the draft is carrying.
   const discoverZoteroByQuery = useCallback(async (query: string) => {
     setPipelineBusy("zotero");
     try {
@@ -641,11 +566,17 @@ export default function App() {
       for (const line of result.logSummary.slice(-3)) {
         addActivity("info", line);
       }
-      setPipelineDraft((draft) => ({
-        ...draft,
-        sourceKind: result.sources[0]?.kind ?? "zotero_filter",
-        zoteroSelector: result.sources[0]?.selector || result.sources[0]?.title || source.selector || draft.zoteroSelector,
-      }));
+      // Preselect the top hit so a single-match search is one action, and leave
+      // the draft alone when nothing matched — falling back to the "query=…"
+      // selector used to hand the preflight a source that cannot resolve.
+      const best = result.sources[0];
+      if (best) {
+        setPipelineDraft((draft) => ({
+          ...draft,
+          sourceKind: best.kind,
+          zoteroSelector: best.selector || best.title || draft.zoteroSelector,
+        }));
+      }
       addActivity("success", `Found ${result.sources.length} Zotero source(s) for "${query}"`);
       showFloatingToast(`Found ${result.sources.length} Zotero source(s)`, "success");
     } catch (error) {
@@ -948,8 +879,6 @@ export default function App() {
               onPreview={() => void previewPipeline()}
               onQueueRun={queueAndRunPipeline}
               onChooseFolder={() => void choosePipelinePdfFolder()}
-              onChooseMarkdown={() => void choosePipelineMarkdownSource()}
-              onDiscoverZotero={() => void discoverPipelineZoteroSources()}
               onSearchZotero={(query) => void discoverZoteroByQuery(query)}
               onRetry={(jobId) => void retryPipeline(jobId)}
               onDelete={(jobId, childId) => void deletePipeline(jobId, childId)}

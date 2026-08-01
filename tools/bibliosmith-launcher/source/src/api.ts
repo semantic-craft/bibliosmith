@@ -40,7 +40,9 @@ declare global {
   }
 }
 
-function isTauriRuntime() {
+// Exported because the input island registers the native drag-drop listener
+// only under Tauri; in the browser preview there are no file paths to receive.
+export function isTauriRuntime() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
 }
 
@@ -1375,17 +1377,6 @@ export function chooseBookPipelinePdfFolder() {
     });
   }
   return invoke<BookPipelineSource | null>("choose_book_pipeline_pdf_folder");
-}
-
-export function chooseBookPipelineMarkdownSource() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<BookPipelineSource | null>({
-      kind: "markdown_source",
-      title: "Preview Markdown source",
-      path: "/tmp/bibliosmith-preview/source.md",
-    });
-  }
-  return invoke<BookPipelineSource | null>("choose_book_pipeline_markdown_source");
 }
 
 export function openBookPipelineOutput(jobId: string) {

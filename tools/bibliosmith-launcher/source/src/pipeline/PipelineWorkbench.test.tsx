@@ -10,6 +10,8 @@ import { PipelineWorkbench, type PipelineWorkbenchProps } from "./PipelineWorkbe
 vi.mock("../api", () => ({
   readBookPipelineArtifactExcerpt: vi.fn(() => Promise.reject(new Error("desktop only"))),
   readBookPipelineTranslationSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
+  // The input island only registers the native drag-drop listener under Tauri.
+  isTauriRuntime: () => false,
 }));
 
 const copy = pipelineCopy("zh-CN");
@@ -34,8 +36,6 @@ function workbenchProps(
     onPreview: vi.fn(),
     onQueueRun: vi.fn(async () => true),
     onChooseFolder: vi.fn(),
-    onChooseMarkdown: vi.fn(),
-    onDiscoverZotero: vi.fn(),
     onSearchZotero: vi.fn(),
     onRetry: vi.fn(),
     onDelete: vi.fn(),
