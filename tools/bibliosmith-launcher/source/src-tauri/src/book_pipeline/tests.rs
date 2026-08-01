@@ -784,12 +784,12 @@ fn each_book_project_is_named_after_its_own_book() {
         .map(str::to_string)
         .collect::<Vec<_>>();
     for title in MULTI_BOOK_TITLES {
-        let slug = title.to_ascii_lowercase();
         assert!(
-            names.iter().any(|name| name.contains(&slug)),
+            names.iter().any(|name| name.contains(title)),
             "no project named after {title}: {names:?}"
         );
     }
+    assert_eq!(names.len(), 3, "{names:?}");
     let _ = fs::remove_dir_all(root);
 }
 
