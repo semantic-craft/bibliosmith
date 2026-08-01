@@ -206,6 +206,30 @@ export type BookPipelineTranslationSampleReport = {
   samples: BookPipelineTranslationSample[];
 };
 
+/** One engine's answer for the sampled pages. Mirrors
+ * BookPipelineOcrSampleEngine in src-tauri/src/book_pipeline.rs, which is
+ * deny_unknown_fields — these names are a contract, not a convenience. */
+export type BookPipelineOcrSampleEngine = {
+  engine: "paddleocr" | "mineru";
+  status: "ok" | "failed";
+  markdownExcerpt: string;
+  characterCount: number;
+  pageCount: number | null;
+  elapsedMs: number;
+  /** Present only when status is "failed"; already redacted by the worker. */
+  error: string | null;
+};
+
+export type BookPipelineOcrSampleReport = {
+  schema: "ocr-sample-compare-report-v1";
+  sourcePdfSha256: string;
+  totalPages: number;
+  /** 1-based page numbers, interior only — never the cover or the last page. */
+  sampledPages: number[];
+  characterBudget: number;
+  engines: BookPipelineOcrSampleEngine[];
+};
+
 export type BookPipelineCollectionItem = {
   id: string;
   title: string;

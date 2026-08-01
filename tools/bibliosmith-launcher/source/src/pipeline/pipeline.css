@@ -625,9 +625,71 @@
 .pl-evi-row .pl-v { overflow: hidden; color: var(--ink); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .pl-drawer .pl-evi-row .pl-v { min-width: 0; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
 
+/* OCR engine comparison (#97). Two panes side by side, each one engine's answer
+   for the same sampled pages; picking one writes a conversion route override.
+   Selection is the accent ring the design system reserves for a committed
+   choice, drawn as an inset so choosing a side shifts no layout. Hover lifts to
+   the sub-surface colour -- islands take no shadow and no movement. */
+.pl-ocrcard { margin-top: 14px; }
+.pl-ocrcard-lead { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.pl-ocrcard-controls { display: flex; align-items: end; gap: 8px; }
+.pl-ocrcard-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.pl-ocrcard-controls input {
+  width: 76px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--island);
+  color: var(--ink);
+  font: inherit;
+}
+.pl-ocrcard-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.pl-ocrpanes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.pl-ocrpane {
+  display: block;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--island);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pl-ocrpane:hover:not(:disabled) { background: var(--sub); }
+.pl-ocrpane.picked { border-color: var(--pl-jade); box-shadow: inset 0 0 0 1px var(--pl-jade); }
+.pl-ocrpane:disabled { cursor: default; }
+.pl-ocrpane.failed { background: var(--pl-failed-soft); }
+.pl-ocrpane-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.pl-ocrpane-head h5 { margin: 0; color: var(--ink); font-size: 12px; }
+.pl-ocrpane-tag {
+  margin-left: auto;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--pl-jade-soft);
+  color: var(--pl-jade);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.pl-ocrpane-meta { display: flex; gap: 10px; margin-bottom: 6px; color: var(--muted); font-size: 10.5px; }
+.pl-ocrpane-error { margin: 0; color: var(--pl-failed); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.pl-ocrpane-text {
+  max-height: 190px;
+  margin: 0;
+  overflow: auto;
+  color: var(--ink);
+  font-family: "Songti SC", "Noto Serif SC", Georgia, serif;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @container (max-width: 560px) {
   .pl-det-cards,
   .pl-scolumns,
+  .pl-ocrpanes,
   .pl-diff-grid { grid-template-columns: 1fr; }
   .pl-tabs { gap: 0; }
   .pl-tab { flex: 1; min-width: 0; padding-inline: 6px; }

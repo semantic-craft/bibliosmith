@@ -153,6 +153,27 @@ export function pipelineCopy(locale: PipelineLocale) {
     sampleReady: zh ? "翻译对照样张已生成" : "Translation comparison is ready",
     sampleSource: zh ? "原文" : "Source",
     sampleTranslation: zh ? "译文" : "Translation",
+    ocrCompareTitle: zh ? "OCR 引擎对比" : "OCR engine comparison",
+    ocrCompareLead: zh
+      ? "抽几页正文，两个引擎各跑一次，挑出更适合这本书的那个。只上传抽出的这几页，和全书长度无关。"
+      : "Sample a few interior pages, run both engines over them, and pick the one that suits this book. Only the sampled pages are uploaded, whatever the book's length.",
+    ocrCompareRun: zh ? "生成对比" : "Compare engines",
+    ocrCompareRetry: zh ? "重抽" : "Re-sample",
+    ocrComparePages: zh ? "抽样页数" : "Pages",
+    ocrCompareReady: zh ? "OCR 引擎对比已生成" : "OCR comparison is ready",
+    ocrCompareSampledPages: zh ? "抽样页" : "Sampled pages",
+    ocrCompareCharacters: zh ? "字符" : "characters",
+    ocrCompareSeconds: zh ? "秒" : "s",
+    ocrCompareEmpty: zh ? "这个引擎没有返回文字。" : "This engine returned no text.",
+    ocrCompareFailed: zh ? "未能完成" : "Did not finish",
+    ocrComparePick: zh ? "用这个引擎转换" : "Convert with this engine",
+    ocrComparePicked: zh ? "已选定" : "Selected",
+    ocrCompareRouteSet: zh ? "转换路由已改" : "Conversion route updated",
+    // Said plainly because the pages cost money: the report is a preview of the
+    // real conversion, not the conversion itself.
+    ocrCompareNote: zh
+      ? "对比不会改动这本书，选定后才会写入转换路由。"
+      : "Comparing changes nothing about this book; only picking a side writes the conversion route.",
     sampleDegradationNone: zh ? "完整" : "Complete",
     sampleDegradationAligned: zh ? "已对齐修复" : "Aligned fallback",
     sampleDegradationSource: zh ? "保留原文" : "Source fallback",

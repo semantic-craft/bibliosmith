@@ -71,6 +71,7 @@ export type BookDrawerProps = {
   ) => void;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
+  onSampleOcr: (jobId: string, childId: string, samplePages: number) => void;
   onOpenOutput: (jobId: string) => void;
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
 };
@@ -575,6 +576,7 @@ function AdvancedDetails(props: BookDrawerProps) {
     onAdvance: props.onAdvance,
     onApproveGate: props.onApproveGate,
     onRouteOverride: props.onRouteOverride,
+    onSampleOcr: props.onSampleOcr,
     onOpenOutput: props.onOpenOutput,
     onHandoff: props.onHandoff,
     onGoApproval: () => setTab("approval"),
