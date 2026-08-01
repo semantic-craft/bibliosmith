@@ -489,6 +489,28 @@ def build_html(title: str, body_html: str, css: str | None = None) -> str:
 </html>"""
 
 
+PAGE_ANCHOR_PATTERN = re.compile(r"^<!-- page: (\d+) -->$", re.MULTILINE)
+
+
+def page_anchor(page_no: int) -> str:
+    """Mark where a source page began.
+
+    A comment rather than a visible separator: the assembled Markdown is the
+    translation handoff source, so anything printable here becomes body text the
+    splitter and the translator have to carry. The page number is kept so a
+    reviewer can still map a translated passage back to a page of the original.
+    """
+    return f"<!-- page: {page_no} -->"
+
+
+def page_anchors_to_html(md_text: str) -> str:
+    """Turn the page anchors into the separators the standalone HTML shows."""
+    return PAGE_ANCHOR_PATTERN.sub(
+        lambda match: f'<div class="page-break">— Page {match.group(1)} —</div>',
+        md_text,
+    )
+
+
 def md_to_html(md_text: str) -> str:
     md = markdown.Markdown(extensions=["tables", "fenced_code", "toc", "nl2br"])
     return md.convert(md_text)
@@ -649,10 +671,10 @@ def process_book(
                     text = text.replace(img_url, str(image_map[img_url]))
 
         if text:
-            md_sections.append(f"\n<div class=\"page-break\">— Page {page_no} —</div>\n\n{text}")
+            md_sections.append(f"\n{page_anchor(page_no)}\n\n{text}")
 
     full_md = f"# {book_name}\n\n" + "\n\n".join(md_sections)
-    body_html = md_to_html(full_md)
+    body_html = md_to_html(page_anchors_to_html(full_md))
     html = build_html(title=book_name, body_html=body_html)
     html_path.write_text(html, encoding="utf-8")
 
