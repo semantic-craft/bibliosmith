@@ -3,6 +3,8 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -17,6 +19,8 @@ from translation_engine.providers import (
     OpenAICompatibleProvider,
     OpenAIResponsesProvider,
     ProviderConfig,
+    ProviderServerError,
+    ProviderTimeoutError,
     RateLimitError,
     TransientError,
     TranslationRequest,
@@ -555,7 +559,11 @@ class HTTPProviderTests(unittest.TestCase):
         self.assertEqual(sleeps, [])
 
     def test_timeout_and_5xx_use_bounded_backoff_retries(self) -> None:
-        for failure_kind in ("timeout", "server-error"):
+        expected_errors = {
+            "timeout": ProviderTimeoutError,
+            "server-error": ProviderServerError,
+        }
+        for failure_kind, expected_error in expected_errors.items():
             with self.subTest(failure_kind=failure_kind):
                 attempts = 0
                 sleeps: list[float] = []
@@ -582,11 +590,83 @@ class HTTPProviderTests(unittest.TestCase):
                     sleep=sleeps.append,
                 )
 
-                with self.assertRaises(TransientError):
+                with self.assertRaises(expected_error) as raised:
                     provider.translate(_translation_request())
 
                 self.assertEqual(attempts, 2)
                 self.assertEqual(sleeps, [0.5])
+                self.assertEqual(
+                    raised.exception.code,
+                    "provider_timeout"
+                    if failure_kind == "timeout"
+                    else "provider_http_5xx",
+                )
+
+    def test_provider_enforces_the_configured_total_request_deadline(self) -> None:
+        def handle(request: httpx.Request) -> httpx.Response:
+            time.sleep(0.2)
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "迟到的译文"}}]},
+            )
+
+        provider = OpenAICompatibleProvider(
+            config=_provider_config(
+                profile_id="openai-compatible",
+                provider_type="openai-compatible",
+                base_url="https://openai.example/v1",
+                model="model-a",
+                timeout_seconds=0.02,
+            ),
+            credential_pool=KeyPool(("fake-key",)),
+            http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+            max_attempts=1,
+        )
+
+        started = time.monotonic()
+        with self.assertRaises(ProviderTimeoutError):
+            provider.translate(_translation_request())
+
+        self.assertLess(time.monotonic() - started, 0.15)
+
+    def test_total_deadline_does_not_close_or_overlap_an_injected_client(self) -> None:
+        attempts = 0
+        first_finished = threading.Event()
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                time.sleep(0.05)
+                first_finished.set()
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "译文"}}]},
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handle))
+        provider = OpenAICompatibleProvider(
+            config=_provider_config(
+                profile_id="openai-compatible",
+                provider_type="openai-compatible",
+                base_url="https://openai.example/v1",
+                model="model-a",
+                timeout_seconds=0.01,
+            ),
+            credential_pool=KeyPool(("fake-key",)),
+            http_client=client,
+            max_attempts=2,
+            sleep=lambda _: None,
+        )
+
+        with self.assertRaises(ProviderTimeoutError):
+            provider.translate(_translation_request())
+
+        self.assertEqual(attempts, 1)
+        self.assertFalse(client.is_closed)
+        self.assertTrue(first_finished.wait(0.2))
+        self.assertEqual(provider.translate(_translation_request()), "译文")
+        self.assertEqual(attempts, 2)
 
     def test_non_rate_limit_4xx_fails_fast_as_fatal(self) -> None:
         attempts = 0
@@ -733,7 +813,12 @@ class KeyPoolTests(unittest.TestCase):
 
 
 def _provider_config(
-    *, profile_id: str, provider_type: str, base_url: str, model: str
+    *,
+    profile_id: str,
+    provider_type: str,
+    base_url: str,
+    model: str,
+    timeout_seconds: float = 30.0,
 ) -> ProviderConfig:
     return ProviderConfig(
         profile_id=profile_id,
@@ -741,7 +826,7 @@ def _provider_config(
         provider_type=provider_type,
         base_url=base_url,
         model=model,
-        timeout_seconds=30.0,
+        timeout_seconds=timeout_seconds,
         concurrency_limit=2,
         key_env="TEST_KEYS",
     )

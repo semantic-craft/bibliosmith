@@ -154,7 +154,7 @@ class ReflectionSecondPassTests(unittest.TestCase):
                 )
             )
 
-    def test_invalid_revised_placeholders_keep_the_draft(self) -> None:
+    def test_invalid_revised_structure_fails_instead_of_claiming_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project_root = Path(temporary_directory)
             manifest_path = build_run_fixture(
@@ -171,16 +171,14 @@ class ReflectionSecondPassTests(unittest.TestCase):
             )
 
             unit = report["units"][0]
-            draft_path = project_root / unit["secondPassArtifacts"]["draft"]["path"]
-            revised_path = (
-                project_root / unit["secondPassArtifacts"]["revised"]["path"]
-            )
-            self.assertEqual(unit["status"], "completed")
+            self.assertEqual(unit["status"], "failed")
             self.assertEqual(
-                revised_path.read_text(encoding="utf-8"),
-                draft_path.read_text(encoding="utf-8"),
+                unit["error"],
+                {"code": "translation_structure_invalid", "retryable": True},
             )
-            self.assertEqual(revised_path.read_text(encoding="utf-8"), "FIRST `keepCase`\n")
+            self.assertFalse(
+                (project_root / "chapters" / "translated" / "chapter_001.md").exists()
+            )
 
     def test_second_pass_resumes_by_chunk_with_a_distinct_idempotency_key(
         self,

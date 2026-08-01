@@ -1,7 +1,9 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from translation_engine.engine import EngineError, run_manifest
 from translation_engine.profiles import ZH_HANS
@@ -208,7 +210,7 @@ class CustomInstructionTests(unittest.TestCase):
                         phase == "reflection",
                     )
 
-    def test_reflection_directive_cannot_add_a_paragraph(self) -> None:
+    def test_reflection_directive_structure_change_fails_the_unit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project_root = Path(temporary_directory)
             manifest_path = build_run_fixture(
@@ -227,11 +229,14 @@ class CustomInstructionTests(unittest.TestCase):
                 provider_factory=lambda profile_id, *, config_id: provider,
             )
 
-            self.assertEqual(report["units"][0]["status"], "completed")
-            translated = (
-                project_root / "chapters" / "translated" / "chapter_001.md"
-            ).read_text(encoding="utf-8")
-            self.assertEqual(translated, "SOURCE PARAGRAPH.\n")
+            self.assertEqual(report["units"][0]["status"], "failed")
+            self.assertEqual(
+                report["units"][0]["error"],
+                {"code": "translation_structure_invalid", "retryable": True},
+            )
+            self.assertFalse(
+                (project_root / "chapters" / "translated" / "chapter_001.md").exists()
+            )
 
     def test_merge_paragraph_directive_cannot_bypass_structure_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -253,6 +258,10 @@ class CustomInstructionTests(unittest.TestCase):
 
             unit = report["units"][0]
             self.assertEqual(unit["status"], "failed")
+            self.assertEqual(
+                unit["error"],
+                {"code": "translation_structure_invalid", "retryable": True},
+            )
             self.assertEqual(unit["metrics"]["alignedFallbackCount"], 0)
             self.assertEqual(unit["metrics"]["sourceFallbackCount"], 1)
             self.assertEqual(unit["metrics"]["providerAttemptCount"], 3)
@@ -268,6 +277,35 @@ class CustomInstructionTests(unittest.TestCase):
                 "First paragraph.\n\nSecond paragraph.\n",
             )
             self.assertEqual(len(provider.requests), 3)
+
+    def test_degraded_first_pass_does_not_claim_unrun_reflection_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            manifest_path = build_run_fixture(
+                project_root,
+                source_text="First paragraph.\n\nSecond paragraph.\n",
+                max_tokens=100,
+                second_pass_enabled=True,
+            )
+            progress_path = project_root / ".book-pipeline-progress"
+            provider = MergeParagraphsProvider()
+
+            with mock.patch.dict(
+                os.environ,
+                {"BIBLIOSMITH_PROGRESS_PATH": str(progress_path)},
+            ):
+                report = run_manifest(
+                    manifest_path,
+                    provider_factory=lambda profile_id, *, config_id: provider,
+                )
+
+            metrics = report["units"][0]["metrics"]
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["units"][0]["status"], "failed")
+            self.assertFalse(metrics["secondPassApplied"])
+            self.assertEqual(progress["total"], metrics["chunkCount"] * 2)
+            self.assertEqual(progress["completed"], metrics["chunkCount"])
+            self.assertEqual(progress["phase"], "translating")
 
 
 if __name__ == "__main__":

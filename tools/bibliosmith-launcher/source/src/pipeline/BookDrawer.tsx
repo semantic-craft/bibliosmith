@@ -17,7 +17,10 @@ import {
   pendingGates,
   providerDefaultConfig,
   stepCaption,
+  stepSummaryCaption,
   stepName,
+  stepStatusCaption,
+  translationFailureSummary,
   unitAdvanceAction,
   unitRoute,
   type BookUnit,
@@ -32,6 +35,7 @@ import { StagesTab } from "./tabs/StagesTab";
 import { ArtifactsTab } from "./tabs/ArtifactsTab";
 import { ApprovalTab } from "./tabs/ApprovalTab";
 import { LogsTab } from "./tabs/LogsTab";
+import { OperationProgressBar } from "./OperationProgress";
 
 // Identity tags. Each pairs a piece of local state with the thing it describes,
 // so a render can tell a stale value from a current one without an effect.
@@ -162,11 +166,14 @@ function FourStepStrip({ unit, copy }: { unit: BookUnit; copy: PipelineCopy }) {
           <div key={index} className={`pl-step4 ${state}`}>
             <div className="pl-s4c">{STEP_MARKS[state](index)}</div>
             <div className="pl-s4n">{stepName(index, copy)}</div>
+            <div className="pl-s4status">{stepStatusCaption(unit, index, copy)}</div>
           </div>
         ))}
       </div>
       <div className="pl-s4cap">
-        {activeStepIndex(states) === -1 ? stepCaption(unit, copy) : `${copy.stepCurrentPrefix}${stepCaption(unit, copy)}`}
+        {activeStepIndex(states) === -1
+          ? stepSummaryCaption(unit, copy)
+          : `${copy.stepCurrentPrefix}${stepSummaryCaption(unit, copy)}`}
       </div>
     </>
   );
@@ -447,7 +454,12 @@ function StateCard(props: BookDrawerProps) {
   const { unit, copy, busy, onRetry, onAdvance, onOpenOutput, onHandoff } = props;
   const stage = currentStage(unit);
   const errorText =
-    stage?.safeError?.summary || stage?.error || unit.child?.lastError || unit.job.lastError || "";
+    translationFailureSummary(stage, copy) ||
+    stage?.safeError?.summary ||
+    stage?.error ||
+    unit.child?.lastError ||
+    unit.job.lastError ||
+    "";
   const advance = unitAdvanceAction(unit);
 
   if (unit.status === "failed" || unit.status === "partial") {
@@ -485,7 +497,7 @@ function StateCard(props: BookDrawerProps) {
     const label = advance.stageId === "translate" ? copy.runTranslation : copy.continueStage;
     return (
       <div className="pl-hintcard">
-        <span>{stepCaption(unit, copy)}</span>
+        <span>{stepSummaryCaption(unit, copy)}</span>
         <span className="pl-spacer" />
         <button
           className="pl-btn sm primary"
@@ -533,8 +545,11 @@ function StateCard(props: BookDrawerProps) {
   }
 
   return (
-    <div className="pl-hintcard">
-      <span>{stepCaption(unit, copy)} · {copy.abNoAction}</span>
+    <div className="pl-running-stack">
+      <OperationProgressBar unit={unit} copy={copy} />
+      <div className="pl-hintcard">
+        <span>{stepSummaryCaption(unit, copy)} · {copy.abNoAction}</span>
+      </div>
     </div>
   );
 }
@@ -679,7 +694,7 @@ function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement
   }
   if (unit.status === "failed" || unit.status === "partial") {
     return {
-      hint: stepCaption(unit, copy),
+      hint: stepSummaryCaption(unit, copy),
       button: (
         <button className="pl-btn" type="button" disabled={busy === "retry"} onClick={() => props.onRetry(unit.job.id)}>
           {copy.retryJob}
@@ -697,7 +712,7 @@ function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement
       ),
     };
   }
-  return { hint: `${stepCaption(unit, copy)} · ${copy.abNoAction}`, button: null };
+  return { hint: `${stepSummaryCaption(unit, copy)} · ${copy.abNoAction}`, button: null };
 }
 
 export function BookDrawer(props: BookDrawerProps) {
@@ -763,7 +778,7 @@ export function BookDrawer(props: BookDrawerProps) {
             <BookCover title={unit.title} className="drawer" />
             <div>
               <h2>{unit.title}</h2>
-              <div className="pl-dnow">{stepCaption(unit, copy)}</div>
+              <div className="pl-dnow">{stepSummaryCaption(unit, copy)}</div>
             </div>
           </div>
           <FourStepStrip unit={unit} copy={copy} />

@@ -874,6 +874,7 @@ impl RunnerCommandExecutor for ExternalAdapterFixtureExecutor {
 
 struct TranslationEngineFixtureExecutor {
     fail_once: Mutex<Option<String>>,
+    failure_code: String,
     requested_units: Mutex<Vec<Vec<String>>>,
     expected_second_pass_enabled: bool,
     expected_text_cleanup: bool,
@@ -888,6 +889,7 @@ impl TranslationEngineFixtureExecutor {
     fn succeeding() -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
@@ -900,6 +902,7 @@ impl TranslationEngineFixtureExecutor {
     fn with_second_pass_enabled() -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: true,
             expected_text_cleanup: false,
@@ -912,6 +915,7 @@ impl TranslationEngineFixtureExecutor {
     fn with_text_cleanup() -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: true,
@@ -924,6 +928,7 @@ impl TranslationEngineFixtureExecutor {
     fn with_custom_instructions(custom_instructions: BookPipelineCustomInstructions) -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: true,
             expected_text_cleanup: false,
@@ -936,6 +941,7 @@ impl TranslationEngineFixtureExecutor {
     fn failing_once(unit_id: &str) -> Self {
         Self {
             fail_once: Mutex::new(Some(unit_id.into())),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
@@ -945,9 +951,17 @@ impl TranslationEngineFixtureExecutor {
         }
     }
 
+    fn failing_once_with_code(unit_id: &str, failure_code: &str) -> Self {
+        Self {
+            failure_code: failure_code.into(),
+            ..Self::failing_once(unit_id)
+        }
+    }
+
     fn with_paragraph_mismatch() -> Self {
         Self {
             fail_once: Mutex::new(None),
+            failure_code: "translation_structure_invalid".into(),
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
@@ -1083,7 +1097,7 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
                     "unitId": unit_id,
                     "status": "failed",
                     "artifact": artifact,
-                    "error": {"code": "translation_incomplete", "retryable": true},
+                    "error": {"code": self.failure_code.as_str(), "retryable": true},
                 })
             } else {
                 let mut completed = serde_json::json!({
@@ -5248,6 +5262,88 @@ fn public_state_reports_stage_and_unit_progress() {
 }
 
 #[test]
+fn public_state_overlays_live_worker_progress_without_persisting_it() {
+    let root = temp_root("live-worker-progress-contract");
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let mut state = store.load().unwrap();
+    let stored = state
+        .jobs
+        .iter_mut()
+        .find(|stored| stored.id == job.id)
+        .unwrap();
+    let child = stored.children.first_mut().unwrap();
+    start_stage(child, "extract", store.execution_owner().unwrap());
+    stage_mut(child, "extract").unwrap().started_at = Some("2026-07-29T11:00:00Z".into());
+    child.status = STATUS_RUNNING.into();
+    derive_job(stored);
+    store.save(&state).unwrap();
+
+    let output_dir = store.job_output_dir(&job.id);
+    fs::create_dir_all(&output_dir).unwrap();
+    fs::write(
+        output_dir.join(LIVE_PROGRESS_FILE),
+        r#"{
+          "schema":"book-pipeline-progress-v1",
+          "stageId":"extract",
+          "completed":37,
+          "total":100,
+          "unitKind":"pages",
+          "phase":"extracting",
+          "activityAt":"2026-07-29T12:00:00Z"
+        }"#,
+    )
+    .unwrap();
+
+    let observed = load_state_with_live_progress(&store).unwrap();
+    let progress = observed.jobs[0].progress.operation.as_ref().unwrap();
+    assert_eq!(progress.completed, 37);
+    assert_eq!(progress.total, Some(100));
+    assert_eq!(progress.unit_kind, "pages");
+    assert_eq!(
+        observed.jobs[0]
+            .progress
+            .unit_summary
+            .as_ref()
+            .unwrap()
+            .completed,
+        37
+    );
+    assert!(
+        store.load().unwrap().jobs[0].progress.operation.is_none(),
+        "ephemeral worker progress must not be written into durable jobs.json"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn live_progress_older_than_the_current_attempt_is_ignored() {
+    let stage = BookPipelineStage {
+        stage_id: "translate".into(),
+        status: STATUS_RUNNING.into(),
+        started_at: Some("2026-07-29T12:00:00Z".into()),
+        ..BookPipelineStage::default()
+    };
+    let progress = BookPipelineOperationProgress {
+        stage_id: "translate".into(),
+        completed: 99,
+        total: Some(100),
+        unit_kind: "chapters".into(),
+        phase: "translating".into(),
+        activity_at: "2026-07-29T11:59:59Z".into(),
+        ..BookPipelineOperationProgress::default()
+    };
+
+    assert!(!live_progress_matches_stage(&stage, &progress));
+}
+
+#[test]
 fn terminal_webhook_is_safe_deterministic_and_idempotent() {
     let root = temp_root("terminal-webhook-contract");
     let store = BookPipelineStore::for_test(&root);
@@ -5280,6 +5376,43 @@ fn terminal_webhook_is_safe_deterministic_and_idempotent() {
     assert!(!payload.contains("/private/library"));
     assert!(!payload.contains("lastError"));
     assert!(!payload.contains("logSummary"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn terminal_webhook_progress_excludes_local_unit_failure_details() {
+    let root = temp_root("terminal-webhook-local-failures");
+    let store = BookPipelineStore::for_test(&root);
+    let mut job = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    job.progress.unit_summary = Some(BookPipelineUnitSummary {
+        total: 2,
+        completed: 1,
+        failed: 1,
+        failures: vec![BookPipelineUnitFailure {
+            unit_id: "private-chapter-name".into(),
+            code: "provider_timeout".into(),
+            retryable: true,
+        }],
+        ..BookPipelineUnitSummary::default()
+    });
+
+    let event = terminal_event(&job);
+
+    let summary = event.progress.unit_summary.as_ref().unwrap();
+    assert_eq!(
+        (summary.total, summary.completed, summary.failed),
+        (2, 1, 1)
+    );
+    assert!(summary.failures.is_empty());
+    let payload = serde_json::to_string(&event).unwrap();
+    assert!(!payload.contains("private-chapter-name"));
+    assert!(!payload.contains("provider_timeout"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -9536,6 +9669,57 @@ fn a_stage_policy_overrides_the_default_budget_and_backoff() {
 }
 
 #[test]
+fn translate_failure_persists_each_units_safe_reason() {
+    let root = temp_root("fake-translate-failure-reason");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = fake_handoff_ready_job(&store, &repo);
+    let handed_off = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    let project_root = child_project_root(&handed_off);
+    fs::write(
+        project_root.join("source").join("source.md"),
+        "# Alpha\n\nFirst body.\n\n# Beta\n\nSecond body.\n",
+    )
+    .unwrap();
+    let executor =
+        TranslationEngineFixtureExecutor::failing_once_with_code("chapter_002", "provider_timeout");
+    let mut state = store.load().unwrap();
+    let stored_job = state.jobs.iter_mut().find(|job| job.id == job_id).unwrap();
+    let translate = stored_job.children[0]
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "translate")
+        .unwrap();
+    translate.max_attempts = 1;
+    store.save(&state).unwrap();
+
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let failed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    let translate = failed.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "translate")
+        .unwrap();
+    let summary = translate.unit_summary.as_ref().unwrap();
+    assert_eq!(summary.failures.len(), 1);
+    assert_eq!(summary.failures[0].unit_id, "chapter_002");
+    assert_eq!(summary.failures[0].code, "provider_timeout");
+    assert!(summary.failures[0].retryable);
+    assert_eq!(
+        translate.error.as_deref(),
+        Some("Translation failed for 1 unit(s). See failed-unit details.")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn translate_failure_retries_only_failed_units_and_recovers_stage() {
     let root = temp_root("fake-translate-retry");
     let repo = handoff_repo_fixture(&root);
@@ -10692,6 +10876,135 @@ fn source_change_before_prepare_reruns_split_without_blocking() {
 }
 
 #[test]
+fn split_bounds_an_oversized_book_unit_at_deeper_headings_without_losing_text() {
+    let root = temp_root("advance-bounded-split");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let section = "x".repeat(40 * 1024);
+    let source = format!(
+        "# Book\n\n## Page 1\n\n{section}\n\n## Page 2\n\n{section}\n\n## Page 3\n\n{section}\n"
+    );
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, &source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let chapter_paths = split.children[0]
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "chapter_source")
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .collect::<Vec<_>>();
+    let chapters = chapter_paths
+        .iter()
+        .map(|path| fs::read_to_string(path).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(chapters.len(), 3);
+    assert!(chapters.iter().all(|chapter| chapter.len() <= 64 * 1024));
+    assert_eq!(chapters.concat(), source);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_bounds_an_oversized_heading_free_unit_at_paragraphs_without_losing_text() {
+    let root = temp_root("advance-bounded-paragraph-split");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let paragraph = "x".repeat(40 * 1024);
+    let source = format!("{paragraph}\n\n{paragraph}\n\n{paragraph}\n");
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, &source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let chapters = split.children[0]
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "chapter_source")
+        .map(|artifact| fs::read_to_string(&artifact.path).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(chapters.len(), 3);
+    assert!(chapters.iter().all(|chapter| chapter.len() <= 64 * 1024));
+    assert_eq!(chapters.concat(), source);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_hard_bounds_one_unbroken_paragraph_without_losing_text() {
+    let root = temp_root("advance-hard-bounded-paragraph");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let source = format!("{}\n", "界".repeat(50 * 1024));
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, &source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let chapters = split.children[0]
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "chapter_source")
+        .map(|artifact| fs::read_to_string(&artifact.path).unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(chapters.len() > 1);
+    assert!(chapters.iter().all(|chapter| chapter.len() <= 64 * 1024));
+    assert_eq!(chapters.concat(), source);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn paragraph_fallback_never_splits_inside_a_fenced_code_block() {
+    let root = temp_root("advance-fenced-paragraph-split");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let prose = "x".repeat(40 * 1024);
+    let code = "y".repeat(20 * 1024);
+    let source = format!("{prose}\n\n```text\n{code}\n\n{code}\n```\n\n{prose}\n");
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, &source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let chapters = split.children[0]
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "chapter_source")
+        .map(|artifact| fs::read_to_string(&artifact.path).unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(chapters
+        .iter()
+        .all(|chapter| chapter.matches("```").count() % 2 == 0));
+    assert_eq!(chapters.concat(), source);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn mixed_fence_markers_do_not_close_the_active_code_block() {
+    let text = "```text\none\n~~~\n\ntwo\n```\ntail\n";
+
+    let atoms = structural_text_atoms(text);
+
+    assert_eq!(
+        atoms,
+        vec![("```text\none\n~~~\n\ntwo\n```\n", false), ("tail\n", true),]
+    );
+}
+
+#[test]
+fn hard_bound_separates_a_small_fence_from_oversized_plain_text() {
+    let text = format!("```text\nsmall\n```\n{}", "界".repeat(40 * 1024));
+
+    let pieces = hard_bound_text(&text);
+
+    assert!(pieces.len() > 1);
+    assert!(pieces
+        .iter()
+        .all(|piece| piece.len() <= MAX_TRANSLATION_UNIT_BYTES));
+    assert_eq!(pieces.concat(), text);
+    assert_eq!(pieces[0], "```text\nsmall\n```\n");
+}
+
+#[test]
 fn source_change_after_prepare_blocks_split_pending_invalidation() {
     let root = temp_root("advance-block");
     let repo = handoff_repo_fixture(&root);
@@ -10780,6 +11093,265 @@ fn explicit_invalidation_reruns_split_and_prepare_from_new_source() {
         .join("src")
         .join("chapter_002.md")
         .exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_policy_upgrade_automatically_invalidates_downstream_and_reruns() {
+    let root = temp_root("advance-split-policy-upgrade");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    let prepared = advance_job(&store, &job_id, None, false).unwrap();
+    assert_eq!(child_stage_status(&prepared, "prepare"), STATUS_COMPLETED);
+
+    let mut state = store.load().unwrap();
+    let child = &mut state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    child
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap()
+        .input_hashes
+        .insert("splitPolicyVersion".into(), "split-policy-obsolete".into());
+    store.save(&state).unwrap();
+
+    let rerun = advance_job(&store, &job_id, None, false).unwrap();
+
+    let split = rerun.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap();
+    assert_eq!(split.status, STATUS_COMPLETED);
+    assert_eq!(
+        split
+            .input_hashes
+            .get("splitPolicyVersion")
+            .map(String::as_str),
+        Some(SPLIT_POLICY_VERSION)
+    );
+    assert_eq!(child_stage_status(&rerun, "prepare"), STATUS_PENDING);
+    assert_eq!(
+        child_stage_status(&rerun, "approve_translation"),
+        STATUS_PENDING
+    );
+    let source_map = fs::read_to_string(
+        child_project_root(&rerun)
+            .join("metadata")
+            .join("source_map.json"),
+    )
+    .unwrap();
+    assert!(source_map.contains(SPLIT_POLICY_VERSION));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn source_change_still_blocks_when_split_policy_also_changed() {
+    let root = temp_root("advance-source-and-policy-change");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    let prepared = advance_job(&store, &job_id, None, false).unwrap();
+    fs::write(
+        child_source_md(&prepared),
+        "# Rewritten\n\nDifferent body.\n",
+    )
+    .unwrap();
+    let mut state = store.load().unwrap();
+    state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0]
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap()
+        .input_hashes
+        .insert("splitPolicyVersion".into(), "split-policy-obsolete".into());
+    store.save(&state).unwrap();
+
+    let blocked = advance_job(&store, &job_id, None, false).unwrap();
+
+    assert_eq!(child_stage_status(&blocked, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&blocked, "prepare"), STATUS_PENDING);
+    assert_eq!(
+        blocked.children[0].last_error.as_deref(),
+        Some("source_changed_downstream_exists")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_policy_upgrade_does_not_cancel_an_agent_owned_handoff() {
+    let root = temp_root("split-policy-agent-handoff");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = fake_handoff_ready_job(&store, &repo);
+    configure_expert_job(&store, &job_id);
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    approve_ready_translation_for_test(&store, &job_id);
+
+    let mut state = store.load().unwrap();
+    let child = &mut state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    set_agent_handoff_waiting(child, "translate", "fake-agent-profile");
+    child
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap()
+        .input_hashes
+        .insert("splitPolicyVersion".into(), "split-policy-obsolete".into());
+    store.save(&state).unwrap();
+
+    let state = store.load().unwrap();
+    let child = &state
+        .jobs
+        .iter()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    assert!(evaluate_split_freshness(child, false).unwrap().is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn retry_button_routes_a_staged_failure_to_advance_without_reextracting() {
+    let root = temp_root("retry-staged-failure");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    approve_ready_translation_for_test(&store, &job_id);
+
+    let mut state = store.load().unwrap();
+    let owner = store.execution_owner().unwrap().to_string();
+    let child = &mut state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    start_stage(child, "translate", &owner);
+    store.save(&state).unwrap();
+
+    let mut state = store.load().unwrap();
+    let child = &mut state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0];
+    set_stage_status(
+        child,
+        "translate",
+        STATUS_FAILED,
+        Some("simulated staged failure".into()),
+    );
+    child
+        .stages
+        .iter_mut()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap()
+        .input_hashes
+        .insert("splitPolicyVersion".into(), "split-policy-obsolete".into());
+    store.save(&state).unwrap();
+
+    let retried = retry_job_from_ui(&store, &SystemPipelineRunner, &job_id).unwrap();
+
+    assert_eq!(child_stage_status(&retried, "split"), STATUS_COMPLETED);
+    assert_eq!(child_stage_status(&retried, "prepare"), STATUS_PENDING);
+    assert_eq!(child_stage_status(&retried, "translate"), STATUS_PENDING);
+    assert_eq!(stage_attempt(&retried, "extract"), 1);
+    assert_eq!(
+        retried.children[0]
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == "split")
+            .unwrap()
+            .input_hashes
+            .get("splitPolicyVersion")
+            .map(String::as_str),
+        Some(SPLIT_POLICY_VERSION)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_policy_invalidation_marker_cannot_authorize_unrelated_stage_regressions() {
+    let root = temp_root("split-policy-invalidation-scope");
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let base = job.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "extract")
+        .unwrap()
+        .clone();
+
+    let assert_rejected = |stage_id: &str, version: &str, extra_hash: bool| {
+        let mut previous = base.clone();
+        previous.stage_id = stage_id.into();
+        previous.status = STATUS_FAILED.into();
+        let mut next = previous.clone();
+        next.status = STATUS_PENDING.into();
+        next.input_hashes.clear();
+        next.input_hashes
+            .insert("splitPolicyVersion".into(), version.into());
+        if extra_hash {
+            next.input_hashes
+                .insert("unexpected".into(), "value".into());
+        }
+        assert!(!is_allowed_stage_transition(&previous, &next));
+    };
+
+    assert_rejected("extract", SPLIT_POLICY_VERSION, false);
+    assert_rejected("prepare", "split-policy-spoofed", false);
+    assert_rejected("prepare", SPLIT_POLICY_VERSION, true);
     let _ = fs::remove_dir_all(root);
 }
 

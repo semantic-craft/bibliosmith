@@ -15,6 +15,9 @@ import {
   routeTone,
   stageLabel,
   stepCaption,
+  stepStatusCaption,
+  stepSummaryCaption,
+  translationFailureSummary,
   unitAdvanceAction,
   unitNote,
   unitProgress,
@@ -160,12 +163,12 @@ describe("fourStepStates", () => {
     expect(fourStepStates(unit)[1]).toBe("done");
   });
 
-  it("promotes the first open step to current for an idle book", () => {
+  it("keeps an idle step pending instead of presenting it as running", () => {
     const unit = bookUnit({
       status: "pending",
       stages: [stage("route", "completed"), stage("extract", "pending"), stage("split", "pending")],
     });
-    expect(fourStepStates(unit)).toEqual(["done", "current", "none", "none"]);
+    expect(fourStepStates(unit)).toEqual(["done", "todo", "none", "none"]);
   });
 
   it("does not invent a current step for a finished book", () => {
@@ -189,6 +192,24 @@ describe("activeStepIndex", () => {
 });
 
 describe("stepCaption", () => {
+  it("summarizes persisted translation failure categories in the UI locale", () => {
+    const failed = stage("translate", "failed", {
+      unitSummary: unitSummary({
+        total: 3,
+        failed: 3,
+        failures: [
+          { unitId: "chapter_001", code: "provider_timeout", retryable: true },
+          { unitId: "chapter_002", code: "provider_timeout", retryable: true },
+          { unitId: "chapter_003", code: "translation_structure_invalid", retryable: true },
+        ],
+      }),
+    });
+
+    expect(translationFailureSummary(failed, pipelineCopy("zh-CN"))).toBe(
+      "翻译失败 3 个单元：模型请求超时 2；译文结构不合格 1",
+    );
+  });
+
   it("names the gate rather than the step when one is pending", () => {
     const translation = bookUnit({
       status: "waiting_for_approval",
@@ -240,6 +261,32 @@ describe("stepCaption", () => {
   it("reports a finished book as all done", () => {
     const unit = bookUnit({ status: "completed", stages: [stage("route", "completed")] });
     expect(stepCaption(unit, copy)).toBe(copy.capAllDone);
+  });
+
+  it("states that text cleanup is complete while translation is running", () => {
+    const unit = bookUnit({
+      status: "running",
+      stages: [
+        stage("extract", "completed"),
+        stage("index", "completed"),
+        stage("handoff", "completed"),
+        stage("split", "completed"),
+        stage("prepare", "completed"),
+        stage("approve_translation", "completed"),
+        stage("translate", "running"),
+        stage("expert_qa", "pending"),
+        stage("approve_promotion", "pending"),
+        stage("promote", "pending"),
+        stage("build_reading", "pending"),
+        stage("validate_reading", "pending"),
+      ],
+    });
+
+    expect(stepSummaryCaption(unit, pipelineCopy("zh-CN"))).toBe("整理文字：已完成；翻译：进行中");
+    const zh = pipelineCopy("zh-CN");
+    expect(stepStatusCaption(unit, 1, zh)).toBe("已完成");
+    expect(stepStatusCaption(unit, 2, zh)).toBe("进行中");
+    expect(stepStatusCaption(unit, 3, zh)).toBe("等待开始");
   });
 });
 

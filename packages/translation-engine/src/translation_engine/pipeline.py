@@ -40,6 +40,11 @@ class SecondPassChunkResult:
     revised_text: str
 
 
+class TranslationStructureError(ValueError):
+    code = "translation_structure_invalid"
+    retryable = True
+
+
 class SecondPass(Protocol):
     def reflect(self, *, request: SecondPassRequest) -> str: ...
 
@@ -188,10 +193,9 @@ def run_second_pass_chunk(
         and _placeholders_valid(candidate, expected)
         and (candidate_validator is None or candidate_validator(candidate))
     )
-    return SecondPassChunkResult(
-        reflection_text=reflection,
-        revised_text=candidate if accepted else request.draft_text,
-    )
+    if not accepted:
+        raise TranslationStructureError("second-pass output changed protected structure")
+    return SecondPassChunkResult(reflection_text=reflection, revised_text=candidate)
 
 
 def _context_payload(
@@ -224,7 +228,7 @@ def translate_chunk_with_fallback(
             # text here would bake throttling into the output artifact.
             raise
         except ProviderUnavailableError:
-            continue
+            raise
         if (
             isinstance(translated, str)
             and _placeholders_valid(translated, expected)
@@ -245,7 +249,9 @@ def translate_chunk_with_fallback(
             return ChunkTranslationResult(aligned, "aligned", provider_attempts)
     except RateLimitError:
         raise
-    except (ProviderUnavailableError, TypeError, ValueError):
+    except ProviderUnavailableError:
+        raise
+    except (TypeError, ValueError):
         pass
 
     return ChunkTranslationResult(request.text, "source", provider_attempts)

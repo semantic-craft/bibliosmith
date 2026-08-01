@@ -32,6 +32,7 @@ from .placeholders import (
     protect_markdown_for_chunking,
 )
 from .profiles import TargetLanguageProfile, get_target_profile
+from .progress import OperationProgress
 from .providers import (
     LLMProvider,
     ProviderError,
@@ -66,6 +67,12 @@ class TranslationUnitSource:
     source_text: str
     task_bytes: bytes
     profile_task: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TranslationWorkPlan:
+    total: int
+    resumed_by_unit: Mapping[str, int]
 
 
 @dataclass(frozen=True)
@@ -130,6 +137,25 @@ def run_manifest(
     translation_policy_version = _required_string(
         manifest, "translationPolicyVersion"
     )
+    planned_work = _planned_translation_work(
+        project_root=project_root,
+        source_map=source_map,
+        units=units,
+        target_language=target_language,
+        max_tokens=max_tokens,
+        pass_count=2 if second_pass_enabled else 1,
+        provider=provider,
+        translation_policy_version=translation_policy_version,
+        text_cleanup=text_cleanup,
+        custom_translation=custom_translation,
+        custom_reflection=custom_reflection,
+    )
+    operation_progress = OperationProgress.from_environment(
+        stage_id="translate", unit_kind="chunks", total=planned_work.total
+    )
+    operation_progress.start("translating")
+    for unit_id, completed in planned_work.resumed_by_unit.items():
+        operation_progress.update_item(unit_id, completed, "translating")
     placeholder_retries = manifest.get("placeholderRetries", 1)
     if (
         not isinstance(placeholder_retries, int)
@@ -144,9 +170,10 @@ def run_manifest(
     dispatch_stopped = threading.Event()
 
     def translate_one(unit: Any) -> dict[str, Any]:
-        if dispatch_stopped.is_set():
-            return _rate_limited_report(project_root, unit)
         try:
+            if dispatch_stopped.is_set():
+                return _rate_limited_report(project_root, unit)
+            operation_progress.touch("translating")
             return _translate_unit(
                 project_root=project_root,
                 source_map=source_map,
@@ -164,6 +191,7 @@ def run_manifest(
                 text_cleanup=text_cleanup,
                 custom_translation=custom_translation,
                 custom_reflection=custom_reflection,
+                progress_callback=operation_progress.update_item,
             )
         except (
             OSError,
@@ -179,10 +207,13 @@ def run_manifest(
                 "status": "failed",
                 "error": {
                     "code": getattr(error, "code", "unit_invalid"),
-                    "retryable": isinstance(error, ProviderUnavailableError),
+                    "retryable": getattr(
+                        error,
+                        "retryable",
+                        isinstance(error, ProviderUnavailableError),
+                    ),
                 },
             }
-
     # Units overlap up to the provider's declared limit. Chunks inside a unit
     # stay strictly serial -- each chunk's prompt carries the tail of the previous
     # chunk's translation -- and every unit writes only paths derived from its own
@@ -212,6 +243,96 @@ def run_manifest(
         "summary": {"total": len(unit_reports), "completed": completed, "failed": failed},
         "units": unit_reports,
     }
+
+
+def _planned_translation_work(
+    *,
+    project_root: Path,
+    source_map: Mapping[str, Any],
+    units: Sequence[Any],
+    target_language: str,
+    max_tokens: int,
+    pass_count: int,
+    provider: LLMProvider,
+    translation_policy_version: str,
+    text_cleanup: bool,
+    custom_translation: str | None,
+    custom_reflection: str | None,
+) -> TranslationWorkPlan:
+    total = 0
+    resumed_by_unit: dict[str, int] = {}
+    checkpoint_store = CheckpointStore(
+        project_root / "chapters" / "translated" / ".partial"
+    )
+    reflection_store = CheckpointStore(
+        project_root
+        / "chapters"
+        / "translated"
+        / ".partial"
+        / "reflection"
+    )
+    translation_pass_id = _custom_instruction_pass_id(
+        "translation-v1-text-cleanup" if text_cleanup else "translation-v1",
+        custom_translation,
+    )
+    for unit in units:
+        try:
+            task_path = _project_path(
+                project_root, _required_string(unit, "taskManifestPath")
+            )
+            loaded = load_translation_unit(
+                project_root=project_root,
+                source_map=source_map,
+                task_path=task_path,
+                target_language=target_language,
+            )
+            protected = protect_markdown_for_chunking(loaded.source_text)
+            chunk_count = len(
+                TokenChunker(max_tokens=max_tokens, counter=Utf8ByteTokenCounter()).split(
+                    protected.text
+                )
+            )
+            total += chunk_count
+            first_pass_key = UnitIdempotencyKey(
+                task_manifest_sha256=_sha256(loaded.task_bytes),
+                provider_profile_id=provider.profile_id,
+                provider_config_id=provider.config_id,
+                translation_policy_version=translation_policy_version,
+                pass_id=translation_pass_id,
+            )
+            checkpoint = checkpoint_store.load(loaded.unit_id, first_pass_key)
+            if checkpoint is not None and checkpoint.next_chunk_index > chunk_count:
+                checkpoint_store.delete(loaded.unit_id)
+                checkpoint = None
+            completed = checkpoint.next_chunk_index if checkpoint is not None else 0
+
+            if pass_count == 2:
+                total += chunk_count
+                if completed == chunk_count:
+                    reflection_key = UnitIdempotencyKey(
+                        task_manifest_sha256=_sha256(loaded.task_bytes),
+                        provider_profile_id=provider.profile_id,
+                        provider_config_id=provider.config_id,
+                        translation_policy_version=translation_policy_version,
+                        pass_id=_custom_instruction_pass_id(
+                            f"reflection-v1+{translation_pass_id}", custom_reflection
+                        ),
+                    )
+                    reflection = reflection_store.load(loaded.unit_id, reflection_key)
+                    if reflection is not None and (
+                        reflection.next_chunk_index > chunk_count
+                        or len(reflection.reflection_chunks)
+                        != reflection.next_chunk_index
+                    ):
+                        reflection_store.delete(loaded.unit_id)
+                        reflection = None
+                    if reflection is not None:
+                        completed += reflection.next_chunk_index
+            if completed > 0:
+                resumed_by_unit[loaded.unit_id] = completed
+        except (OSError, json.JSONDecodeError, EngineError, ValueError):
+            total += pass_count
+    return TranslationWorkPlan(max(1, total), resumed_by_unit)
 
 
 def _unit_concurrency(provider: LLMProvider, unit_count: int) -> int:
@@ -314,6 +435,7 @@ def _translate_unit(
     text_cleanup: bool,
     custom_translation: str | None,
     custom_reflection: str | None,
+    progress_callback: Callable[[str, int, str], None] | None = None,
 ) -> dict[str, Any]:
     unit = load_translation_unit(
         project_root=project_root,
@@ -355,6 +477,8 @@ def _translate_unit(
         checkpoint = None
     resumed_chunk_count = checkpoint.next_chunk_index if checkpoint is not None else 0
     translated_chunks = list(checkpoint.translated_chunks) if checkpoint else []
+    if progress_callback is not None:
+        progress_callback(unit_id, resumed_chunk_count, "translating")
     checkpoint_prefix_open = True
     aligned_fallback_count = 0
     source_fallback_count = 0
@@ -366,6 +490,8 @@ def _translate_unit(
     # first source fallback, so anything resumed is known to have translated.
     source_fallback_indices: set[int] = set()
     for index in range(resumed_chunk_count, len(chunks)):
+        if progress_callback is not None:
+            progress_callback(unit_id, index, "translating")
         system_instruction = target_profile.build_system_instruction(
             source_text=chunks[index],
             task_manifest=profile_task,
@@ -417,6 +543,8 @@ def _translate_unit(
                     translated_chunks=tuple(translated_chunks),
                 ),
             )
+        if progress_callback is not None:
+            progress_callback(unit_id, index + 1, "translating")
     second_pass_applied = second_pass is not None and source_fallback_count == 0
     second_pass_resumed_chunk_count = 0
     second_pass_checkpoint_store = None
@@ -472,7 +600,15 @@ def _translate_unit(
             )
             reflection_chunks = list(second_pass_checkpoint.reflection_chunks)
             revised_chunks = list(second_pass_checkpoint.translated_chunks)
+        if progress_callback is not None:
+            progress_callback(
+                unit_id,
+                len(chunks) + second_pass_resumed_chunk_count,
+                "reviewing",
+            )
         for index in range(second_pass_resumed_chunk_count, len(chunks)):
+            if progress_callback is not None:
+                progress_callback(unit_id, len(chunks) + index, "reviewing")
             source_chunk = chunks[index]
             result = run_second_pass_chunk(
                 second_pass,
@@ -514,6 +650,8 @@ def _translate_unit(
                     reflection_chunks=tuple(reflection_chunks),
                 ),
             )
+            if progress_callback is not None:
+                progress_callback(unit_id, len(chunks) + index + 1, "reviewing")
         reflection_text = _render_reflection_evidence(reflection_chunks)
         reflection_relative = f"qa/reflection/{unit_id}.reflection.md"
         atomic_write_text(
@@ -609,7 +747,10 @@ def _translate_unit(
         }
         report["secondPassArtifacts"] = second_pass_artifacts
     if not complete:
-        report["error"] = {"code": "translation_incomplete", "retryable": True}
+        report["error"] = {
+            "code": "translation_structure_invalid",
+            "retryable": True,
+        }
     return report
 
 

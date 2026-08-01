@@ -6,6 +6,8 @@ import unittest
 from translation_engine.engine import run_manifest
 from translation_engine.providers import (
     FatalError,
+    ProviderServerError,
+    ProviderTimeoutError,
     RateLimitError,
     TranslationRequest,
 )
@@ -32,7 +34,45 @@ class RateLimitedProvider:
         raise RateLimitError(retry_after_seconds=600.0)
 
 
+class ClassifiedTransientProvider:
+    profile_id = "classified-provider"
+    config_id = "classified-config"
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def translate(self, request: TranslationRequest) -> str:
+        raise self.error
+
+
 class ProviderErrorReportingTests(unittest.TestCase):
+    def test_transient_provider_failures_keep_their_safe_classification(self) -> None:
+        cases = (
+            (ProviderTimeoutError("private timeout detail"), "provider_timeout"),
+            (ProviderServerError("private 503 detail"), "provider_http_5xx"),
+        )
+        for error, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    manifest_path = build_run_fixture(
+                        Path(temporary_directory),
+                        source_text="chapter\n",
+                        max_tokens=20,
+                    )
+
+                    report = run_manifest(
+                        manifest_path,
+                        provider_factory=lambda profile_id, *, config_id: (
+                            ClassifiedTransientProvider(error)
+                        ),
+                    )
+
+                self.assertEqual(
+                    report["units"][0]["error"],
+                    {"code": expected_code, "retryable": True},
+                )
+                self.assertNotIn(str(error), json.dumps(report))
+
     def test_fatal_provider_error_fails_the_unit_without_marking_it_retryable(
         self,
     ) -> None:

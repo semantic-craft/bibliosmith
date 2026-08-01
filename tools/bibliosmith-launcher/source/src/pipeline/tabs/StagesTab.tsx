@@ -5,6 +5,7 @@ import {
   focusStages,
   formatTime,
   stageLabel,
+  unitFailureLabel,
   type BookUnit,
 } from "../model";
 import type { TabProps } from "./tabProps";
@@ -74,6 +75,14 @@ function StageEvidence({ unit, copy }: { unit: BookUnit; copy: PipelineCopy }) {
     rows.push({
       key: copy.stageUnitsLabel,
       value: `${stage.unitSummary.completed}/${stage.unitSummary.total}`,
+    });
+  }
+  if (stage.unitSummary?.failures?.length) {
+    rows.push({
+      key: copy.stageFailedUnitsLabel,
+      value: stage.unitSummary.failures
+        .map((failure) => `${failure.unitId}：${unitFailureLabel(failure.code, copy)}`)
+        .join("；"),
     });
   }
   if (stage.artifactIds.length) rows.push({ key: copy.stageArtifactsLabel, value: String(stage.artifactIds.length) });

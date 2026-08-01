@@ -23,6 +23,11 @@ from urllib.parse import urlparse
 
 import requests
 
+_PROGRESS_SCRIPTS = Path(__file__).resolve().parent / "scripts"
+if str(_PROGRESS_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_PROGRESS_SCRIPTS))
+from progress import OperationProgress
+
 
 APP_ROOT = Path(__file__).resolve().parent
 FILE_URLS_BATCH_URL = "https://mineru.net/api/v4/file-urls/batch"
@@ -51,6 +56,7 @@ SUPPORTED_SUFFIXES = {
 MAX_FILE_BYTES = 200 * 1024 * 1024
 MAX_PAGES = 200
 TERMINAL_STATES = {"done", "failed"}
+OPERATION_PROGRESS = OperationProgress.from_environment("extract", "pages")
 
 
 class MinerUError(Exception):
@@ -301,6 +307,19 @@ def poll_single_task(session: requests.Session, args: argparse.Namespace, token:
         result = payload.get("data", {})
         state = result.get("state", "unknown")
         progress = result.get("extract_progress") or {}
+        try:
+            extracted_pages = int(progress.get("extracted_pages"))
+        except (TypeError, ValueError):
+            extracted_pages = 0
+        try:
+            total_pages = int(progress.get("total_pages"))
+        except (TypeError, ValueError):
+            total_pages = None
+        OPERATION_PROGRESS.update(
+            completed=extracted_pages,
+            total=total_pages,
+            phase="extracting",
+        )
         state_line = "task={} state={} extracted={}/{}".format(
             task_id,
             state,
@@ -324,6 +343,18 @@ def poll_batch(session: requests.Session, args: argparse.Namespace, token: str, 
         response = session.get(url, headers=auth_headers(token), timeout=args.timeout_seconds)
         payload = checked_json(response, f"poll {batch_id}")
         results = payload.get("data", {}).get("extract_result", [])
+        progress_rows = [result.get("extract_progress") or {} for result in results]
+        try:
+            extracted_pages = sum(int(row.get("extracted_pages")) for row in progress_rows)
+            total_pages = sum(int(row.get("total_pages")) for row in progress_rows)
+        except (TypeError, ValueError):
+            extracted_pages = 0
+            total_pages = None
+        OPERATION_PROGRESS.update(
+            completed=extracted_pages,
+            total=total_pages,
+            phase="extracting",
+        )
         counts: dict[str, int] = {}
         for result in results:
             state = result.get("state", "unknown")
@@ -352,6 +383,7 @@ def unpack_result_zip(zip_path: Path, extract_dir: Path) -> None:
 
 
 def download_results(args: argparse.Namespace, batch_id: str, results: list[dict]) -> None:
+    OPERATION_PROGRESS.touch("downloading")
     batch_dir = Path(args.output_dir).resolve() / batch_id
     batch_dir.mkdir(parents=True, exist_ok=True)
     (batch_dir / "batch_results.json").write_text(
@@ -386,6 +418,7 @@ def download_results(args: argparse.Namespace, batch_id: str, results: list[dict
 
 
 def download_single_result(args: argparse.Namespace, task_id: str, result: dict) -> None:
+    OPERATION_PROGRESS.touch("downloading")
     task_dir = Path(args.output_dir).resolve() / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "task_result.json").write_text(
@@ -516,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
     local_items, url_items = collect_items(args)
     if not local_items and not url_items:
         raise MinerUError("No supported local files or URLs found")
+    OPERATION_PROGRESS.start("uploading")
     print(f"local_files={len(local_items)} urls={len(url_items)}")
     process_batches(args, token, local_items, url_items)
     return 0

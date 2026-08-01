@@ -1,7 +1,10 @@
 import json
+import hashlib
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from translation_engine.checkpoint import (
     CheckpointStore,
@@ -15,7 +18,7 @@ from translation_engine.providers import (
     ProviderUnavailableError,
     TranslationRequest,
 )
-from tests.fixtures import build_run_fixture
+from tests.fixtures import build_multi_unit_run_fixture, build_run_fixture
 
 
 class FailAfterOneChunkProvider:
@@ -81,7 +84,61 @@ class RecordingFakeProvider:
         return self.fake.translate(request)
 
 
+class ProgressCapturingProvider(RecordingFakeProvider):
+    concurrency_limit = 1
+
+    def __init__(self, progress_path: Path) -> None:
+        super().__init__()
+        self.progress_path = progress_path
+        self.first_request_progress: dict[str, object] | None = None
+
+    def translate(self, request: TranslationRequest) -> str:
+        if self.first_request_progress is None:
+            self.first_request_progress = json.loads(
+                self.progress_path.read_text(encoding="utf-8")
+            )
+        return super().translate(request)
+
+
 class CheckpointStoreTests(unittest.TestCase):
+    def test_queued_resume_checkpoints_are_counted_before_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            manifest_path = build_multi_unit_run_fixture(
+                project_root,
+                source_texts=["aa bb", "cc dd"],
+                max_tokens=3,
+            )
+            second_task = project_root / "qa" / "tasks" / "chapter_002.json"
+            checkpoint_key = UnitIdempotencyKey(
+                task_manifest_sha256=hashlib.sha256(second_task.read_bytes()).hexdigest(),
+                provider_profile_id="fake-provider-profile",
+                provider_config_id="fake-config-no-secrets",
+                translation_policy_version="translation-policy-v1",
+            )
+            CheckpointStore(
+                project_root / "chapters" / "translated" / ".partial"
+            ).save(
+                "chapter_002",
+                checkpoint_key,
+                UnitCheckpoint(next_chunk_index=1, translated_chunks=("CC ",)),
+            )
+            progress_path = project_root / ".book-pipeline-progress"
+            provider = ProgressCapturingProvider(progress_path)
+
+            with mock.patch.dict(
+                os.environ,
+                {"BIBLIOSMITH_PROGRESS_PATH": str(progress_path)},
+            ):
+                report = run_manifest(
+                    manifest_path,
+                    provider_factory=lambda profile_id, *, config_id: provider,
+                )
+
+            self.assertEqual(report["summary"]["completed"], 2)
+            self.assertIsNotNone(provider.first_request_progress)
+            self.assertEqual(provider.first_request_progress["completed"], 1)
+
     def test_later_chunk_request_includes_previous_translation_tail_of_25_words(
         self,
     ) -> None:
@@ -240,7 +297,8 @@ class CheckpointStoreTests(unittest.TestCase):
             )
             self.assertEqual(interrupted["units"][0]["status"], "failed")
             self.assertEqual(
-                interrupted["units"][0]["error"]["code"], "translation_incomplete"
+                interrupted["units"][0]["error"],
+                {"code": "provider_unavailable", "retryable": True},
             )
             self.assertTrue(checkpoint_path.is_file())
             final_output_path = (
@@ -254,8 +312,7 @@ class CheckpointStoreTests(unittest.TestCase):
                 / "chapter_001.degraded.md"
             )
             self.assertFalse(final_output_path.exists())
-            degraded_output = degraded_output_path.read_text(encoding="utf-8")
-            self.assertEqual(degraded_output, "ONE two three four five six.\n")
+            self.assertFalse(degraded_output_path.exists())
 
             resumed = run_manifest(manifest_path)
 

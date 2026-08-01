@@ -22,10 +22,12 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlparse
 
 import requests
+
+from progress import OperationProgress
 
 try:
     import fitz  # PyMuPDF
@@ -961,7 +963,12 @@ class BaiduOCRClient:
             raise RetryableRemoteError(f"Retryable Baidu submit response after upload: {exc}") from exc
         return payload["data"]["jobId"]
 
-    def poll_json_url(self, job_id: str, deadline: float) -> str:
+    def poll_json_url(
+        self,
+        job_id: str,
+        deadline: float,
+        on_progress: Callable[[int | None, int | None], None] | None = None,
+    ) -> str:
         stalled_seconds = int(os.environ.get("BAIDU_STALLED_JOB_SECONDS", "300") or "0")
         last_progress: tuple[Any, ...] | None = None
         last_progress_at = time.time()
@@ -988,6 +995,16 @@ class BaiduOCRClient:
                 raise WorkerError(f"Baidu OCR job failed: {data.get('errorMsg')}")
             if state in {"pending", "running"}:
                 progress = data.get("extractProgress", {})
+                if on_progress is not None:
+                    try:
+                        extracted_pages = int(progress.get("extractedPages"))
+                    except (TypeError, ValueError):
+                        extracted_pages = None
+                    try:
+                        reported_total = int(progress.get("totalPages"))
+                    except (TypeError, ValueError):
+                        reported_total = None
+                    on_progress(extracted_pages, reported_total)
                 progress_key = (
                     state,
                     progress.get("extractedPages"),
@@ -1601,6 +1618,10 @@ def process_ocr_route(
         return "blocked_missing_baidu_token", 0
 
     baidu = BaiduOCRClient(config)
+    operation_progress = OperationProgress.from_environment(
+        "extract", "pages", total=len(pages)
+    )
+    operation_progress.start("starting")
     markdown_path, sidecar_path = output_paths(config, attachment, "paddle-ocr")
     chunk_dir = config.output_root / ".state" / "chunks" / attachment.key / source_md5
     max_bytes = config.baidu_max_upload_mb * 1024 * 1024
@@ -1611,6 +1632,7 @@ def process_ocr_route(
 
     completed_jsonl: list[tuple[int, Path]] = []
     pages_used = 0
+    progress_done = 0
     queue = list(chunk_specs)
     while queue:
         chunk_pages, chunk_path = queue.pop(0)
@@ -1634,6 +1656,12 @@ def process_ocr_route(
             cached_path = Path(chunk_row["jsonl_path"])
             if result_file_matches_model(cached_path, config):
                 completed_jsonl.append((start_page, cached_path))
+                progress_done += len(chunk_pages)
+                operation_progress.update(
+                    completed=progress_done,
+                    total=len(pages),
+                    phase="extracting",
+                )
                 continue
             logging.info("Ignoring cached chunk %s pages %s-%s from another Baidu model", attachment.key, start_page, end_page)
             chunk_row = None
@@ -1648,6 +1676,7 @@ def process_ocr_route(
         job_id = chunk_row["job_id"] if chunk_row and chunk_row["job_id"] else None
         try:
             if not job_id:
+                operation_progress.touch("uploading")
                 job_id = baidu.submit_job(
                     chunk_path,
                     batch_id=baidu_batch_id(attachment.key, source_md5, start_page, end_page),
@@ -1661,7 +1690,18 @@ def process_ocr_route(
                     chunk_path=chunk_path,
                     job_id=job_id,
                 )
-            json_url = baidu.poll_json_url(job_id, deadline)
+            completed_before_chunk = progress_done
+            json_url = baidu.poll_json_url(
+                job_id,
+                deadline,
+                on_progress=lambda extracted, _reported_total: operation_progress.update(
+                    completed=completed_before_chunk
+                    + min(max(extracted or 0, 0), len(chunk_pages)),
+                    total=len(pages),
+                    phase="extracting",
+                ),
+            )
+            operation_progress.touch("downloading")
             jsonl_text = baidu.download_jsonl(json_url)
             jsonl_path.write_text(jsonl_text, encoding="utf-8")
             state.upsert_chunk(
@@ -1676,6 +1716,12 @@ def process_ocr_route(
             )
             completed_jsonl.append((start_page, jsonl_path))
             pages_used += len(chunk_pages)
+            progress_done += len(chunk_pages)
+            operation_progress.update(
+                completed=progress_done,
+                total=len(pages),
+                phase="extracting",
+            )
             ocr_pages_remaining -= len(chunk_pages)
         except WorkerError as exc:
             if should_split_failed_ocr(exc) and len(chunk_pages) > 1:
@@ -1704,6 +1750,9 @@ def process_ocr_route(
                 continue
             raise
 
+    operation_progress.update(
+        completed=len(pages), total=len(pages), phase="assembling"
+    )
     if is_layout_model(config):
         markdown_text, combined_lines, parsed_pages = read_layout_markdown(completed_jsonl)
         if parsed_pages and parsed_pages != len(pages):
