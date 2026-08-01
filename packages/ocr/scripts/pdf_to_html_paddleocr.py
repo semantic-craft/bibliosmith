@@ -31,6 +31,7 @@ import shutil
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -454,12 +455,22 @@ def safe_filename(text: str, max_len: int = 80) -> str:
     return text or "img"
 
 
+def directory_key(name: str) -> str:
+    """The identity a name has in the filesystem's directory namespace.
+
+    APFS and NTFS fold case and unicode normalization, so "Deep_Learning" and
+    "deep_learning" are one directory on the platforms this ships on. Comparing
+    the raw strings would call them distinct and hand both books the same path.
+    """
+    return unicodedata.normalize("NFC", name).casefold()
+
+
 def assign_output_names(pdf_files: list[Path]) -> dict[Path, str]:
     """Give every PDF its own output directory name.
 
     safe_filename() is many-to-one — "Deep Learning.pdf" and "Deep_Learning.pdf"
     both normalize to "Deep_Learning" — and every per-book path (output dir,
-    assets, .html, .md, _state.json, chunk dir) derives from that one name. Two
+    assets, .html, _state.json, chunk dir) derives from that one name. Two
     colliding books would therefore share a resume state and a chunk directory,
     and the second one silently assembles the first one's OCR results instead of
     its own. The first source in sorted order keeps the plain name; later
@@ -471,14 +482,14 @@ def assign_output_names(pdf_files: list[Path]) -> dict[Path, str]:
     for path in pdf_files:
         base = safe_filename(path.stem, max_len=120)
         name = base
-        if name in taken:
+        if directory_key(name) in taken:
             digest = hashlib.sha256(path.stem.encode("utf-8")).hexdigest()
             width = 6
             name = f"{base}_{digest[:width]}"
-            while name in taken and width < len(digest):
+            while directory_key(name) in taken and width < len(digest):
                 width += 2
                 name = f"{base}_{digest[:width]}"
-        taken.add(name)
+        taken.add(directory_key(name))
         assigned[path] = name
     return assigned
 
@@ -549,13 +560,29 @@ def process_book(
     html_path = book_output_dir / f"{safe_name}.html"
     state_path = book_output_dir / "_state.json"
 
-    # Load existing state
+    # Load existing state, but only if it was written for this same PDF. Chunks
+    # are named by page range alone, so resuming from another book's state would
+    # assemble that book's OCR results under this book's title without erroring.
+    # State written before this field existed carries no owner and is trusted, so
+    # a book converted by an older build still resumes instead of paying to redo.
     state: dict[str, Any] = {"chunks_done": [], "pages_total": 0, "pages_done": 0}
     if state_path.exists():
         try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
+            existing = json.loads(state_path.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            existing = None
+        if isinstance(existing, dict):
+            owner = existing.get("source_name")
+            if owner is None or owner == pdf_path.name:
+                state = existing
+            else:
+                logging.warning(
+                    "[%s] %s holds state for %r; starting this book from scratch",
+                    book_name,
+                    state_path,
+                    owner,
+                )
+    state["source_name"] = pdf_path.name
 
     page_count = pdf_page_count(pdf_path)
     state["pages_total"] = page_count
@@ -730,13 +757,6 @@ def main() -> int:
     # Assigned over the unfiltered folder so --book/--limit-books cannot move a
     # book to a different output directory than a full run would give it.
     output_names = assign_output_names(pdf_files)
-    for path, name in output_names.items():
-        if name != safe_filename(path.stem, max_len=120):
-            logging.warning(
-                "[%s] name collides with another PDF in this folder; writing to %s",
-                path.name,
-                name,
-            )
 
     if args.book:
         pdf_files = [p for p in pdf_files if args.book in p.name]
@@ -750,6 +770,12 @@ def main() -> int:
     logging.info("Books to process: %s", len(pdf_files))
     for p in pdf_files:
         logging.info("  - %s (%s pages)", p.name, pdf_page_count(p))
+        if output_names[p] != safe_filename(p.stem, max_len=120):
+            logging.warning(
+                "[%s] name collides with another PDF in this folder; writing to %s",
+                p.name,
+                output_names[p],
+            )
 
     temp_root = output_dir / ".temp"
     temp_root.mkdir(parents=True, exist_ok=True)

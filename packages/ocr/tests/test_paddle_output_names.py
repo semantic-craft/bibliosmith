@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+import unicodedata
 from unittest import mock
 
 
@@ -68,13 +69,72 @@ def test_names_without_a_collision_are_untouched() -> None:
 
 
 def test_suffix_is_derived_from_the_stem_not_the_position() -> None:
-    """Adding an unrelated book must not renumber an already-suffixed one."""
+    """Adding an unrelated book must not renumber an already-suffixed one.
+
+    The added book sorts *before* the colliding pair, so it shifts their index.
+    A suffix derived from position would change; one derived from the stem
+    cannot.
+    """
     pair = [Path("Deep Learning.pdf"), Path("Deep_Learning.pdf")]
-    grown = [Path("Deep Learning.pdf"), Path("Deep_Learning.pdf"), Path("Zeta.pdf")]
+    grown = [Path("AAA First.pdf"), Path("Deep Learning.pdf"), Path("Deep_Learning.pdf")]
 
     suffixed = paddle.assign_output_names(pair)[pair[1]]
     assert suffixed.startswith("Deep_Learning_")
-    assert suffixed == paddle.assign_output_names(grown)[grown[1]]
+    assert suffixed == paddle.assign_output_names(grown)[grown[2]]
+
+
+def folded(name: str) -> str:
+    """What the filesystem sees. Deliberately independent of the module under test."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def test_three_colliding_stems_all_get_distinct_names() -> None:
+    files = [Path("Deep Learning.pdf"), Path("Deep_Learning.pdf"), Path("Deep:Learning.pdf")]
+
+    names = paddle.assign_output_names(files)
+
+    assert len({folded(name) for name in names.values()}) == 3, names
+    assert names[files[0]] == "Deep_Learning"
+
+
+def test_removing_a_colliding_sibling_does_not_rename_the_rest() -> None:
+    """Pins the digest to each book's own stem.
+
+    A digest taken from the shared base still yields distinct names — the
+    widening loop rescues that — but it makes every suffix depend on how many
+    siblings sort ahead, so deleting one book renames another.
+    """
+    three = [Path("Deep Learning.pdf"), Path("Deep_Learning.pdf"), Path("Deep:Learning.pdf")]
+    without_middle = [three[0], three[2]]
+
+    assert (
+        paddle.assign_output_names(three)[three[2]]
+        == paddle.assign_output_names(without_middle)[three[2]]
+    )
+
+
+def test_names_differing_only_by_case_are_treated_as_one_directory() -> None:
+    """APFS and NTFS fold case, so these are the same path despite differing."""
+    files = [Path("Deep Learning.pdf"), Path("deep_learning.pdf")]
+
+    names = paddle.assign_output_names(files)
+
+    keys = {folded(name) for name in names.values()}
+    assert len(keys) == 2, f"names collide in the filesystem namespace: {names}"
+
+
+def test_names_differing_only_by_unicode_normalization_collide() -> None:
+    """APFS folds NFC/NFD, so the composed and decomposed stems are one path."""
+    composed = "Caf\u00e9 Notes.pdf"        # e-acute as one codepoint
+    decomposed = "Cafe\u0301_Notes.pdf"     # e + combining acute
+    assert composed != decomposed
+    files = [Path(composed), Path(decomposed)]
+
+    names = paddle.assign_output_names(files)
+
+    assert len(set(names.values())) == 2
+    keys = {folded(name) for name in names.values()}
+    assert len(keys) == 2, f"names collide in the filesystem namespace: {names}"
 
 
 def test_a_real_file_named_like_the_suffix_does_not_collide() -> None:
@@ -207,6 +267,123 @@ def test_collision_is_reported(tmp_path: Path, caplog) -> None:  # type: ignore[
     assert any(
         "Deep_Learning.pdf" in message and "collides" in message for message in messages
     ), f"the renamed book must be reported, got {messages}"
+
+
+def test_a_book_never_resumes_from_another_book_s_state(tmp_path: Path) -> None:
+    """The directory alone must not be enough to inherit a finished run.
+
+    Which book keeps the plain name depends on sorted order, so a PDF added
+    later can land on a directory another book already converted. Chunks are
+    named by page range only, so an inherited `chunks_done` would make the
+    newcomer skip OCR entirely and assemble the previous book's text under its
+    own title.
+    """
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(parents=True)
+    output_dir = tmp_path / "output"
+
+    # A finished run for a different book, sitting where the newcomer will land.
+    book_dir = output_dir / "Deep_Learning"
+    book_dir.mkdir(parents=True)
+    (book_dir / "_state.json").write_text(
+        json.dumps(
+            {
+                "source_name": "Some Other Book.pdf",
+                "chunks_done": ["pages-0001-0002.pdf"],
+                "pages_total": 2,
+                "pages_done": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_chunks = output_dir / ".temp" / "Deep_Learning" / "chunks"
+    stale_chunks.mkdir(parents=True)
+    (stale_chunks / "pages-0001-0002.jsonl").write_text(
+        jsonl_for("Deep_Learning"), encoding="utf-8"
+    )
+
+    (input_dir / "Deep Learning.pdf").write_bytes(b"%PDF A")
+    CHUNK_OWNER.clear()
+    with (
+        mock.patch.object(
+            paddle,
+            "load_config",
+            return_value=SimpleNamespace(workers=1, max_upload_bytes=1 << 30),
+        ),
+        mock.patch.object(paddle, "pdf_page_count", return_value=2),
+        mock.patch.object(paddle, "make_chunk_specs", side_effect=fake_chunk_specs),
+        mock.patch.object(paddle, "BaiduOCRClient", side_effect=FakeOCRClient),
+        mock.patch.object(paddle.OperationProgress, "from_environment", return_value=mock.Mock()),
+        mock.patch.object(
+            sys,
+            "argv",
+            [
+                "pdf_to_html_paddleocr.py",
+                "--input-dir",
+                str(input_dir),
+                "--output-dir",
+                str(output_dir),
+            ],
+        ),
+    ):
+        assert paddle.main() == 0
+
+    body = (book_dir / "Deep_Learning.html").read_text(encoding="utf-8")
+    assert CONTENT["Deep Learning"] in body, "the book must OCR its own pages"
+    assert CONTENT["Deep_Learning"] not in body, "inherited another book's OCR text"
+    owner = json.loads((book_dir / "_state.json").read_text(encoding="utf-8"))["source_name"]
+    assert owner == "Deep Learning.pdf"
+
+
+def test_state_written_before_this_field_existed_still_resumes(tmp_path: Path) -> None:
+    """Older state has no owner recorded; discarding it would re-bill the OCR."""
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(parents=True)
+    output_dir = tmp_path / "output"
+    book_dir = output_dir / "Deep_Learning"
+    book_dir.mkdir(parents=True)
+    (book_dir / "_state.json").write_text(
+        json.dumps({"chunks_done": ["pages-0001-0002.pdf"], "pages_total": 2, "pages_done": 2}),
+        encoding="utf-8",
+    )
+    chunks = output_dir / ".temp" / "Deep_Learning" / "chunks"
+    chunks.mkdir(parents=True)
+    (chunks / "pages-0001-0002.jsonl").write_text(jsonl_for("Deep Learning"), encoding="utf-8")
+
+    (input_dir / "Deep Learning.pdf").write_bytes(b"%PDF A")
+    CHUNK_OWNER.clear()
+    clients: list[FakeOCRClient] = []
+
+    def track(config):  # type: ignore[no-untyped-def]
+        client = FakeOCRClient(config)
+        clients.append(client)
+        return client
+
+    with (
+        mock.patch.object(
+            paddle,
+            "load_config",
+            return_value=SimpleNamespace(workers=1, max_upload_bytes=1 << 30),
+        ),
+        mock.patch.object(paddle, "pdf_page_count", return_value=2),
+        mock.patch.object(paddle, "make_chunk_specs", side_effect=fake_chunk_specs),
+        mock.patch.object(paddle, "BaiduOCRClient", side_effect=track),
+        mock.patch.object(paddle.OperationProgress, "from_environment", return_value=mock.Mock()),
+        mock.patch.object(
+            sys,
+            "argv",
+            [
+                "pdf_to_html_paddleocr.py",
+                "--input-dir",
+                str(input_dir),
+                "--output-dir",
+                str(output_dir),
+            ],
+        ),
+    ):
+        assert paddle.main() == 0
+
+    assert clients and clients[0].stem is None, "ownerless state must still resume"
 
 
 def test_filtering_does_not_move_a_book_to_another_directory(tmp_path: Path) -> None:
