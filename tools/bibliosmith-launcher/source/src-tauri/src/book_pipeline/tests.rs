@@ -795,13 +795,9 @@ impl RunnerCommandExecutor for MineruFixtureExecutor {
         assert_eq!(command.kind, RunnerCommandKind::Process);
         match command.label.as_str() {
             ITEM_INDEX_PROFILE_COMMAND_LABEL => Ok(fixture_item_index_profile_result()),
-            "MinerU extraction wrapper" => {
+            ZOTERO_CONVERSION_COMMAND_LABEL => {
                 assert!(has_arg_pair(&command.args, "--attachment-key", "MINERU"));
-                assert!(has_arg_pair(
-                    &command.args,
-                    "--output-dir",
-                    &display_path(&command.output_dir)
-                ));
+                assert!(command.args.iter().any(|arg| arg == "--force-mineru"));
                 fs::create_dir_all(&command.output_dir).unwrap();
                 fs::write(
                     command.output_dir.join("mineru.md"),
@@ -814,7 +810,7 @@ impl RunnerCommandExecutor for MineruFixtureExecutor {
                 )
                 .unwrap();
                 Ok(RunnerCommandResult {
-                    stdout: "MinerU completed without token details".into(),
+                    stdout: "Uploaded mineru.md to Zotero attachment MINERUMD".into(),
                     stderr: String::new(),
                     log_summary: vec!["MinerU fixture completed".into()],
                 })
@@ -1577,7 +1573,8 @@ impl RunnerCommandExecutor for ZoteroBatchFixtureExecutor {
                 assert!(command.args.iter().any(|arg| arg == "--force-ocr"));
             }
             "MINERU" => {
-                assert_eq!(command.label, "MinerU extraction wrapper");
+                assert_eq!(command.label, ZOTERO_CONVERSION_COMMAND_LABEL);
+                assert!(command.args.iter().any(|arg| arg == "--force-mineru"));
             }
             other => panic!("unexpected batch key {other}"),
         }
@@ -5680,17 +5677,19 @@ fn every_ocr_entry_point_runs_through_the_workspace_venv() {
         .unwrap(),
         "zotero_llm_worker.py",
     );
-    assert_runs_in_the_ocr_workspace(
-        &build_zotero_conversion_command_for_source(
-            &fake_direct_zotero_source(),
-            &zotero_route("mineru"),
-            0,
-            &output,
-            &worker_root,
-        )
-        .unwrap(),
-        "mineru.py",
-    );
+    let mineru_command = build_zotero_conversion_command_for_source(
+        &fake_direct_zotero_source(),
+        &zotero_route("mineru"),
+        0,
+        &output,
+        &worker_root,
+    )
+    .unwrap();
+    assert_runs_in_the_ocr_workspace(&mineru_command, "zotero_llm_worker.py");
+    assert!(mineru_command
+        .args
+        .iter()
+        .any(|arg| arg == "--force-mineru"));
     assert_runs_in_the_ocr_workspace(
         &build_zotero_discovery_command_for_root(&fake_direct_zotero_source(), 5, &worker_root)
             .unwrap(),
@@ -5764,6 +5763,80 @@ fn local_pdf_runner_command_uses_existing_wrapper_contract() {
         "--output-dir",
         &display_path(&command.output_dir)
     ));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn local_pdf_folder_forced_to_mineru_uses_precision_batch_client() {
+    let root = temp_root("local-pdf-mineru-batch-command");
+    let input = root.join("input");
+    let output = root.join("output");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("one.pdf"), "%PDF fixture one").unwrap();
+    fs::write(input.join("two.pdf"), "%PDF fixture two").unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let mineru_script = wrapper_root.join("mineru.py");
+    fs::write(&mineru_script, "print('mineru fixture')\n").unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: false,
+            has_mineru_credentials: true,
+            route_overrides: BTreeMap::from([
+                ("local-pdf-1".into(), "mineru".into()),
+                ("local-pdf-2".into(), "mineru".into()),
+            ]),
+        },
+    )
+    .unwrap();
+
+    let command = build_local_pdf_folder_command_for_root(&job, &output, &wrapper_root).unwrap();
+
+    assert_eq!(command.label, "MinerU Precision batch");
+    assert_runs_in_the_ocr_workspace(&command, "mineru.py");
+    assert!(command.args.iter().any(|arg| arg == &display_path(&input)));
+    assert!(has_arg_pair(&command.args, "--mode", "batch"));
+    assert!(has_arg_pair(&command.args, "--model-version", "vlm"));
+    assert!(has_arg_pair(
+        &command.args,
+        "--output-dir",
+        &display_path(&output)
+    ));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn local_pdf_folder_rejects_a_mixed_mineru_and_paddle_batch() {
+    let root = temp_root("local-pdf-mixed-ocr-command");
+    let input = root.join("input");
+    let output = root.join("output");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("one.pdf"), "%PDF fixture one").unwrap();
+    fs::write(input.join("two.pdf"), "%PDF fixture two").unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    fs::write(wrapper_root.join("mineru.py"), "print('mineru fixture')\n").unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            has_mineru_credentials: true,
+            route_overrides: BTreeMap::from([("local-pdf-1".into(), "mineru".into())]),
+        },
+    )
+    .unwrap();
+
+    let error = build_local_pdf_folder_command_for_root(&job, &output, &wrapper_root).unwrap_err();
+
+    assert!(
+        error.contains("cannot mix MinerU and non-MinerU"),
+        "{error}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -5978,7 +6051,7 @@ fn mineru_runner_command_records_artifacts() {
     assert!(completed
         .log_summary
         .iter()
-        .any(|line| line.contains("Runner command prepared: MinerU extraction wrapper")));
+        .any(|line| line.contains("Runner command prepared: Zotero conversion worker")));
     let _ = fs::remove_dir_all(root);
 }
 

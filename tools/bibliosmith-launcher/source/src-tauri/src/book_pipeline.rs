@@ -7022,6 +7022,51 @@ fn build_local_pdf_folder_command_for_root(
         .path
         .as_deref()
         .ok_or_else(|| "Local PDF folder source is missing a path.".to_string())?;
+    let runnable_routes: Vec<&BookPipelineRouteItem> = job
+        .route
+        .iter()
+        .filter(|route| route.can_run && route.route_kind != "translation_handoff")
+        .collect();
+    let mineru_routes = runnable_routes
+        .iter()
+        .filter(|route| route.route_kind == "mineru")
+        .count();
+    if mineru_routes > 0 {
+        if mineru_routes != runnable_routes.len() {
+            return Err(
+                "One local PDF folder job cannot mix MinerU and non-MinerU routes. Split the files into separate jobs so no selected engine is silently ignored."
+                    .into(),
+            );
+        }
+        let script = root.join("mineru.py");
+        if !script.is_file() {
+            return Err(format!(
+                "MinerU Precision client not found at {}",
+                display_path(&script)
+            ));
+        }
+        let mut args = ocr_python_args(&script);
+        args.extend([
+            input_dir.into(),
+            "--output-dir".into(),
+            display_path(output_dir),
+            "--mode".into(),
+            "batch".into(),
+            "--model-version".into(),
+            "vlm".into(),
+        ]);
+        return Ok(RunnerCommand {
+            kind: RunnerCommandKind::Process,
+            label: "MinerU Precision batch".into(),
+            program: PathBuf::from("uv"),
+            args,
+            env: Vec::new(),
+            cwd: Some(root.to_path_buf()),
+            output_dir: output_dir.to_path_buf(),
+            attempts: job.attempts,
+            accepted_exit_codes: vec![0],
+        });
+    }
     let script = root.join("scripts").join("pdf_to_html_paddleocr.py");
     if !script.is_file() {
         return Err(format!(
@@ -7098,9 +7143,6 @@ fn build_zotero_conversion_command_for_source(
     output_dir: &Path,
     root: &Path,
 ) -> Result<RunnerCommand, String> {
-    if route.route_kind == "mineru" {
-        return build_mineru_command_for_root(source, attempts, output_dir, root, route);
-    }
     build_zotero_worker_conversion_command_for_source(source, route, attempts, output_dir, root)
 }
 
@@ -7172,55 +7214,6 @@ fn build_zotero_worker_conversion_command_for_source(
         attempts,
         accepted_exit_codes: vec![0],
     })
-}
-
-fn build_mineru_command_for_root(
-    source: &BookPipelineSource,
-    attempts: u32,
-    output_dir: &Path,
-    root: &Path,
-    route: &BookPipelineRouteItem,
-) -> Result<RunnerCommand, String> {
-    let script = mineru_script_for_root(root)?;
-    let selector = non_empty(source.selector.as_deref())
-        .or_else(|| non_empty(Some(route.id.as_str())))
-        .ok_or_else(|| "MinerU source is missing a selector.".to_string())?;
-    Ok(RunnerCommand {
-        kind: RunnerCommandKind::Process,
-        label: "MinerU extraction wrapper".into(),
-        program: PathBuf::from("uv"),
-        args: {
-            let mut args = ocr_python_args(&script);
-            args.extend([
-                "--attachment-key".into(),
-                selector.to_string(),
-                "--output-dir".into(),
-                display_path(output_dir),
-            ]);
-            args
-        },
-        env: vec![("OCR_OUTPUT_ROOT".into(), display_path(output_dir))],
-        cwd: Some(root.to_path_buf()),
-        output_dir: output_dir.to_path_buf(),
-        attempts,
-        accepted_exit_codes: vec![0],
-    })
-}
-
-fn mineru_script_for_root(root: &Path) -> Result<PathBuf, String> {
-    for candidate in [
-        root.join("mineru.py"),
-        root.join("scripts").join("mineru.py"),
-    ] {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "MinerU wrapper not found at {} or {}",
-        display_path(&root.join("mineru.py")),
-        display_path(&root.join("scripts").join("mineru.py"))
-    ))
 }
 
 fn build_zotero_discovery_command_for_root(

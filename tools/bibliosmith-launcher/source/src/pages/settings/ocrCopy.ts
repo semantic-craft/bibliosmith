@@ -9,8 +9,10 @@ export function ocrCopy(locale: string) {
       : "Scanned PDFs without a text layer need remote OCR to extract text; born-digital books skip this entirely. Keys are stored in the system Keychain, never in a file; a key already in the repository-root .env keeps working as the fallback.",
     paddleName: zh ? "PaddleOCR（百度飞桨）" : "PaddleOCR (Baidu)",
     paddleHint: zh ? "扫描书的主力 OCR 路线" : "The main OCR route for scanned books",
-    mineruName: "MinerU",
-    mineruHint: zh ? "低文字层期刊/文档的备选提取路线" : "The alternate extractor for low-text journals and documents",
+    mineruName: zh ? "MinerU 精准解析" : "MinerU Precision Extract",
+    mineruHint: zh
+      ? "V4 精准解析：PDF 默认 VLM，长文档自动按 200 页拆分重组"
+      : "V4 Precision Extract: VLM for PDFs, with automatic 200-page splitting and reassembly",
     apiKey: zh ? "API Token" : "API token",
     keyPlaceholder: zh ? "粘贴 API Token" : "Paste the API token",
     save: zh ? "保存" : "Save",

@@ -137,7 +137,7 @@ Single PDF through PaddleOCR:
 /opt/homebrew/bin/python3.11 scripts/paddleocr_vl_cli.py 编程书/some-book.pdf -o output/paddle/some-book
 ```
 
-MinerU API self-test:
+MinerU Precision Extract API self-test:
 
 ```bash
 /opt/homebrew/bin/python3.11 mineru.py --self-test
@@ -201,5 +201,11 @@ The state key is Zotero PDF attachment key plus source PDF MD5. If a PDF changes
 - The OCR model is `PaddleOCR-VL-1.6`, not `PP-OCRv5`; the worker writes `layoutParsingResults[*].markdown.text` directly so the Markdown keeps heading/paragraph structure.
 - The dirty-text-layer guard is controlled by `DIRTY_TEXT_LAYER_GUARD=1` and threshold env vars `DIRTY_TEXT_FULLWIDTH_ALNUM_RATIO`, `DIRTY_TEXT_PRIVATE_USE_RATIO`, and `DIRTY_TEXT_MIN_SAMPLE_CHARS`.
 - MinerU-to-Paddle replacement respects the dirty-text-layer guard and will keep the MinerU attachment instead of deleting it when the source PDF is classified as needing MinerU/quality review.
-- MinerU Precision Extract API uses `MINERU_API_TOKEN` or `MINERU_TOKEN`; `mineru.py` defaults to `model_version=vlm`, OCR enabled, and output under `output/mineru`.
+- MinerU work uses only the authenticated v4 Precision Extract endpoints: one URL uses `/api/v4/extract/task`; local files use `/api/v4/file-urls/batch`; multiple URLs use `/api/v4/extract/task/batch`; all batch results use `/api/v4/extract-results/batch/{batch_id}`. The unauthenticated Agent API is not used.
+- `mineru.py` defaults to automatic Precision model routing: non-HTML sources use `vlm`, while `.html` sources use `MinerU-HTML`. An explicit `pipeline`, `vlm`, or `MinerU-HTML` selection is validated against the source type.
+- Local uploads are grouped by required model and capped at 50 files per signed-upload request. Upload PUT requests intentionally omit `Content-Type`, as required by MinerU.
+- In the desktop launcher, a local PDF folder whose runnable items are all forced to MinerU runs through this same signed batch client with `vlm`; a mixed MinerU/Paddle folder is rejected explicitly instead of silently ignoring per-file route choices.
+- PDFs over 200 pages, or over 200 MB when their page count can be read, are physically split into parts of at most 200 pages and 200 MB before upload. A single page larger than 200 MB fails preflight instead of bypassing the API limit.
+- Downloaded part archives and JSON stay under `output/mineru/<source-data-id>/parts/`; the page-ordered reading result is `full.md`, with `mineru_manifest.json` recording the original page order. A failed or missing item makes the CLI run fail rather than reporting partial success.
+- MinerU credentials come from `MINERU_API_TOKEN` or `MINERU_TOKEN`; OCR, table recognition, and formula recognition are enabled for `pipeline`/`vlm` by default.
 - Zotero file upload follows the Web API flow: create imported-file attachment item, request upload authorization, upload bytes, register upload.
