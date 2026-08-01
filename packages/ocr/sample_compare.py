@@ -137,6 +137,8 @@ def run_paddleocr_sample(sample_pdf: Path, work_dir: Path) -> EngineOutcome:
     json_url = paddle.poll_json_url(args, headers, job_id)
     jsonl_text = paddle.download_jsonl(json_url, args.timeout_seconds)
     work_dir.mkdir(parents=True, exist_ok=True)
+    # Scratch, like everything else under work_dir: the caller removes the tree
+    # once the report is written.
     (work_dir / "paddleocr.jsonl").write_text(jsonl_text, encoding="utf-8")
     markdown, pages = paddle_markdown_from_jsonl(jsonl_text)
     return EngineOutcome(markdown=markdown, page_count=pages)
@@ -257,8 +259,17 @@ def run_sample_manifest(
 
     work_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict[str, Any]] = []
+    # Everything the engines write goes inside this directory, and none of it
+    # outlives the run. Two reasons it cannot simply be left on disk: MinerU
+    # drops the sampled pages as `part.md`, and the launcher's conversion stage
+    # recursively scans the job output tree for artifacts -- a stray .md there
+    # registers as the book's `markdown` output and can be handed off for
+    # translation in place of the real conversion. It is also the raw, unbudgeted
+    # text of the user's pages, which only the capped excerpt in the report is
+    # meant to retain.
     with tempfile.TemporaryDirectory(prefix="ocr-sample-", dir=work_dir) as scratch:
-        sample_pdf = Path(scratch) / f"sample-{source_pdf.stem}.pdf"
+        scratch_dir = Path(scratch)
+        sample_pdf = scratch_dir / f"sample-{source_pdf.stem}.pdf"
         try:
             mineru.write_pdf_selection(source_pdf, sample_pdf, selected_pages)
         except mineru.MinerUError as error:
@@ -268,7 +279,7 @@ def run_sample_manifest(
             if runner is None:
                 raise SampleCompareError(f"unsupported_engine:{engine}")
             results.append(
-                _run_one_engine(engine, runner, sample_pdf, work_dir, character_budget)
+                _run_one_engine(engine, runner, sample_pdf, scratch_dir, character_budget)
             )
 
     report = {

@@ -325,6 +325,40 @@ class RunSampleManifestTests(unittest.TestCase):
         )
         self.assertFalse(runner.calls[0][0].exists())
 
+    def test_no_engine_output_survives_the_run(self) -> None:
+        # The launcher's conversion stage recursively scans the job output tree
+        # for artifacts, and this work directory sits inside it. A surviving
+        # .md -- MinerU writes the sampled pages as part.md -- registers as the
+        # book's own Markdown and can be handed off for translation in place of
+        # the real conversion. It is also the raw uncapped text of the pages.
+        fixture = ManifestFixture(self.root)
+
+        def writes_engine_output(sample_pdf: Path, work_dir: Path):  # type: ignore[no-untyped-def]
+            work_dir.mkdir(parents=True, exist_ok=True)
+            (work_dir / "part.md").write_text("sampled page text", encoding="utf-8")
+            (work_dir / "result.jsonl").write_text("{}", encoding="utf-8")
+            return sample_compare.EngineOutcome(markdown="# Paddle", page_count=3)
+
+        sample_compare.run_sample_manifest(
+            fixture.path,
+            engine_runners={
+                "paddleocr": writes_engine_output,
+                "mineru": writes_engine_output,
+            },
+        )
+
+        survivors = sorted(
+            path.relative_to(fixture.project_root).as_posix()
+            for path in fixture.project_root.rglob("*")
+            if path.is_file()
+        )
+        # The report, and nothing else -- no .md, no .jsonl, no engine tree.
+        self.assertEqual(
+            survivors,
+            ["qa/ocr-sample/report.json"],
+            f"engine scratch survived: {survivors}",
+        )
+
 
 class EngineErrorRedactionTests(unittest.TestCase):
     """The error text lands in a file, so it gets the log-line treatment."""

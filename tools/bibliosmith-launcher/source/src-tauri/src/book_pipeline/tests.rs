@@ -13411,3 +13411,63 @@ fn ocr_sample_reports_a_worker_that_produced_no_usable_report() {
         let _ = fs::remove_dir_all(root);
     }
 }
+
+/// The conversion stage scans the whole job output root recursively, and the
+/// engine comparison lands inside it. Left visible, MinerU's sampled `part.md`
+/// registers as the book's `markdown` artifact -- and for a route whose
+/// converter emits no Markdown at all it becomes the *only* one, so the
+/// translation project is built from three sampled pages instead of the book,
+/// with a valid digest and no error anywhere.
+#[test]
+fn a_conversion_scan_ignores_the_ocr_sample_directory() {
+    let root = temp_root("ocr-sample-scan-isolation");
+    let store = MemoryStateStore::new(&root);
+    let (job_id, child_id, _) = ocr_sample_ready_job(&root, &store);
+    run_ocr_sample_with_executor(
+        &store,
+        &job_id,
+        Some(&child_id),
+        OCR_SAMPLE_PAGE_COUNT,
+        &OcrSampleFixtureExecutor::default(),
+    )
+    .unwrap();
+
+    let job_output = store.job_output_dir(&job_id);
+    // The real conversion output, so the scan has something legitimate to find.
+    let converted = job_output.join("book.md");
+    fs::write(&converted, "# The actual book\n").unwrap();
+    // What MinerU leaves behind mid-sample, if the scratch tree ever survives.
+    let strays = ocr_sample_dir(&store, &job_id, &child_id)
+        .join("work")
+        .join("mineru");
+    fs::create_dir_all(&strays).unwrap();
+    fs::write(strays.join("part.md"), "three sampled pages\n").unwrap();
+
+    let scanned = scan_artifacts(&job_output).unwrap();
+    let markdown: Vec<_> = scanned
+        .iter()
+        .filter(|artifact| artifact.kind == "markdown")
+        .map(|artifact| artifact.path.clone())
+        .collect();
+    assert_eq!(
+        markdown,
+        vec![display_path(&converted)],
+        "the sample tree leaked into the conversion's artifacts"
+    );
+    // The report itself is registered by the sample command, not by this scan.
+    // Compared against the real sample directory rather than by substring: the
+    // temp root's own name contains "ocr-sample" and would match either way.
+    let sample_dir = ocr_sample_dir(&store, &job_id, &child_id);
+    assert!(
+        !scanned
+            .iter()
+            .any(|artifact| Path::new(&artifact.path).starts_with(&sample_dir)),
+        "sample files were scanned as conversion output: {:?}",
+        scanned
+            .iter()
+            .map(|artifact| artifact.path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let _ = fs::remove_dir_all(root);
+}

@@ -8863,6 +8863,13 @@ fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> R
             if path.extension().and_then(|extension| extension.to_str()) == Some("mineru") {
                 continue;
             }
+            // The OCR engine comparison is evidence for choosing a route, not
+            // conversion output, and it lands under the same job output root
+            // this scan walks. Registered here, its report would become a
+            // `metadata` artifact of a conversion that never produced it.
+            if path.file_name().and_then(|name| name.to_str()) == Some(OCR_SAMPLE_DIR_NAME) {
+                continue;
+            }
             collect_artifacts(&path, artifacts)?;
             continue;
         }
@@ -11073,7 +11080,7 @@ fn ocr_sample_dir(store: &dyn BookPipelineStateStore, job_id: &str, child_id: &s
         .job_output_dir(job_id)
         .join(clean_path_component(child_id))
         .join("qa")
-        .join("ocr-sample")
+        .join(OCR_SAMPLE_DIR_NAME)
 }
 
 fn build_ocr_sample_command(

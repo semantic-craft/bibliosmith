@@ -46,6 +46,11 @@ pub(crate) const TRANSLATION_ENGINE_SAMPLE_REPORT_SCHEMA: &str =
 pub(crate) const TRANSLATION_ENGINE_SAMPLE_COMMAND_LABEL: &str = "translation engine sample";
 pub(crate) const TRANSLATION_SAMPLE_COUNT: usize = 3;
 pub(crate) const TRANSLATION_SAMPLE_CHARACTER_BUDGET: usize = 800;
+/// Directory holding one child's engine comparison, under the job output root.
+/// `collect_artifacts` skips it by this name: the comparison is evidence for a
+/// routing decision, not conversion output, and the scan that walks the job
+/// output tree would otherwise register it as the book's own artifacts.
+pub(crate) const OCR_SAMPLE_DIR_NAME: &str = "ocr-sample";
 pub(crate) const OCR_SAMPLE_COMPARE_SCHEMA: &str = "ocr-sample-compare-v1";
 pub(crate) const OCR_SAMPLE_COMPARE_REPORT_SCHEMA: &str = "ocr-sample-compare-report-v1";
 pub(crate) const OCR_SAMPLE_COMPARE_COMMAND_LABEL: &str = "OCR sample compare";
