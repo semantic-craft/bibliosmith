@@ -294,6 +294,9 @@ pub(crate) fn ordered_child_stage_ids(
             "build_digest",
         ]
     } else {
+        // The retired conversion-only shape. Only jobs stored before the mode
+        // was retired reach this arm; enqueue refuses the mode outright, so no
+        // new job is given a pipeline that stops short of translation.
         vec!["route", "extract", "index"]
     }
 }

@@ -12,6 +12,7 @@ import {
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
+  BookPipelineOcrSampleReport,
   BookPipelineTranslationSampleReport,
   BookPipelineTranslationIntent,
   BookPipelineZoteroDiscoveryResult,
@@ -1389,6 +1390,23 @@ export function readBookPipelineTranslationSample(jobId: string, childId: string
     return Promise.reject(new Error("Translation samples require the desktop runtime."));
   }
   return invoke<BookPipelineTranslationSampleReport>("read_book_pipeline_translation_sample", { jobId, childId });
+}
+
+// Both OCR engines over the same sampled interior pages. Like the translation
+// sample this decides nothing on its own: adopting the winner is a separate
+// route override, so a comparison can be run and then ignored.
+export function runBookPipelineOcrSample(jobId: string, childId: string, samplePages?: number) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("OCR samples require the desktop runtime."));
+  }
+  return invoke<BookPipelineJob>("run_book_pipeline_ocr_sample", { jobId, childId, samplePages });
+}
+
+export function readBookPipelineOcrSample(jobId: string, childId: string) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("OCR samples require the desktop runtime."));
+  }
+  return invoke<BookPipelineOcrSampleReport>("read_book_pipeline_ocr_sample", { jobId, childId });
 }
 
 
