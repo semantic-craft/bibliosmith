@@ -453,6 +453,35 @@ def safe_filename(text: str, max_len: int = 80) -> str:
         text = text[:max_len]
     return text or "img"
 
+
+def assign_output_names(pdf_files: list[Path]) -> dict[Path, str]:
+    """Give every PDF its own output directory name.
+
+    safe_filename() is many-to-one — "Deep Learning.pdf" and "Deep_Learning.pdf"
+    both normalize to "Deep_Learning" — and every per-book path (output dir,
+    assets, .html, .md, _state.json, chunk dir) derives from that one name. Two
+    colliding books would therefore share a resume state and a chunk directory,
+    and the second one silently assembles the first one's OCR results instead of
+    its own. The first source in sorted order keeps the plain name; later
+    collisions get a suffix derived from their own stem, so a book's directory
+    stays the same across runs.
+    """
+    assigned: dict[Path, str] = {}
+    taken: set[str] = set()
+    for path in pdf_files:
+        base = safe_filename(path.stem, max_len=120)
+        name = base
+        if name in taken:
+            digest = hashlib.sha256(path.stem.encode("utf-8")).hexdigest()
+            width = 6
+            name = f"{base}_{digest[:width]}"
+            while name in taken and width < len(digest):
+                width += 2
+                name = f"{base}_{digest[:width]}"
+        taken.add(name)
+        assigned[path] = name
+    return assigned
+
 # ---------------------------------------------------------------------------
 # Markdown -> HTML
 # ---------------------------------------------------------------------------
@@ -503,10 +532,16 @@ def process_book(
     config: Config,
     temp_root: Path,
     operation_progress: OperationProgress,
+    output_name: str | None = None,
 ) -> Path:
-    """Convert a single PDF to standalone HTML. Returns path to HTML file."""
+    """Convert a single PDF to standalone HTML. Returns path to HTML file.
+
+    ``output_name`` is the directory name to write under. main() passes the
+    collision-free name from assign_output_names(); it falls back to the plain
+    derivation when a single book is converted on its own.
+    """
     book_name = pdf_path.stem
-    safe_name = safe_filename(book_name, max_len=120)
+    safe_name = output_name or safe_filename(book_name, max_len=120)
     book_output_dir = output_dir / safe_name
     assets_dir = book_output_dir / f"{safe_name}_assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -692,6 +727,17 @@ def main() -> int:
         logging.error("No PDF files found in %s", input_dir)
         return 1
 
+    # Assigned over the unfiltered folder so --book/--limit-books cannot move a
+    # book to a different output directory than a full run would give it.
+    output_names = assign_output_names(pdf_files)
+    for path, name in output_names.items():
+        if name != safe_filename(path.stem, max_len=120):
+            logging.warning(
+                "[%s] name collides with another PDF in this folder; writing to %s",
+                path.name,
+                name,
+            )
+
     if args.book:
         pdf_files = [p for p in pdf_files if args.book in p.name]
         if not pdf_files:
@@ -721,7 +767,13 @@ def main() -> int:
         with ThreadPoolExecutor(max_workers=config.workers) as executor:
             futures = {
                 executor.submit(
-                    process_book, p, output_dir, config, temp_root, operation_progress
+                    process_book,
+                    p,
+                    output_dir,
+                    config,
+                    temp_root,
+                    operation_progress,
+                    output_names[p],
                 ): p
                 for p in pdf_files
             }
@@ -737,7 +789,7 @@ def main() -> int:
         for p in pdf_files:
             try:
                 html_path = process_book(
-                    p, output_dir, config, temp_root, operation_progress
+                    p, output_dir, config, temp_root, operation_progress, output_names[p]
                 )
                 logging.info("DONE: %s -> %s", p.name, html_path)
             except Exception as exc:
