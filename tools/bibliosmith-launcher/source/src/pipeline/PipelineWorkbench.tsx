@@ -4,7 +4,6 @@ import type {
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
-  BookPipelineDiagnosticProfile,
   ModelSlotView,
 } from "../types";
 import "./pipeline.css";
@@ -33,7 +32,6 @@ export type PipelineWorkbenchProps = {
   onAdvance: (jobId: string, childId: string, invalidateDownstream?: boolean) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
-  onExportDiagnostic: (jobId: string, profile: BookPipelineDiagnosticProfile) => void;
   onSaveCustomInstructions: (
     jobId: string,
     childId: string,
@@ -41,14 +39,6 @@ export type PipelineWorkbenchProps = {
   ) => void;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
-  onRecordReaderEvidence: (
-    jobId: string,
-    childId: string,
-    artifactKind: string,
-    reader: string,
-    readerVersion: string,
-    conclusion: string,
-  ) => void;
   onOpenOutput: (jobId: string) => void;
   routeOverrides: Record<string, RouteOverride>;
   onRouteOverrideChange: (routeItemId: string, override: RouteOverride) => void;
@@ -191,11 +181,9 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
               onAdvance={props.onAdvance}
               onSampleTranslation={props.onSampleTranslation}
               onApplySampleProvider={props.onApplySampleProvider}
-              onExportDiagnostic={props.onExportDiagnostic}
               onSaveCustomInstructions={props.onSaveCustomInstructions}
               onApproveGate={props.onApproveGate}
               onRouteOverride={props.onRouteOverride}
-              onRecordReaderEvidence={props.onRecordReaderEvidence}
               onOpenOutput={props.onOpenOutput}
               onHandoff={props.onHandoff}
             />

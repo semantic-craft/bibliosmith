@@ -1212,24 +1212,6 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
 }
 
 /** Record that a person opened the built book in a real reader. */
-export async function recordBookPipelineReaderEvidence(
-  jobId: string,
-  childId: string,
-  artifactKind: string,
-  reader: string,
-  readerVersion: string,
-  conclusion: string,
-): Promise<BookPipelineJob> {
-  return invoke<BookPipelineJob>("record_book_pipeline_reader_evidence", {
-    jobId,
-    childId,
-    artifactKind,
-    reader,
-    readerVersion,
-    conclusion,
-  });
-}
-
 /** Re-route a book the pipeline held back, without deleting and re-queueing it. */
 export async function setBookPipelineRouteOverride(
   jobId: string,
@@ -1266,13 +1248,6 @@ export function runBookPipelineTranslationSample(
     providerConfigId,
     applyToJob,
   });
-}
-
-export function saveBookPipelineDiagnostic(jobId: string, profile: BookPipelineDiagnosticProfile) {
-  if (!isTauriRuntime()) {
-    return Promise.reject(new Error("Exporting a diagnostic bundle requires the desktop runtime."));
-  }
-  return invoke<BookPipelineActionResult>("save_book_pipeline_diagnostic", { jobId, profile });
 }
 
 export function setBookPipelineTranslationProvider(

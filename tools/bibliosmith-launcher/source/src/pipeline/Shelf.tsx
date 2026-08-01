@@ -1,5 +1,5 @@
 import type { PipelineCopy } from "./copy";
-import { stepSummaryCaption, type BookUnit } from "./model";
+import { phaseSummaryCaption, type BookUnit } from "./model";
 import { OperationProgressBar } from "./OperationProgress";
 
 function coverHue(title: string): number {
@@ -66,7 +66,7 @@ export function Shelf({
             {ribbon && <span className={`pl-ribbon ${ribbon.cls}`}>{ribbon.label}</span>}
             <div className="pl-bmeta">
               <div className="pl-bt">{unit.title}</div>
-              <div className="pl-bs">{stepSummaryCaption(unit, copy)}</div>
+              <div className="pl-bs">{phaseSummaryCaption(unit, copy)}</div>
             </div>
             {unit.status === "running" ? (
               <OperationProgressBar unit={unit} copy={copy} compact />

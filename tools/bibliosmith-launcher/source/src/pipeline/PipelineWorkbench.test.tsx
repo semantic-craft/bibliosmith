@@ -42,11 +42,9 @@ function workbenchProps(
     onAdvance: vi.fn(),
     onSampleTranslation: vi.fn(),
     onApplySampleProvider: vi.fn(),
-    onExportDiagnostic: vi.fn(),
     onSaveCustomInstructions: vi.fn(),
     onApproveGate: vi.fn(),
     onRouteOverride: vi.fn(),
-    onRecordReaderEvidence: vi.fn(),
     onOpenOutput: vi.fn(),
     routeOverrides: {},
     onRouteOverrideChange: vi.fn(),
@@ -59,7 +57,7 @@ describe("PipelineWorkbench split view", () => {
     const user = userEvent.setup();
     const { container } = render(<PipelineWorkbench {...workbenchProps()} />);
 
-    await user.click(screen.getByRole("button", { name: /A Book.*整理文字/ }));
+    await user.click(screen.getByRole("button", { name: /A Book.*转换/ }));
     const separator = screen.getByRole("separator", { name: copy.resizeDrawer });
     expect(separator.getAttribute("aria-valuenow")).toBe("50");
 
@@ -75,7 +73,7 @@ describe("PipelineWorkbench split view", () => {
     const user = userEvent.setup();
     const { container } = render(<PipelineWorkbench {...workbenchProps()} />);
 
-    await user.click(screen.getByRole("button", { name: /A Book.*整理文字/ }));
+    await user.click(screen.getByRole("button", { name: /A Book.*转换/ }));
     const separator = screen.getByRole("separator", { name: copy.resizeDrawer });
     const splitView = container.querySelector(".pl-shelfwrap") as HTMLElement;
     vi.spyOn(splitView, "getBoundingClientRect").mockReturnValue({
@@ -100,7 +98,7 @@ describe("PipelineWorkbench split view", () => {
     expect(splitView.style.getPropertyValue("--pl-drawer-width")).toBe("60%");
   });
 
-  it("states the completed text cleanup step on the shelf and in book details", async () => {
+  it("states the completed conversion phase on the shelf and in book details", async () => {
     const user = userEvent.setup();
     render(
       <PipelineWorkbench
@@ -117,9 +115,9 @@ describe("PipelineWorkbench split view", () => {
       />,
     );
 
-    expect(screen.getAllByText("整理文字：已完成；翻译：进行中")).toHaveLength(1);
-    await user.click(screen.getByRole("button", { name: /A Book.*整理文字/ }));
-    expect(screen.getAllByText("整理文字：已完成；翻译：进行中").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("转换：已完成；翻译：进行中")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: /A Book.*转换/ }));
+    expect(screen.getAllByText("转换：已完成；翻译：进行中").length).toBeGreaterThanOrEqual(2);
   });
 
   it("shows live AI work with a real chapter progress bar", async () => {

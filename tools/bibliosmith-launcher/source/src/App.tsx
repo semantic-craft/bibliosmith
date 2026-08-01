@@ -6,7 +6,6 @@ import {
   chooseBookPipelinePdfFolder,
   advanceBookPipelineJob,
   setBookPipelineRouteOverride,
-  recordBookPipelineReaderEvidence,
   approveBookPipelineGate,
   deleteBookPipelineJob,
   discoverBookPipelineZoteroSources,
@@ -26,7 +25,6 @@ import {
   recordFrontendActivity,
   retryBookPipelineJob,
   runBookPipelineTranslationSample,
-  saveBookPipelineDiagnostic,
   setBookPipelineTranslationProvider,
   runBookPipelineJob,
   saveBookPipelineCustomInstructions,
@@ -40,7 +38,6 @@ import {
   BookPipelineCustomInstructions,
   BookPipelineJob,
   BookPipelinePreviewConfig,
-  BookPipelineDiagnosticProfile,
   BookPipelineRouteItem,
   BookPipelineSource,
   BookPipelineState,
@@ -381,36 +378,6 @@ export default function App() {
     }
   }, [addActivity, bookPipelineCopy.customInstructionsSaved, showFloatingToast]);
 
-  const recordReaderEvidence = useCallback(async (
-    jobId: string,
-    childId: string,
-    artifactKind: string,
-    reader: string,
-    readerVersion: string,
-    conclusion: string,
-  ) => {
-    setPipelineBusy("readerEvidence");
-    try {
-      const job = await recordBookPipelineReaderEvidence(
-        jobId,
-        childId,
-        artifactKind,
-        reader,
-        readerVersion,
-        conclusion,
-      );
-      setPipelineState((current) => upsertPipelineJob(current, job));
-      addActivity("info", `Book Pipeline reader evidence recorded: ${reader} ${readerVersion}`);
-      showFloatingToast(job.currentStep, "success");
-    } catch (error) {
-      const message = String(error);
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setPipelineBusy(null);
-    }
-  }, [addActivity, showFloatingToast]);
-
   const overridePipelineRoute = useCallback(async (
     jobId: string,
     childId: string,
@@ -499,24 +466,6 @@ export default function App() {
       setPipelineBusy(null);
     }
   }, [addActivity, bookPipelineCopy.appliedSampleProvider, showFloatingToast]);
-
-  const exportPipelineDiagnostic = useCallback(async (
-    jobId: string,
-    profile: BookPipelineDiagnosticProfile,
-  ) => {
-    setPipelineBusy("diagnostic");
-    try {
-      const result = await saveBookPipelineDiagnostic(jobId, profile);
-      addActivity(result.ok ? "success" : "info", result.message);
-      showFloatingToast(result.message, result.ok ? "success" : "info");
-    } catch (error) {
-      const message = String(error);
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setPipelineBusy(null);
-    }
-  }, [addActivity, showFloatingToast]);
 
   const handoffPipelineMarkdown = useCallback(async (jobId: string, artifactPath?: string | null) => {
     setPipelineBusy("handoff");
@@ -898,16 +847,12 @@ export default function App() {
               onApplySampleProvider={(jobId, childId, providerProfileId, providerConfigId) =>
                 void applyPipelineTranslationProvider(jobId, childId, providerProfileId, providerConfigId)
               }
-              onExportDiagnostic={(jobId, profile) => void exportPipelineDiagnostic(jobId, profile)}
               onSaveCustomInstructions={(jobId, childId, customInstructions) =>
                 void savePipelineCustomInstructions(jobId, childId, customInstructions)
               }
               onApproveGate={(jobId, childId, stageId) => void approvePipelineGate(jobId, childId, stageId)}
               onRouteOverride={(jobId, childId, routeItemId, routeOverride) =>
                 void overridePipelineRoute(jobId, childId, routeItemId, routeOverride)
-              }
-              onRecordReaderEvidence={(jobId, childId, artifactKind, reader, readerVersion, conclusion) =>
-                void recordReaderEvidence(jobId, childId, artifactKind, reader, readerVersion, conclusion)
               }
               onOpenOutput={(jobId) => void openPipelineOutput(jobId)}
               routeOverrides={pipelineRouteOverrides}

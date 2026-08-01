@@ -244,34 +244,38 @@ export function orderedStages(stages: BookPipelineStage[]): BookPipelineStage[] 
  * Stage ids missing from a job (e.g. translation stages on conversion_only)
  * leave that step "none" so the strip stays honest about what this job does.
  */
-export const FOUR_STEPS = [
-  { key: "ingest", stageIds: ["discover", "route"] },
-  { key: "tidy", stageIds: ["extract", "index", "handoff", "split"] },
-  { key: "translate", stageIds: ["prepare", "approve_translation", "translate", "expert_qa"] },
-  { key: "produce", stageIds: ["approve_promotion", "promote", "build_reading", "validate_reading", "build_digest"] },
+export const PHASES = [
+  { key: "convert", stageIds: ["discover", "route", "extract", "index", "handoff", "split"] },
+  {
+    key: "translate",
+    stageIds: ["prepare", "approve_translation", "translate", "expert_qa", "approve_promotion", "promote"],
+  },
+  // build_digest is retired and no longer requested, but it stays in the stage
+  // contract, so it stays grouped: an ungrouped stage is invisible below.
+  { key: "build", stageIds: ["build_reading", "validate_reading", "build_digest"] },
 ] as const satisfies readonly { key: string; stageIds: readonly PipelineStageId[] }[];
 
 type AssertNever<T extends never> = T;
 
 /**
- * A stage left out of all four groups contributes to no step, so its failure
- * turns no circle red and the shelf reports a book as fine while it is stuck —
+ * A stage left out of every phase contributes to no phase, so its failure turns
+ * no circle red and the shelf reports a book as fine while it is stuck —
  * exactly what `index` did. Make that omission a type error instead.
  */
-export type FourStepsCoverEveryStage = AssertNever<
-  Exclude<PipelineStageId, (typeof FOUR_STEPS)[number]["stageIds"][number]>
+export type PhasesCoverEveryStage = AssertNever<
+  Exclude<PipelineStageId, (typeof PHASES)[number]["stageIds"][number]>
 >;
 
-export type StepState = "done" | "current" | "gate" | "error" | "todo" | "none";
+export type PhaseState = "done" | "current" | "gate" | "error" | "todo" | "none";
 
 const GATE_PENDING_STATUSES = new Set(["waiting_for_approval", "ready"]);
 
-export function fourStepStates(unit: BookUnit): StepState[] {
+export function phaseStates(unit: BookUnit): PhaseState[] {
   const stages = focusStages(unit);
-  const grouped = FOUR_STEPS.map((step) =>
+  const grouped = PHASES.map((step) =>
     stages.filter((stage) => (step.stageIds as readonly string[]).includes(stage.stageId)),
   );
-  const states: StepState[] = grouped.map((members) => {
+  const states: PhaseState[] = grouped.map((members) => {
     if (!members.length) return "none";
     if (
       members.some(
@@ -293,22 +297,22 @@ export function fourStepStates(unit: BookUnit): StepState[] {
 }
 
 /** Index of the step the caption should talk about; -1 when everything is closed. */
-export function activeStepIndex(states: StepState[]): number {
+export function activePhaseIndex(states: PhaseState[]): number {
   return states.findIndex((state) => state === "gate" || state === "error" || state === "current");
 }
 
-export function stepName(index: number, copy: PipelineCopy): string {
-  return [copy.step1, copy.step2, copy.step3, copy.step4][index] ?? "";
+export function phaseName(index: number, copy: PipelineCopy): string {
+  return [copy.phase1, copy.phase2, copy.phase3][index] ?? "";
 }
 
-/** Literal status text for one visible step. */
-export function stepStatusCaption(unit: BookUnit, index: number, copy: PipelineCopy): string {
-  const step = FOUR_STEPS[index];
-  if (!step) return copy.stepNotInJob;
+/** Literal status text for one visible phase. */
+export function phaseStatusCaption(unit: BookUnit, index: number, copy: PipelineCopy): string {
+  const step = PHASES[index];
+  if (!step) return copy.phaseNotInJob;
   const members = focusStages(unit).filter((stage) =>
     (step.stageIds as readonly string[]).includes(stage.stageId),
   );
-  if (!members.length) return copy.stepNotInJob;
+  if (!members.length) return copy.phaseNotInJob;
   if (
     members.some(
       (stage) => stage.status === "failed" || (stage.status === "blocked" && !GATE_STAGE_IDS.has(stage.stageId)),
@@ -327,9 +331,9 @@ export function stepStatusCaption(unit: BookUnit, index: number, copy: PipelineC
 }
 
 /** One beginner-voiced line: "翻译 · 12/26" — drives the strip caption and shelf card. */
-export function stepCaption(unit: BookUnit, copy: PipelineCopy): string {
-  const states = fourStepStates(unit);
-  const index = activeStepIndex(states);
+export function phaseCaption(unit: BookUnit, copy: PipelineCopy): string {
+  const states = phaseStates(unit);
+  const index = activePhaseIndex(states);
   if (index === -1) {
     if (unit.status === "completed" || unit.status === "skipped") return copy.capAllDone;
     const stages = focusStages(unit);
@@ -353,7 +357,7 @@ export function stepCaption(unit: BookUnit, copy: PipelineCopy): string {
     }
     return copy.capQueued;
   }
-  const name = stepName(index, copy);
+  const name = phaseName(index, copy);
   const state = states[index];
   if (state === "gate") {
     const gateStage = focusStages(unit).find(
@@ -382,12 +386,12 @@ export function stepCaption(unit: BookUnit, copy: PipelineCopy): string {
  * A checkmark alone made the just-finished step easy to miss, especially when
  * the next long-running stage immediately took over the main caption.
  */
-export function stepSummaryCaption(unit: BookUnit, copy: PipelineCopy): string {
-  const states = fourStepStates(unit);
-  const active = activeStepIndex(states);
-  const current = stepCaption(unit, copy);
+export function phaseSummaryCaption(unit: BookUnit, copy: PipelineCopy): string {
+  const states = phaseStates(unit);
+  const active = activePhaseIndex(states);
+  const current = phaseCaption(unit, copy);
   if (active <= 0 || states[active - 1] !== "done") return current;
-  return copy.stepSummaryPair(stepName(active - 1, copy), current);
+  return copy.phaseSummaryPair(phaseName(active - 1, copy), current);
 }
 
 export function unitOperationProgress(unit: BookUnit): BookPipelineOperationProgress | null {

@@ -1,22 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { pipelineCopy } from "./copy";
 import {
-  FOUR_STEPS,
+  PHASES,
   PIPELINE_STAGE_ORDER,
-  activeStepIndex,
+  activePhaseIndex,
   approvalRecords,
   buildGateView,
   flattenBookUnits,
-  fourStepStates,
+  phaseStates,
   orderedStages,
   pendingGates,
   providerDefaultConfig,
   routeKindLabel,
   routeTone,
   stageLabel,
-  stepCaption,
-  stepStatusCaption,
-  stepSummaryCaption,
+  phaseCaption,
+  phaseStatusCaption,
+  phaseSummaryCaption,
   translationFailureSummary,
   unitAdvanceAction,
   unitNote,
@@ -90,9 +90,9 @@ describe("stage contract", () => {
   // Regression: `index` belonged to no group, so its failure turned no circle
   // red. The AssertNever guard in model.ts is compile-time only — this checks
   // the grouping itself, including that no stage was double-counted.
-  it("assigns every contract stage to exactly one of the four steps", () => {
+  it("assigns every contract stage to exactly one of the three phases", () => {
     const counts = new Map<string, number>();
-    for (const step of FOUR_STEPS) {
+    for (const step of PHASES) {
       for (const stageId of step.stageIds) {
         counts.set(stageId, (counts.get(stageId) ?? 0) + 1);
       }
@@ -104,10 +104,10 @@ describe("stage contract", () => {
   });
 });
 
-describe("fourStepStates", () => {
+describe("phaseStates", () => {
   // Regression: this is the defect the missing stage id actually caused —
   // a book stuck on a failed index reported itself as fine.
-  it("turns the tidy step red when index fails", () => {
+  it("turns the convert phase red when index fails", () => {
     const unit = bookUnit({
       status: "failed",
       stages: [
@@ -116,15 +116,15 @@ describe("fourStepStates", () => {
         stage("index", "failed"),
       ],
     });
-    expect(fourStepStates(unit)).toEqual(["done", "error", "none", "none"]);
+    expect(phaseStates(unit)).toEqual(["error", "none", "none"]);
   });
 
-  it("turns a step red when any of its stages is blocked outside a gate", () => {
+  it("turns a phase red when any of its stages is blocked outside a gate", () => {
     const unit = bookUnit({
       status: "blocked",
       stages: [stage("route", "completed"), stage("extract", "blocked")],
     });
-    expect(fourStepStates(unit)[1]).toBe("error");
+    expect(phaseStates(unit)[0]).toBe("error");
   });
 
   it("reports a pending gate as gate, not as an error", () => {
@@ -136,7 +136,7 @@ describe("fourStepStates", () => {
         stage("approve_translation", "waiting_for_approval"),
       ],
     });
-    expect(fourStepStates(unit)[2]).toBe("gate");
+    expect(phaseStates(unit)[1]).toBe("gate");
   });
 
   it("treats a gate the backend reports as ready as pending too", () => {
@@ -144,15 +144,15 @@ describe("fourStepStates", () => {
       status: "ready",
       stages: [stage("approve_promotion", "ready")],
     });
-    expect(fourStepStates(unit)[3]).toBe("gate");
+    expect(phaseStates(unit)[1]).toBe("gate");
   });
 
-  it("leaves a step with no stages as none rather than done", () => {
+  it("leaves a phase with no stages as none rather than done", () => {
     const unit = bookUnit({
       status: "completed",
       stages: [stage("route", "completed"), stage("extract", "completed")],
     });
-    expect(fourStepStates(unit)).toEqual(["done", "done", "none", "none"]);
+    expect(phaseStates(unit)).toEqual(["done", "none", "none"]);
   });
 
   it("counts skipped stages as done", () => {
@@ -160,38 +160,38 @@ describe("fourStepStates", () => {
       status: "completed",
       stages: [stage("route", "completed"), stage("extract", "skipped")],
     });
-    expect(fourStepStates(unit)[1]).toBe("done");
+    expect(phaseStates(unit)[0]).toBe("done");
   });
 
-  it("keeps an idle step pending instead of presenting it as running", () => {
+  it("keeps an idle phase pending instead of presenting it as running", () => {
     const unit = bookUnit({
       status: "pending",
       stages: [stage("route", "completed"), stage("extract", "pending"), stage("split", "pending")],
     });
-    expect(fourStepStates(unit)).toEqual(["done", "todo", "none", "none"]);
+    expect(phaseStates(unit)).toEqual(["todo", "none", "none"]);
   });
 
-  it("does not invent a current step for a finished book", () => {
+  it("does not invent a current phase for a finished book", () => {
     const unit = bookUnit({
       status: "completed",
       stages: [stage("route", "completed"), stage("extract", "pending")],
     });
-    expect(fourStepStates(unit)).toEqual(["done", "todo", "none", "none"]);
+    expect(phaseStates(unit)).toEqual(["todo", "none", "none"]);
   });
 });
 
-describe("activeStepIndex", () => {
+describe("activePhaseIndex", () => {
   it("picks the first step that needs attention", () => {
-    expect(activeStepIndex(["done", "current", "gate", "todo"])).toBe(1);
-    expect(activeStepIndex(["done", "todo", "error", "todo"])).toBe(2);
+    expect(activePhaseIndex(["done", "current", "gate", "todo"])).toBe(1);
+    expect(activePhaseIndex(["done", "todo", "error", "todo"])).toBe(2);
   });
 
   it("returns -1 when nothing is open", () => {
-    expect(activeStepIndex(["done", "done", "none", "none"])).toBe(-1);
+    expect(activePhaseIndex(["done", "done", "none", "none"])).toBe(-1);
   });
 });
 
-describe("stepCaption", () => {
+describe("phaseCaption", () => {
   it("summarizes persisted translation failure categories in the UI locale", () => {
     const failed = stage("translate", "failed", {
       unitSummary: unitSummary({
@@ -215,16 +215,16 @@ describe("stepCaption", () => {
       status: "waiting_for_approval",
       stages: [stage("approve_translation", "waiting_for_approval")],
     });
-    expect(stepCaption(translation, copy)).toBe(copy.capGateTranslation);
+    expect(phaseCaption(translation, copy)).toBe(copy.capGateTranslation);
 
     const promotion = bookUnit({
       status: "waiting_for_approval",
       stages: [stage("approve_promotion", "waiting_for_approval")],
     });
-    expect(stepCaption(promotion, copy)).toBe(copy.capGatePromotion);
+    expect(phaseCaption(promotion, copy)).toBe(copy.capGatePromotion);
   });
 
-  it("appends the error summary on a failed step", () => {
+  it("appends the error summary on a failed phase", () => {
     const unit = bookUnit({
       status: "failed",
       stages: [
@@ -240,12 +240,12 @@ describe("stepCaption", () => {
         }),
       ],
     });
-    expect(stepCaption(unit, copy)).toBe(`${copy.step2} · no text layer`);
+    expect(phaseCaption(unit, copy)).toBe(`${copy.phase1} · no text layer`);
   });
 
-  it("falls back to a generic note when a failed step carries no error text", () => {
+  it("falls back to a generic note when a failed phase carries no error text", () => {
     const unit = bookUnit({ status: "failed", stages: [stage("extract", "failed")] });
-    expect(stepCaption(unit, copy)).toBe(`${copy.step2} · ${copy.capNeedsAttention}`);
+    expect(phaseCaption(unit, copy)).toBe(`${copy.phase1} · ${copy.capNeedsAttention}`);
   });
 
   it("shows unit counts while a stage is running", () => {
@@ -255,7 +255,7 @@ describe("stepCaption", () => {
         stage("translate", "running", { unitSummary: unitSummary({ total: 26, completed: 12 }) }),
       ],
     });
-    expect(stepCaption(unit, copy)).toBe(`${copy.step3} · 12/26`);
+    expect(phaseCaption(unit, copy)).toBe(`${copy.phase2} · 12/26`);
   });
 
   it("names expert QA instead of presenting its units as translation progress", () => {
@@ -269,7 +269,7 @@ describe("stepCaption", () => {
       ],
     });
 
-    expect(stepCaption(unit, pipelineCopy("zh-CN"))).toBe("翻译 · 专家QA 0/17");
+    expect(phaseCaption(unit, pipelineCopy("zh-CN"))).toBe("翻译 · 专家QA 0/17");
   });
 
   it("states that translation is complete while expert QA is waiting to start", () => {
@@ -282,10 +282,10 @@ describe("stepCaption", () => {
       ],
     });
 
-    expect(stepCaption(unit, pipelineCopy("zh-CN"))).toBe(
+    expect(phaseCaption(unit, pipelineCopy("zh-CN"))).toBe(
       "翻译：正文已完成；专家QA：等待开始",
     );
-    expect(stepSummaryCaption(unit, pipelineCopy("zh-CN"))).toBe(
+    expect(phaseSummaryCaption(unit, pipelineCopy("zh-CN"))).toBe(
       "翻译：正文已完成；专家QA：等待开始",
     );
   });
@@ -301,17 +301,17 @@ describe("stepCaption", () => {
       ],
     });
 
-    expect(stepCaption(unit, pipelineCopy("zh-CN"))).toBe(
+    expect(phaseCaption(unit, pipelineCopy("zh-CN"))).toBe(
       "生成阅读版：已确认；等待开始",
     );
   });
 
   it("reports a finished book as all done", () => {
     const unit = bookUnit({ status: "completed", stages: [stage("route", "completed")] });
-    expect(stepCaption(unit, copy)).toBe(copy.capAllDone);
+    expect(phaseCaption(unit, copy)).toBe(copy.capAllDone);
   });
 
-  it("states that text cleanup is complete while translation is running", () => {
+  it("states that conversion is complete while translation is running", () => {
     const unit = bookUnit({
       status: "running",
       stages: [
@@ -330,11 +330,11 @@ describe("stepCaption", () => {
       ],
     });
 
-    expect(stepSummaryCaption(unit, pipelineCopy("zh-CN"))).toBe("整理文字：已完成；翻译：进行中");
+    expect(phaseSummaryCaption(unit, pipelineCopy("zh-CN"))).toBe("转换：已完成；翻译：进行中");
     const zh = pipelineCopy("zh-CN");
-    expect(stepStatusCaption(unit, 1, zh)).toBe("已完成");
-    expect(stepStatusCaption(unit, 2, zh)).toBe("进行中");
-    expect(stepStatusCaption(unit, 3, zh)).toBe("等待开始");
+    expect(phaseStatusCaption(unit, 0, zh)).toBe("已完成");
+    expect(phaseStatusCaption(unit, 1, zh)).toBe("进行中");
+    expect(phaseStatusCaption(unit, 2, zh)).toBe("等待开始");
   });
 });
 

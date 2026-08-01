@@ -292,10 +292,21 @@
 
 /* ---------- book drawer ---------- */
 
-.pl-scrim { position: absolute; inset: 0; z-index: 5; background: color-mix(in srgb, var(--island) 30%, transparent); }
+/* The drawer is an overlay, so its scrim and its resizer leave the shelf island
+ * and sit against the window — but below the titlebar, which stays live so the
+ * gear is still reachable with a book open. */
+.pl-scrim {
+  position: fixed;
+  top: var(--toolbar-h);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 5;
+  background: color-mix(in srgb, var(--island) 30%, transparent);
+}
 .pl-resizer {
-  position: absolute;
-  top: 0;
+  position: fixed;
+  top: var(--toolbar-h);
   right: calc(var(--pl-drawer-width, 50%) - 6px);
   bottom: 0;
   z-index: 7;
@@ -318,19 +329,21 @@
 .pl-resizer:hover::after,
 .pl-resizer:focus-visible::after { background: var(--pl-jade); }
 .pl-resizer:focus-visible { outline: 2px solid var(--pl-jade); outline-offset: -2px; }
+/* A floating island: inset by the gutter on three sides, overlay radius, and
+ * the shadow that only overlays are allowed. */
 .pl-drawer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
+  position: fixed;
+  top: calc(var(--toolbar-h) + var(--gutter));
+  right: var(--gutter);
+  bottom: var(--gutter);
   z-index: 6;
   display: flex;
   flex-direction: column;
-  width: var(--pl-drawer-width, 50%);
+  width: calc(var(--pl-drawer-width, 50%) - var(--gutter) * 2);
   min-width: 0;
   overflow: hidden;
   container-type: inline-size;
-  border-left: 1px solid var(--line);
+  border-radius: var(--radius-lg);
   background: var(--island);
   box-shadow: var(--shadow-overlay);
 }
@@ -397,11 +410,11 @@
 .pl-ci-error { margin: 8px 0 0; font-size: 11.5px; }
 .pl-ci-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 
-/* ---------- four-step strip ---------- */
+/* ---------- three-phase strip ---------- */
 
-.pl-steps4 { display: flex; margin-bottom: 16px; }
-.pl-step4 { position: relative; flex: 1; padding: 0 4px; text-align: center; }
-.pl-step4::before {
+.pl-phases { display: flex; margin-bottom: 16px; }
+.pl-phase { position: relative; flex: 1; padding: 0 4px; text-align: center; }
+.pl-phase::before {
   content: "";
   position: absolute;
   top: 13px;
@@ -410,9 +423,9 @@
   height: 2px;
   background: var(--line-strong);
 }
-.pl-step4:first-child::before { display: none; }
-.pl-step4.done::before { background: var(--pl-jade); }
-.pl-step4 .pl-s4c {
+.pl-phase:first-child::before { display: none; }
+.pl-phase.done::before { background: var(--pl-jade); }
+.pl-phase .pl-phase-dot {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -426,18 +439,18 @@
   font-size: 13px;
   font-weight: 700;
 }
-.pl-step4.done .pl-s4c { border-color: var(--pl-jade); background: var(--pl-jade); color: var(--pl-fill-text); }
-.pl-step4.current .pl-s4c { border-color: var(--pl-running); color: var(--pl-running); box-shadow: 0 0 0 4px var(--pl-running-soft); }
-.pl-step4.gate .pl-s4c { border-color: var(--pl-approval); background: var(--pl-approval); color: var(--pl-fill-text); box-shadow: 0 0 0 4px var(--pl-approval-soft); }
-.pl-step4.error .pl-s4c { border-color: var(--pl-failed); background: var(--pl-failed); color: var(--pl-fill-text); }
-.pl-step4 .pl-s4n { color: var(--ink); font-size: 12.5px; font-weight: 700; }
-.pl-step4.todo .pl-s4n, .pl-step4.none .pl-s4n { color: var(--pl-faint); font-weight: 500; }
-.pl-s4status { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.25; white-space: nowrap; }
-.pl-step4.done .pl-s4status { color: var(--pl-jade); }
-.pl-step4.current .pl-s4status { color: var(--pl-running); }
-.pl-step4.gate .pl-s4status { color: var(--pl-approval); }
-.pl-step4.error .pl-s4status { color: var(--pl-failed); }
-.pl-s4cap { margin: -6px 0 16px; color: var(--muted); font-size: 12.5px; text-align: center; }
+.pl-phase.done .pl-phase-dot { border-color: var(--pl-jade); background: var(--pl-jade); color: var(--pl-fill-text); }
+.pl-phase.current .pl-phase-dot { border-color: var(--pl-running); color: var(--pl-running); box-shadow: 0 0 0 4px var(--pl-running-soft); }
+.pl-phase.gate .pl-phase-dot { border-color: var(--pl-approval); background: var(--pl-approval); color: var(--pl-fill-text); box-shadow: 0 0 0 4px var(--pl-approval-soft); }
+.pl-phase.error .pl-phase-dot { border-color: var(--pl-failed); background: var(--pl-failed); color: var(--pl-fill-text); }
+.pl-phase .pl-phase-name { color: var(--ink); font-size: 12.5px; font-weight: 700; }
+.pl-phase.todo .pl-phase-name, .pl-phase.none .pl-phase-name { color: var(--pl-faint); font-weight: 500; }
+.pl-phase-status { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.25; white-space: nowrap; }
+.pl-phase.done .pl-phase-status { color: var(--pl-jade); }
+.pl-phase.current .pl-phase-status { color: var(--pl-running); }
+.pl-phase.gate .pl-phase-status { color: var(--pl-approval); }
+.pl-phase.error .pl-phase-status { color: var(--pl-failed); }
+.pl-phase-cap { margin: -6px 0 16px; color: var(--muted); font-size: 12.5px; text-align: center; }
 
 /* ---------- gate card ---------- */
 
@@ -618,9 +631,9 @@
   .pl-diff-grid { grid-template-columns: 1fr; }
   .pl-tabs { gap: 0; }
   .pl-tab { flex: 1; min-width: 0; padding-inline: 6px; }
-  .pl-step4 { padding-inline: 1px; }
-  .pl-step4 .pl-s4n { font-size: 11px; }
-  .pl-s4status { font-size: 9px; }
+  .pl-phase { padding-inline: 1px; }
+  .pl-phase .pl-phase-name { font-size: 11px; }
+  .pl-phase-status { font-size: 9px; }
 }
 
 @media (max-width: 760px) {
@@ -818,47 +831,5 @@
   background: var(--island);
   color: var(--ink);
   font: inherit;
-  font-size: 12px;
-}
-
-/* ---------- diagnostic bundle ---------- */
-
-.pl-diagnostic {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px dashed var(--line);
-}
-.pl-diagnostic h4 { margin: 0 0 4px; color: var(--ink); font-size: 13px; }
-.pl-diagnostic p { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
-.pl-diagnostic-controls { display: flex; align-items: end; gap: 10px; }
-.pl-diagnostic-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
-.pl-diagnostic-controls select {
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel);
-  color: var(--ink);
-  font-size: 12px;
-}
-.pl-diagnostic-note { margin: 10px 0 0 !important; }
-
-/* ---------- empty states ---------- */
-
-
-/* Reader verification: a short record list plus the form that adds to it. The
-   rows reuse .pl-evi-row, but the value may wrap here — a stale note makes the
-   line longer than the single-line ellipsis elsewhere assumes. */
-.pl-reader-evi { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
-.pl-reader-evi .pl-evi-row .pl-v { overflow: visible; text-overflow: clip; white-space: normal; }
-.pl-evi-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 8px; }
-.pl-evi-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
-.pl-evi-form input,
-.pl-evi-form select {
-  min-width: 120px;
-  padding: 4px 6px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--ink);
   font-size: 12px;
 }
