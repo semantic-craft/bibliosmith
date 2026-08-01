@@ -86,6 +86,47 @@ function isRawHtmlLine(line) {
   return /^<\/?(section|p|aside|div|span|blockquote|ol|ul|li|dl|dt|dd|sup|a|em|strong|br)\b[^>]*>/.test(line.trim());
 }
 
+// A fenced code block opener: up to three spaces of indent, then three or more
+// backticks or tildes, then an optional info string. A backtick fence's info
+// string may not contain a backtick, which is what keeps `a ``b`` c` from being
+// read as a fence.
+const FENCE_OPEN = /^([ \t]{0,3})(`{3,}|~{3,})[ \t]*(.*)$/;
+
+function fenceOpener(line) {
+  const match = FENCE_OPEN.exec(line);
+  if (!match) return null;
+  const marker = match[2];
+  const info = match[3].trim();
+  if (marker.startsWith('`') && info.includes('`')) return null;
+  return { indent: match[1].length, marker, info };
+}
+
+function isFenceCloser(line, marker) {
+  const match = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+  return Boolean(match) && match[1][0] === marker[0] && match[1].length >= marker.length;
+}
+
+function stripFenceIndent(line, indent) {
+  let cut = 0;
+  while (cut < indent && (line[cut] === ' ' || line[cut] === '\t')) cut += 1;
+  return line.slice(cut);
+}
+
+/**
+ * Render a fenced block as `<pre><code>`.
+ *
+ * The content is only escaped, never passed through `inline`: inside a code
+ * block a backtick is a backtick. `white-space:pre-wrap` in book.css is what
+ * makes long lines wrap — an e-reader page cannot scroll sideways, so an
+ * unwrapped line would simply be cut off.
+ */
+function codeBlockHtml(bodyLines, info) {
+  while (bodyLines.length && !bodyLines[bodyLines.length - 1].trim()) bodyLines.pop();
+  const language = /^[A-Za-z0-9_+#-]+/.exec(info);
+  const attribute = language ? ` class="language-${escapeHtml(language[0].toLowerCase())}"` : '';
+  return `<pre><code${attribute}>${escapeHtml(bodyLines.join('\n'))}</code></pre>`;
+}
+
 function slug(file) {
   return path.basename(file, path.extname(file)).replace(/[^A-Za-z0-9_-]+/g, '_');
 }
@@ -144,6 +185,24 @@ function markdownToBody(file, imageMap) {
   for (let i = 0; i < lines.length; i += 1) {
     const raw = lines[i];
     const line = raw.trimEnd();
+    // Fences are matched before every other rule, and their contents before
+    // none: inside a block, `# x` is a comment and `1. x` is an argument list,
+    // not a heading and a list item. Letting the line rules below see them used
+    // to put stray <h1>s into the book and, through them, into the navigation.
+    const fence = fenceOpener(line);
+    if (fence) {
+      flush();
+      const body = [];
+      let end = i + 1;
+      // An unclosed fence runs to the end of the document, as CommonMark says.
+      while (end < lines.length && !isFenceCloser(lines[end].trimEnd(), fence.marker)) {
+        body.push(stripFenceIndent(lines[end].replace(/\s+$/, ''), fence.indent));
+        end += 1;
+      }
+      out.push(codeBlockHtml(body, fence.info));
+      i = end;
+      continue;
+    }
     if (!line.trim()) {
       flush();
       continue;
@@ -233,7 +292,7 @@ function writeContainer() {
 }
 
 function writeCss() {
-  writeText(path.join(workDir, 'EPUB', 'styles', 'book.css'), `body{line-height:1.72;margin:0;padding:1.2em;overflow-wrap:break-word}p{margin:0 0 .7em;text-indent:2em}h1{font-size:1.55em;line-height:1.25}h2{font-size:1.2em}h3{font-size:1.05em}img{max-width:100%;height:auto}figure{margin:1.2em 0;text-align:center;break-inside:avoid}figcaption{font-size:.88em;line-height:1.45}code{font-family:monospace;overflow-wrap:anywhere}.list-item{text-indent:0;margin-left:1.5em}.parallel-passage{margin:0 0 1.15em}.source-text{color:#4c3828}.modern-text{color:#1f1f1f}aside{font-size:.88em;line-height:1.55;margin:.25em 0 .75em 2em;color:#4b4b4b}.table-wrap{display:block;width:100%;max-width:100%;margin:.8em 0 1.2em;overflow:visible}table{border-collapse:collapse;width:100%;max-width:100%;table-layout:fixed;font-size:.74em;line-height:1.34;page-break-inside:auto;break-inside:auto}caption{font-size:.9em;line-height:1.35;margin:0 0 .35em;text-align:left}th,td{border:1px solid #777;padding:.22em .28em;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:break-word}th{font-weight:600;background:#f2f2f2}tr{page-break-inside:avoid;break-inside:avoid}`);
+  writeText(path.join(workDir, 'EPUB', 'styles', 'book.css'), `body{line-height:1.72;margin:0;padding:1.2em;overflow-wrap:break-word}p{margin:0 0 .7em;text-indent:2em}h1{font-size:1.55em;line-height:1.25}h2{font-size:1.2em}h3{font-size:1.05em}img{max-width:100%;height:auto}figure{margin:1.2em 0;text-align:center;break-inside:avoid}figcaption{font-size:.88em;line-height:1.45}code{font-family:monospace;overflow-wrap:anywhere}pre{text-indent:0;margin:.9em 0;padding:.6em .7em;background:#f4f4f4;border:1px solid #e0e0e0;border-radius:3px;font-size:.82em;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;break-inside:avoid}pre code{font-size:inherit}.list-item{text-indent:0;margin-left:1.5em}.parallel-passage{margin:0 0 1.15em}.source-text{color:#4c3828}.modern-text{color:#1f1f1f}aside{font-size:.88em;line-height:1.55;margin:.25em 0 .75em 2em;color:#4b4b4b}.table-wrap{display:block;width:100%;max-width:100%;margin:.8em 0 1.2em;overflow:visible}table{border-collapse:collapse;width:100%;max-width:100%;table-layout:fixed;font-size:.74em;line-height:1.34;page-break-inside:auto;break-inside:auto}caption{font-size:.9em;line-height:1.35;margin:0 0 .35em;text-align:left}th,td{border:1px solid #777;padding:.22em .28em;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:break-word}th{font-weight:600;background:#f2f2f2}tr{page-break-inside:avoid;break-inside:avoid}`);
 }
 
 function zipEpub() {
