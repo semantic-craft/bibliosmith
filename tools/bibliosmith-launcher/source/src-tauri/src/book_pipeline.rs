@@ -8875,21 +8875,29 @@ fn scan_artifacts(output_dir: &Path) -> Result<Vec<BookPipelineArtifact>, String
     Ok(artifacts)
 }
 
-/// Is this a `<markdown stem>.<sidecar>` directory of supporting files?
+/// Is this a sidecar directory of supporting files for a Markdown file?
 fn is_markdown_sidecar_dir(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| MARKDOWN_SIDECAR_EXTENSIONS.contains(&extension))
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            MARKDOWN_SIDECAR_SUFFIXES
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        })
 }
 
 /// The sidecar directory a Markdown artifact carries, if it has one.
 ///
-/// A worker writes at most one: MinerU emits `<stem>.mineru`, the EPUB extractor
-/// emits `<stem>.assets`, and neither runs on the same book as the other.
+/// A worker writes at most one: MinerU emits `<stem>.mineru`, the PaddleOCR
+/// wrapper and the EPUB extractor emit `<stem>_assets`, and no two of them run
+/// on the same book. The directory name is never rewritten on the way into the
+/// translation project — the Markdown references it by that exact relative
+/// path, so renaming it would dangle every figure link.
 fn markdown_sidecar_dir(markdown_path: &Path) -> Option<PathBuf> {
-    MARKDOWN_SIDECAR_EXTENSIONS
+    let stem = markdown_path.file_stem().and_then(|name| name.to_str())?;
+    MARKDOWN_SIDECAR_SUFFIXES
         .iter()
-        .map(|extension| markdown_path.with_extension(extension))
+        .map(|suffix| markdown_path.with_file_name(format!("{stem}{suffix}")))
         .find(|candidate| candidate.is_dir())
 }
 

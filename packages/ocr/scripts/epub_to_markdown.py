@@ -9,15 +9,16 @@ single merged Markdown file plus a sidecar directory of images.
 Contract with the launcher (`book_pipeline.rs`):
 
 - `--output-dir` receives `<book stem>.md` and, when the book has images,
-  `<book stem>.assets/`. The extract stage scans that directory and registers
+  `<book stem>_assets/`. The extract stage scans that directory and registers
   every `.md` it finds as a `kind="markdown"` artifact, which is the only kind
   `selected_markdown_artifact()` will hand off. One merged file per book keeps
   that selection unambiguous.
-- The sidecar is named `<stem>.assets` on purpose: the handoff stage copies a
-  `<stem>.<sidecar>` directory sitting next to the chosen Markdown into the
-  translation project's `source/`, and the split stage rewrites
-  `](<stem>.assets/...)` so it still resolves from `chapters/src/`. Keeping the
-  images under the stem is what makes both of those find them.
+- `<stem>_assets` is the name the PaddleOCR wrapper already uses
+  (`pdf_to_html_paddleocr.py`), and this route deliberately reuses it rather
+  than inventing a second spelling: the handoff stage copies a sidecar sitting
+  next to the chosen Markdown into the translation project's `source/`, and the
+  split stage rewrites `](<stem>_assets/...)` so it still resolves from
+  `chapters/src/`. One convention means both of those need one rule.
 - The stem is the book's file name, not a fixed `full.md`: the handoff falls back
   to the Markdown file stem when naming the translation project, so a generic
   name would produce a generic project directory.
@@ -68,7 +69,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-SIDECAR_SUFFIX = ".assets"
+SIDECAR_SUFFIX = "_assets"
 CONTAINER_PATH = "META-INF/container.xml"
 
 CONTAINER_NAMESPACE = "urn:oasis:names:tc:opendocument:xmlns:container"

@@ -12639,12 +12639,12 @@ fn the_epub_route_is_not_offered_an_ocr_engine_override() {
 #[test]
 fn an_extracted_asset_sidecar_is_not_collected_as_its_own_artifact() {
     let root = temp_root("epub-sidecar-artifacts");
-    fs::create_dir_all(root.join("Book.assets")).unwrap();
+    fs::create_dir_all(root.join("Book_assets")).unwrap();
     fs::write(root.join("Book.md"), "# Chapter\n\nBody.\n").unwrap();
     // A book whose images directory happens to hold markup must not have that
     // markup outrank the assembled Markdown.
-    fs::write(root.join("Book.assets").join("cover.html"), "<p>cover</p>").unwrap();
-    fs::write(root.join("Book.assets").join("figure.png"), "PNG").unwrap();
+    fs::write(root.join("Book_assets").join("cover.html"), "<p>cover</p>").unwrap();
+    fs::write(root.join("Book_assets").join("figure.png"), "PNG").unwrap();
 
     let artifacts = scan_artifacts(&root).unwrap();
 
@@ -12661,15 +12661,15 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
     let root = temp_root("epub-sidecar-handoff");
     let extract_dir = root.join("extract");
     let repo_root = root.join("repo");
-    fs::create_dir_all(extract_dir.join("Some_Book.assets")).unwrap();
+    fs::create_dir_all(extract_dir.join("Some_Book_assets")).unwrap();
     let markdown_path = extract_dir.join("Some_Book.md");
     fs::write(
         &markdown_path,
-        "# Chapter One\n\n![A figure](Some_Book.assets/figure.png)\n\n# Chapter Two\n\nBody.\n",
+        "# Chapter One\n\n![A figure](Some_Book_assets/figure.png)\n\n# Chapter Two\n\nBody.\n",
     )
     .unwrap();
     fs::write(
-        extract_dir.join("Some_Book.assets").join("figure.png"),
+        extract_dir.join("Some_Book_assets").join("figure.png"),
         "PNG bytes",
     )
     .unwrap();
@@ -12708,7 +12708,7 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
     assert!(
         project_root
             .join("source")
-            .join("Some_Book.assets")
+            .join("Some_Book_assets")
             .join("figure.png")
             .is_file(),
         "the images an EPUB extraction pulled out must reach the translation project"
@@ -12719,7 +12719,7 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
         rewrite_sidecar_asset_references_for_chapters(&project_root.join("source"), &source_text)
             .unwrap();
     assert!(
-        rewritten.contains("](../../source/Some_Book.assets/figure.png)"),
+        rewritten.contains("](../../source/Some_Book_assets/figure.png)"),
         "chapter files sit two levels below source/: {rewritten}"
     );
     let _ = fs::remove_dir_all(root);

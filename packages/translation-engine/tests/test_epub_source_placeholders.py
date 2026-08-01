@@ -108,7 +108,7 @@ def test_every_fragile_shape_an_epub_produces_is_protected() -> None:
         assert "$$\\int_0^1 x dx$$" in protected
         assert "`inline_code()`" in protected
         assert "[^fn-1-1]" in protected
-        assert "Protected_Shapes.assets/figure.png" in protected
+        assert "Protected_Shapes_assets/figure.png" in protected
 
 
 def test_protection_round_trips_the_whole_extracted_document() -> None:

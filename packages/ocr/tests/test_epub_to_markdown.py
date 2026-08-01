@@ -174,9 +174,9 @@ def test_images_land_in_the_sidecar_and_are_referenced_relatively() -> None:
     )
     with directory:
         assert result.images == 1
-        sidecar = output_dir / "Fixture_Book.assets"
+        sidecar = output_dir / "Fixture_Book_assets"
         assert (sidecar / "figure.png").read_bytes() == PNG
-        assert "![A figure](Fixture_Book.assets/figure.png)" in markdown
+        assert "![A figure](Fixture_Book_assets/figure.png)" in markdown
 
 
 def test_output_names_have_no_spaces_so_image_urls_stay_protected() -> None:
@@ -190,7 +190,7 @@ def test_output_names_have_no_spaces_so_image_urls_stay_protected() -> None:
     )
     with directory:
         assert result.markdown_path.name == "A_Book_With_Spaces.md"
-        assert "](A_Book_With_Spaces.assets/figure.png)" in markdown
+        assert "](A_Book_With_Spaces_assets/figure.png)" in markdown
 
 
 def test_footnotes_are_pulled_into_the_chapter_that_cites_them() -> None:
