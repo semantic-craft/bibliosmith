@@ -42,6 +42,13 @@ except Exception:  # pragma: no cover - checked at runtime
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+# Imported as a module, not by name: `pdf_text` imports this one back for the
+# mojibake thresholds, so resolving the entry point at call time is what keeps
+# the pair importable in either order.
+import pdf_text  # noqa: E402
+
 DEFAULT_OUTPUT_ROOT = Path.home() / "Zotero" / "OCR_OUTPUT"
 DEFAULT_ZOTERO_STORAGE = Path.home() / "Zotero" / "storage"
 DEFAULT_LOCAL_API = "http://127.0.0.1:23119/api/users/0"
@@ -403,6 +410,18 @@ def render_markdown(
         body.append(text if text else "[no extractable text]")
         body.append("")
     return "\n".join(body).rstrip() + "\n"
+
+
+def render_extracted_markdown(*, title: str, metadata: dict[str, Any], body: str) -> str:
+    """Front matter, the book's title, then the document as extracted.
+
+    No per-page heading, which is the whole difference from `render_markdown()`.
+    `## Page N` is not a heading any book has, and the split stage cuts a new
+    chapter at every heading of the shallowest level it finds, so a 629-page
+    PDF came out as 629 chapters named "Page 1" through "Page 629" — the entire
+    table of contents of the finished EPUB, with no real chapter name in it.
+    """
+    return "\n".join([markdown_frontmatter(metadata), "", f"# {title}", "", body]).rstrip() + "\n"
 
 
 class StateDB:
@@ -1208,13 +1227,39 @@ def normalize_source_pdf_attachment_name(
 
 
 def markdown_page_numbers(path: Path) -> list[int]:
+    """Page numbers a generated Markdown file records inline.
+
+    Two shapes, because two are in circulation: the `<!-- page: N -->` anchor
+    the PaddleOCR assembler and the PyMuPDF fallback write, and the `## Page N`
+    heading carried by every file converted before the pdf-text route stopped
+    emitting one. Structured pdf-text Markdown has neither — page breaks are
+    not part of what pdf-inspector reconstructs — so its page list lives in the
+    sidecar instead; see `sidecar_page_numbers()`.
+    """
     pages: list[int] = []
-    pattern = re.compile(r"^## Page (\d+)\s*$")
+    pattern = re.compile(r"^(?:## Page (\d+)|<!-- page: (\d+) -->)$")
     for line in path.read_text(encoding="utf-8").splitlines():
-        match = pattern.match(line)
+        match = pattern.match(line.strip())
         if match:
-            pages.append(int(match.group(1)))
+            pages.append(int(match.group(1) or match.group(2)))
     return pages
+
+
+def sidecar_page_numbers(path: Path) -> list[int]:
+    """Page numbers from a pdf-text sidecar's `pages` array."""
+    if not path.exists():
+        return []
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("pages"), list):
+        return []
+    return [
+        entry["page"]
+        for entry in parsed["pages"]
+        if isinstance(entry, dict) and isinstance(entry.get("page"), int)
+    ]
 
 
 def selection_status(pages: list[int], page_count: int, *, uploaded: bool) -> str:
@@ -1534,7 +1579,13 @@ def process_text_route(
     replace_attachment_key: str | None = None,
 ) -> str:
     markdown_path, sidecar_path = output_paths(config, attachment, "pdf-text")
-    extracted = extract_text_pages(attachment.path, pages)
+    extracted = pdf_text.extract_markdown(attachment.path, pages=pages, dirty_text=config)
+    logging.info(
+        "Extracted %s with %s%s",
+        attachment.key,
+        extracted.engine,
+        f" ({extracted.fallback_reason})" if extracted.fallback_reason else "",
+    )
     metadata = build_metadata(
         attachment,
         source_md5=source_md5,
@@ -1544,7 +1595,9 @@ def process_text_route(
         source_path=attachment.path,
     )
     markdown_path.write_text(
-        render_markdown(title=attachment.title, metadata=metadata, pages=extracted),
+        render_extracted_markdown(
+            title=attachment.title, metadata=metadata, body=extracted.markdown
+        ),
         encoding="utf-8",
     )
     sidecar_path.write_text(
@@ -1552,7 +1605,10 @@ def process_text_route(
             {
                 "source_pdf_key": attachment.key,
                 "route": "pdf-text",
-                "pages": [{"page": page_no, "chars": count_nonspace(text)} for page_no, text in extracted],
+                "engine": extracted.engine,
+                "fallback_reason": extracted.fallback_reason,
+                "running_heads_removed": list(extracted.running_heads),
+                "pages": [{"page": page_no, "chars": chars} for page_no, chars in extracted.page_chars],
             },
             ensure_ascii=False,
             indent=2,
@@ -2275,7 +2331,7 @@ def upload_test(config: Config, state: StateDB, local: ZoteroLocalClient, key: s
     )
     source_md5 = md5_file(attachment.path)
     page_count = pdf_page_count(attachment.path)
-    pages = markdown_page_numbers(markdown_path)
+    pages = sidecar_page_numbers(sidecar_path) or markdown_page_numbers(markdown_path)
     status = selection_status(pages, page_count, uploaded=True)
     state.upsert_document(
         attachment=attachment,
