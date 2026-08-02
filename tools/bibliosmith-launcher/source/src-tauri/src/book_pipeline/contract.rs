@@ -58,6 +58,34 @@ pub(crate) const ITEM_INDEX_PROFILE_COMMAND_LABEL: &str = "Zotero item index pro
 pub(crate) const ZOTERO_COLLECTION_SNAPSHOT_COMMAND_LABEL: &str = "Zotero collection snapshot";
 pub(crate) const ZOTERO_COLLECTION_SNAPSHOT_SCHEMA: &str = "zotero-collection-snapshot-v1";
 pub(crate) const ZOTERO_CONVERSION_COMMAND_LABEL: &str = "Zotero conversion worker";
+pub(crate) const ZOTERO_ATTACH_COMMAND_LABEL: &str = "Zotero attachment upload";
+/// Exit codes `zsearch` uses for its typed error categories (runtime, auth,
+/// validation, not-found, network, conflict). The attach command accepts them
+/// so it can fail with the CLI's own reason -- which the agent contract writes
+/// to stdout, not stderr -- instead of a bare exit status. A code outside this
+/// set, or a run that emits no envelope, still fails as an unexplained crash.
+pub(crate) const ZOTERO_ATTACH_ACCEPTED_EXIT_CODES: [i32; 7] = [0, 1, 2, 3, 4, 5, 6];
+/// Finished books that can be pushed back into Zotero as imported-file
+/// attachments. Deliberately not every artifact: intermediate chapter files and
+/// reports are working state, and the Markdown the conversion worker already
+/// uploaded has its own attachment.
+///
+/// Both formats the redesign also names as deliverables are absent, and for the
+/// same underlying reason -- neither is a single file this command could stand
+/// behind:
+///
+/// - `reading_html` is registered one artifact **per chapter**
+///   (`run_build_reading_stage`), so attaching it would upload one XHTML file
+///   and record its key as though the HTML book had gone up. An HTML-only book
+///   needs a packaged deliverable before it can be attached at all.
+/// - The layout-preserving track's bilingual PDF is registered by extension as
+///   the generic `pdf` kind, which any PDF under a job output root also gets --
+///   a source PDF among them. Listing `pdf` would offer to attach a book's own
+///   source back onto the item it came from.
+///
+/// Each joins the list once it has a whole-book artifact of its own.
+pub(crate) const ZOTERO_ATTACHABLE_ARTIFACT_KINDS: [&str; 2] =
+    ["reading_epub", "reading_bilingual_epub"];
 pub(crate) const EPUB_EXTRACT_COMMAND_LABEL: &str = "EPUB chapter extraction";
 /// Name suffixes marking a sidecar of supporting files for the Markdown beside
 /// it: MinerU's per-part tree (`<stem>.mineru`) and the images the PaddleOCR

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import time
 from typing import Any
 from urllib.parse import urlencode
 
@@ -13,6 +14,20 @@ import httpx
 from .agent_contract import auth_missing_error
 
 ZOTERO_API_BASE = "https://api.zotero.org"
+
+# Zotero throttles writes with 429 plus a Retry-After header. This module was
+# written for Markdown notes, where that is rare; a finished book is orders of
+# magnitude larger and takes long enough to walk into a throttle mid-upload.
+UPLOAD_ATTEMPTS = 4
+RETRY_AFTER_DEFAULT_SECONDS = 30.0
+RETRY_AFTER_MAX_SECONDS = 120.0
+
+# The bytes go up as one POST, so a single flat timeout has to cover both a
+# 20 KB Markdown attachment and a 40 MB bilingual EPUB. Budget it from the file
+# size at a deliberately pessimistic floor throughput instead.
+UPLOAD_MIN_TIMEOUT_SECONDS = 120.0
+UPLOAD_MAX_TIMEOUT_SECONDS = 1800.0
+UPLOAD_FLOOR_BYTES_PER_SECOND = 64 * 1024
 
 
 def _config() -> tuple[str, str, str]:
@@ -44,6 +59,38 @@ def _create_items(payload: list[dict[str, Any]]) -> dict[str, Any]:
         resp = client.post(url, json=payload, headers=_headers(api_key))
     resp.raise_for_status()
     return resp.json()
+
+
+def _retry_after_seconds(response: httpx.Response) -> float:
+    """How long a throttled response asks us to wait, capped so a hostile or
+    mistaken header cannot park an upload for hours."""
+    try:
+        seconds = float(response.headers.get("Retry-After", ""))
+    except ValueError:
+        seconds = RETRY_AFTER_DEFAULT_SECONDS
+    return min(max(seconds, 0.0), RETRY_AFTER_MAX_SECONDS)
+
+
+def upload_timeout_seconds(size_bytes: int) -> float:
+    """Timeout budget for sending ``size_bytes`` in one request."""
+    budget = size_bytes / UPLOAD_FLOOR_BYTES_PER_SECOND
+    return min(max(budget, UPLOAD_MIN_TIMEOUT_SECONDS), UPLOAD_MAX_TIMEOUT_SECONDS)
+
+
+def _post_retrying_throttles(client: httpx.Client, url: str, **kwargs: Any) -> httpx.Response:
+    """POST, waiting out 429s for as long as Retry-After asks.
+
+    The last response is returned as-is rather than raised on, so an exhausted
+    retry still reaches the caller's ``raise_for_status`` and comes out of the
+    CLI as the retryable ``network_error`` category.
+    """
+    response = client.post(url, **kwargs)
+    for _ in range(UPLOAD_ATTEMPTS - 1):
+        if response.status_code != 429:
+            return response
+        time.sleep(_retry_after_seconds(response))
+        response = client.post(url, **kwargs)
+    return response
 
 
 def _new_item_template(item_type: str) -> dict[str, Any]:
@@ -275,8 +322,8 @@ def add_imported_file(
 
     with httpx.Client(timeout=120.0) as client:
         # 1. Create attachment item
-        resp = client.post(
-            f"{base}/items", json=[template], headers=_headers(api_key),
+        resp = _post_retrying_throttles(
+            client, f"{base}/items", json=[template], headers=_headers(api_key),
         )
         resp.raise_for_status()
         result = resp.json()
@@ -294,7 +341,8 @@ def add_imported_file(
         auth_body = urlencode(
             {"md5": md5, "filename": filename, "filesize": size, "mtime": mtime}
         )
-        auth_resp = client.post(
+        auth_resp = _post_retrying_throttles(
+            client,
             f"{base}/items/{att_key}/file",
             headers=auth_headers,
             content=auth_body,
@@ -307,15 +355,18 @@ def add_imported_file(
 
         # 3. Upload file bytes
         upload_body = auth["prefix"].encode() + file_bytes + auth["suffix"].encode()
-        upload_resp = client.post(
+        upload_resp = _post_retrying_throttles(
+            client,
             auth["url"],
             headers={"Content-Type": auth["contentType"]},
             content=upload_body,
+            timeout=upload_timeout_seconds(len(upload_body)),
         )
         upload_resp.raise_for_status()
 
         # 4. Register upload
-        reg_resp = client.post(
+        reg_resp = _post_retrying_throttles(
+            client,
             f"{base}/items/{att_key}/file",
             headers=auth_headers,
             content=urlencode({"upload": auth["uploadKey"]}),

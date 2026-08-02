@@ -580,10 +580,26 @@ def add_doi(doi: str) -> None:
 @click.argument("path", type=click.Path(exists=True, path_type=Path))
 @click.option("--parent", "parent_key", default=None,
               help="Attach as a child of this item key (default: top-level)")
-def add_file(path: Path, parent_key: str | None) -> None:
+def add_file(path: Path, parent_key: str | None) -> dict:
     """Upload a file into Zotero storage as an imported-file attachment."""
     result = zotero_api.add_imported_file(str(path.resolve()), parent_key=parent_key)
     _print_add_result(result)
+    attachment_key = ((result.get("successful") or {}).get("0") or {}).get("key")
+    if not attachment_key:
+        # A create that lands in `failed` comes back as an ordinary result, so
+        # without this the command would exit 0 with nothing attached — and the
+        # launcher, which records the returned key against the artifact, would
+        # remember an upload that never happened.
+        raise validation_error(
+            f"Zotero did not create the attachment: {result.get('failed') or result}"
+        )
+    # The machine-facing envelope's payload. Callers need the key to record
+    # what they attached; the rest is the identity of what went up.
+    return {
+        "attachmentKey": attachment_key,
+        "parentItemKey": parent_key,
+        "filename": path.name,
+    }
 
 
 @main.command()

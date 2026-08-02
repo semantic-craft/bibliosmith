@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -372,22 +373,37 @@ def test_cli_add_subcommands() -> None:
     assert "imported-file attachment" in result.output
 
 
-def test_add_imported_file_uploads_imported_attachment(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    import zotero_cli.zotero_api as zotero_api
+class FakeZoteroResponse:
+    def __init__(
+        self,
+        payload: dict | None = None,
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.payload = payload or {}
+        self.status_code = status_code
+        self.headers = headers or {}
 
-    upload_path = tmp_path / "paper with spaces.md"
-    upload_path.write_text("hello", encoding="utf-8")
-    events: list[tuple[str, dict]] = []
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
-    class FakeResponse:
-        def __init__(self, payload: dict | None = None) -> None:
-            self.payload = payload or {}
+    def json(self) -> dict:
+        return self.payload
 
-        def raise_for_status(self) -> None:
-            return None
 
-        def json(self) -> dict:
-            return self.payload
+def fake_zotero_upload_client(
+    events: list[tuple[str, dict]],
+    *,
+    throttle_storage_posts: int = 0,
+) -> type:
+    """A stand-in for ``httpx.Client`` covering the four-step upload.
+
+    ``throttle_storage_posts`` makes the first N posts of the file bytes answer
+    429 with a Retry-After, which is how Zotero pushes back on a large upload.
+    """
+    remaining_throttles = [throttle_storage_posts]
 
     class FakeClient:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -399,12 +415,12 @@ def test_add_imported_file_uploads_imported_attachment(monkeypatch, tmp_path) ->
         def __exit__(self, *_exc: object) -> None:
             return None
 
-        def post(self, url: str, **kwargs) -> FakeResponse:
+        def post(self, url: str, **kwargs) -> FakeZoteroResponse:
             events.append((url, kwargs))
             if url.endswith("/items"):
-                return FakeResponse({"successful": {"0": {"key": "ATTKEY"}}})
+                return FakeZoteroResponse({"successful": {"0": {"key": "ATTKEY"}}})
             if url.endswith("/items/ATTKEY/file") and kwargs.get("content", "").startswith("md5="):
-                return FakeResponse(
+                return FakeZoteroResponse(
                     {
                         "url": "https://upload.example",
                         "contentType": "multipart/form-data; boundary=x",
@@ -414,15 +430,28 @@ def test_add_imported_file_uploads_imported_attachment(monkeypatch, tmp_path) ->
                     }
                 )
             if url == "https://upload.example":
-                return FakeResponse()
+                if remaining_throttles[0] > 0:
+                    remaining_throttles[0] -= 1
+                    return FakeZoteroResponse(status_code=429, headers={"Retry-After": "7"})
+                return FakeZoteroResponse()
             if url.endswith("/items/ATTKEY/file") and kwargs.get("content") == "upload=UPLOADKEY":
-                return FakeResponse()
+                return FakeZoteroResponse()
             raise AssertionError(f"unexpected POST {url} {kwargs}")
+
+    return FakeClient
+
+
+def test_add_imported_file_uploads_imported_attachment(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import zotero_cli.zotero_api as zotero_api
+
+    upload_path = tmp_path / "paper with spaces.md"
+    upload_path.write_text("hello", encoding="utf-8")
+    events: list[tuple[str, dict]] = []
 
     monkeypatch.setenv("ZOTERO_API_KEY", "fake-key")
     monkeypatch.setenv("ZOTERO_LIBRARY_ID", "12345")
     monkeypatch.setenv("ZOTERO_LIBRARY_TYPE", "user")
-    monkeypatch.setattr(zotero_api.httpx, "Client", FakeClient)
+    monkeypatch.setattr(zotero_api.httpx, "Client", fake_zotero_upload_client(events))
 
     result = zotero_api.add_imported_file(str(upload_path), parent_key="PARENTKEY")
 
@@ -436,6 +465,131 @@ def test_add_imported_file_uploads_imported_attachment(monkeypatch, tmp_path) ->
     assert "filename=paper+with+spaces.md" in events[1][1]["content"]
     assert events[2][1]["content"] == b"PREhelloSUF"
     assert events[3][1]["content"] == "upload=UPLOADKEY"
+
+
+def test_add_imported_file_waits_out_a_throttled_upload(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import zotero_cli.zotero_api as zotero_api
+
+    upload_path = tmp_path / "book.epub"
+    upload_path.write_bytes(b"epub bytes")
+    events: list[tuple[str, dict]] = []
+    slept: list[float] = []
+
+    monkeypatch.setenv("ZOTERO_API_KEY", "fake-key")
+    monkeypatch.setenv("ZOTERO_LIBRARY_ID", "12345")
+    monkeypatch.setattr(
+        zotero_api.httpx,
+        "Client",
+        fake_zotero_upload_client(events, throttle_storage_posts=2),
+    )
+    monkeypatch.setattr(zotero_api.time, "sleep", slept.append)
+
+    result = zotero_api.add_imported_file(str(upload_path), parent_key="PARENTKEY")
+
+    assert result == {"successful": {"0": {"key": "ATTKEY"}}}
+    # Two refusals, a third post that lands, and the registration that only
+    # happens once the bytes are actually up.
+    storage_posts = [url for url, _ in events if url == "https://upload.example"]
+    assert len(storage_posts) == 3
+    assert slept == [7.0, 7.0]
+    assert events[-1][1]["content"] == "upload=UPLOADKEY"
+
+
+def test_throttle_retries_give_up_and_hand_back_the_refusal() -> None:
+    from zotero_cli import zotero_api
+
+    posts: list[str] = []
+
+    class AlwaysThrottled:
+        def post(self, url: str, **_kwargs) -> FakeZoteroResponse:
+            posts.append(url)
+            return FakeZoteroResponse(status_code=429, headers={"Retry-After": "1"})
+
+    response = zotero_api._post_retrying_throttles(
+        AlwaysThrottled(), "https://upload.example", timeout=1.0,
+    )
+
+    # Bounded, and the caller's raise_for_status is what turns the last refusal
+    # into the CLI's retryable error category.
+    assert len(posts) == zotero_api.UPLOAD_ATTEMPTS
+    assert response.status_code == 429
+
+
+def test_retry_after_is_capped_and_survives_a_junk_header() -> None:
+    from zotero_cli import zotero_api
+
+    assert zotero_api._retry_after_seconds(FakeZoteroResponse(headers={"Retry-After": "12"})) == 12.0
+    assert (
+        zotero_api._retry_after_seconds(FakeZoteroResponse(headers={"Retry-After": "999999"}))
+        == zotero_api.RETRY_AFTER_MAX_SECONDS
+    )
+    assert (
+        zotero_api._retry_after_seconds(FakeZoteroResponse(headers={"Retry-After": "soon"}))
+        == zotero_api.RETRY_AFTER_DEFAULT_SECONDS
+    )
+    assert zotero_api._retry_after_seconds(FakeZoteroResponse()) == (
+        zotero_api.RETRY_AFTER_DEFAULT_SECONDS
+    )
+
+
+def test_upload_timeout_grows_with_the_file() -> None:
+    from zotero_cli import zotero_api
+
+    # A Markdown note keeps the old flat budget; a bilingual EPUB gets one that
+    # a slow uplink can actually finish inside.
+    assert zotero_api.upload_timeout_seconds(20_000) == zotero_api.UPLOAD_MIN_TIMEOUT_SECONDS
+    assert zotero_api.upload_timeout_seconds(40 * 1024 * 1024) > 600.0
+    assert (
+        zotero_api.upload_timeout_seconds(10 * 1024 * 1024 * 1024)
+        == zotero_api.UPLOAD_MAX_TIMEOUT_SECONDS
+    )
+
+
+def test_add_file_reports_the_attachment_key(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import zotero_cli.cli as cli
+
+    upload_path = tmp_path / "book.epub"
+    upload_path.write_bytes(b"epub bytes")
+    # The launcher runs this command in agent mode, which is where the key it
+    # records against the artifact comes from.
+    monkeypatch.setenv("ZSEARCH_FORMAT", "json")
+    monkeypatch.setattr(
+        cli.zotero_api,
+        "add_imported_file",
+        lambda *_args, **_kwargs: {"successful": {"0": {"key": "ATTKEY", "data": {"title": "b"}}}},
+    )
+
+    result = CliRunner().invoke(main, ["add", "file", str(upload_path), "--parent", "PARENTKEY"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["data"] == {
+        "attachmentKey": "ATTKEY",
+        "parentItemKey": "PARENTKEY",
+        "filename": "book.epub",
+    }
+
+
+def test_add_file_fails_when_zotero_creates_nothing(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import zotero_cli.cli as cli
+
+    upload_path = tmp_path / "book.epub"
+    upload_path.write_bytes(b"epub bytes")
+    monkeypatch.setenv("ZSEARCH_FORMAT", "json")
+    monkeypatch.setattr(
+        cli.zotero_api,
+        "add_imported_file",
+        lambda *_args, **_kwargs: {"failed": {"0": {"code": 400, "message": "no parent"}}},
+    )
+
+    result = CliRunner().invoke(main, ["add", "file", str(upload_path), "--parent", "MISSING"])
+
+    # A rejected create used to exit 0 with nothing attached.
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert "no parent" in payload["error"]["message"]
 
 
 def test_cli_tag_subcommands() -> None:

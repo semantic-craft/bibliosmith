@@ -15097,3 +15097,511 @@ fn extracted_chapter_headings_are_exactly_the_split_boundaries() {
         "a hash inside a fence is not a boundary"
     );
 }
+
+// ---- Zotero attach --------------------------------------------------------
+
+/// Stands in for `zsearch add file`, answering with the agent contract's
+/// envelope. `stdout_override` lets a test hand back a malformed or mismatched
+/// answer without having to fake a whole CLI.
+struct ZoteroAttachFixtureExecutor {
+    attachment_key: String,
+    stdout_override: Option<String>,
+    commands: Mutex<Vec<RunnerCommand>>,
+}
+
+impl Default for ZoteroAttachFixtureExecutor {
+    fn default() -> Self {
+        Self {
+            attachment_key: "ATTACH01".into(),
+            stdout_override: None,
+            commands: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl ZoteroAttachFixtureExecutor {
+    fn answering(stdout: &str) -> Self {
+        Self {
+            stdout_override: Some(stdout.into()),
+            ..Self::default()
+        }
+    }
+
+    fn commands(&self) -> Vec<RunnerCommand> {
+        self.commands.lock().unwrap().clone()
+    }
+}
+
+impl RunnerCommandExecutor for ZoteroAttachFixtureExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.kind, RunnerCommandKind::Process);
+        assert_eq!(command.label, ZOTERO_ATTACH_COMMAND_LABEL);
+        assert_eq!(command.program, PathBuf::from("uv"));
+        assert_eq!(
+            command.args[0..6],
+            [
+                "run",
+                "--package",
+                "zotero-cli-agent",
+                "zsearch",
+                "add",
+                "file"
+            ]
+        );
+        // Whatever the Keychain holds is what the upload authenticates with.
+        let injected = command
+            .env
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<BTreeSet<_>>();
+        for (key, _) in crate::zotero_settings::resolve_credential_env() {
+            assert!(
+                injected.contains(key.as_str()),
+                "credential {key} was not injected"
+            );
+        }
+        self.commands.lock().unwrap().push(command.clone());
+
+        let stdout = self.stdout_override.clone().unwrap_or_else(|| {
+            let filename = Path::new(&command.args[6])
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap();
+            let parent = &command.args[8];
+            format!(
+                r#"{{"ok":true,"data":{{"attachmentKey":"{}","parentItemKey":"{parent}","filename":"{filename}"}},"meta":{{"schema_version":"zotero-cli-agent-v1","cli_version":"0.1.0"}}}}"#,
+                self.attachment_key
+            )
+        });
+        Ok(RunnerCommandResult {
+            stdout,
+            stderr: String::new(),
+            log_summary: vec!["Zotero attachment upload completed".into()],
+        })
+    }
+}
+
+/// A finished book that came from a Zotero item, in the shape a single-item
+/// job actually has: no frozen attachment identity, and the parent surviving
+/// only in the Markdown the conversion worker extracted. Registering the
+/// identity after the fact is not an option -- `sourceRefs` is one of the
+/// artifact fields the state file refuses to see mutated.
+fn attachable_reading_job(
+    store: &BookPipelineStore,
+    repo: &Path,
+    executor: &ReadingPipelineFixtureExecutor,
+) -> (String, String) {
+    let (job_id, completed) = completed_reading_job(store, repo, executor);
+    let markdown_path = child_project_root(&completed)
+        .join("source")
+        .join("converted.md");
+    fs::write(
+        &markdown_path,
+        "---\nparent_item_key: PARENT01\n---\n\n# Converted\n",
+    )
+    .unwrap();
+    let mut state = store.load().unwrap();
+    let stored = state.jobs.iter_mut().find(|job| job.id == job_id).unwrap();
+    stored.children[0].artifacts.push(BookPipelineArtifact {
+        kind: "markdown".into(),
+        path: display_path(&markdown_path),
+        zotero_key: Some("MARKDOWN01".into()),
+        ..BookPipelineArtifact::default()
+    });
+    store.save(&state).unwrap();
+    let stored = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    let artifact_id = stored.children[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "reading_epub")
+        .expect("built EPUB")
+        .artifact_id
+        .clone();
+    (job_id, artifact_id)
+}
+
+fn attach_roots(repo: &Path) -> Vec<PathBuf> {
+    vec![repo.join("books").join("local")]
+}
+
+#[test]
+fn attaching_a_finished_book_records_the_attachment_key() {
+    let root = temp_root("zotero-attach-records-key");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let (job_id, artifact_id) =
+        attachable_reading_job(&store, &repo, &ReadingPipelineFixtureExecutor::passing());
+    let executor = ZoteroAttachFixtureExecutor::default();
+
+    let attached = attach_artifact_to_zotero_with_executor(
+        &store,
+        &job_id,
+        &artifact_id,
+        false,
+        &attach_roots(&repo),
+        &executor,
+    )
+    .unwrap();
+
+    let epub = attached.children[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
+        .unwrap();
+    assert_eq!(epub.zotero_key.as_deref(), Some("ATTACH01"));
+    // The write point that used to be Markdown-only: an EPUB now carries a key
+    // of its own, and it survives the derive that `save` runs.
+    assert_eq!(epub.kind, "reading_epub");
+    let reloaded = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    assert_eq!(
+        reloaded.children[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_id == artifact_id)
+            .unwrap()
+            .zotero_key
+            .as_deref(),
+        Some("ATTACH01")
+    );
+
+    let commands = executor.commands();
+    assert_eq!(commands.len(), 1);
+    assert!(has_arg_pair(&commands[0].args, "--parent", "PARENT01"));
+    assert!(
+        commands[0].args[6].ends_with("book.epub"),
+        "{:?}",
+        commands[0].args
+    );
+    // Agent mode is asked for, not inferred from stdout not being a terminal.
+    assert!(commands[0]
+        .env
+        .contains(&("ZSEARCH_FORMAT".into(), "json".into())));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn re_attaching_needs_an_explicit_replacement() {
+    let root = temp_root("zotero-attach-idempotent");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let (job_id, artifact_id) =
+        attachable_reading_job(&store, &repo, &ReadingPipelineFixtureExecutor::passing());
+    let roots = attach_roots(&repo);
+    attach_artifact_to_zotero_with_executor(
+        &store,
+        &job_id,
+        &artifact_id,
+        false,
+        &roots,
+        &ZoteroAttachFixtureExecutor::default(),
+    )
+    .unwrap();
+
+    // Zotero deduplicates bytes, not intent: a second upload of a rebuilt book
+    // would sit beside the first, so the plain click has to refuse.
+    let refused = ZoteroAttachFixtureExecutor::default();
+    let err = attach_artifact_to_zotero_with_executor(
+        &store,
+        &job_id,
+        &artifact_id,
+        false,
+        &roots,
+        &refused,
+    )
+    .unwrap_err();
+    assert!(err.contains("already attached"), "{err}");
+    assert!(
+        refused.commands().is_empty(),
+        "the refusal still ran an upload"
+    );
+
+    let replaced = ZoteroAttachFixtureExecutor {
+        attachment_key: "ATTACH02".into(),
+        ..ZoteroAttachFixtureExecutor::default()
+    };
+    let job = attach_artifact_to_zotero_with_executor(
+        &store,
+        &job_id,
+        &artifact_id,
+        true,
+        &roots,
+        &replaced,
+    )
+    .unwrap();
+    assert_eq!(
+        job.children[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_id == artifact_id)
+            .unwrap()
+            .zotero_key
+            .as_deref(),
+        Some("ATTACH02")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn only_finished_books_can_be_attached() {
+    let root = temp_root("zotero-attach-kind-guard");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let (job_id, _) =
+        attachable_reading_job(&store, &repo, &ReadingPipelineFixtureExecutor::passing());
+    let job = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    let artifact_of = |kind: &str| {
+        job.children[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == kind)
+            .unwrap_or_else(|| panic!("a {kind} artifact"))
+            .artifact_id
+            .clone()
+    };
+    let refused = [
+        // Working state, not a deliverable: the chapter sources the translation
+        // ran over have no business in someone's library.
+        artifact_of("chapter_final"),
+        // Registered one per chapter, so uploading "the HTML" would put a
+        // single XHTML file in the library and record its key as though the
+        // whole book had gone up.
+        artifact_of("reading_html"),
+    ];
+    let executor = ZoteroAttachFixtureExecutor::default();
+
+    for artifact_id in refused {
+        let err = attach_artifact_to_zotero_with_executor(
+            &store,
+            &job_id,
+            &artifact_id,
+            false,
+            &attach_roots(&repo),
+            &executor,
+        )
+        .unwrap_err();
+        assert!(err.contains("not a finished book"), "{err}");
+    }
+    assert!(executor.commands().is_empty(), "the guard still uploaded");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Answers like the normal fixture, but lets a second writer bump the state
+/// revision first -- the shape of an upload that takes long enough for another
+/// stage to save while it is in flight.
+struct ZoteroAttachRacingExecutor {
+    root: PathBuf,
+    inner: ZoteroAttachFixtureExecutor,
+}
+
+impl RunnerCommandExecutor for ZoteroAttachRacingExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        let writer = BookPipelineStore::for_test_with_owner(&self.root, "concurrent-writer");
+        let mut state = writer.load().unwrap();
+        state.jobs[0].log_summary.push("a concurrent write".into());
+        writer.save(&state).unwrap();
+        self.inner.execute(command)
+    }
+}
+
+#[test]
+fn a_concurrent_write_during_the_upload_does_not_lose_the_attachment_key() {
+    let root = temp_root("zotero-attach-revision-race");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let (job_id, artifact_id) =
+        attachable_reading_job(&store, &repo, &ReadingPipelineFixtureExecutor::passing());
+
+    let attached = attach_artifact_to_zotero_with_executor(
+        &store,
+        &job_id,
+        &artifact_id,
+        false,
+        &attach_roots(&repo),
+        &ZoteroAttachRacingExecutor {
+            root: root.clone(),
+            inner: ZoteroAttachFixtureExecutor::default(),
+        },
+    )
+    .unwrap();
+
+    // The upload already happened. Failing the save here would leave the book in
+    // the library with nothing recording it, and the next click would pass the
+    // duplicate guard and upload it a second time.
+    let stored = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    for job in [&attached, &stored] {
+        assert_eq!(
+            job.children[0]
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_id == artifact_id)
+                .unwrap()
+                .zotero_key
+                .as_deref(),
+            Some("ATTACH01")
+        );
+    }
+    // Recorded onto the newer state rather than over it.
+    assert!(
+        stored
+            .log_summary
+            .iter()
+            .any(|line| line == "a concurrent write"),
+        "the concurrent write was clobbered: {:?}",
+        stored.log_summary
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn attaching_refuses_a_file_outside_the_allowlist() {
+    let root = temp_root("zotero-attach-allowlist");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let (job_id, artifact_id) =
+        attachable_reading_job(&store, &repo, &ReadingPipelineFixtureExecutor::passing());
+    let executor = ZoteroAttachFixtureExecutor::default();
+
+    let err = attach_artifact_to_zotero_with_executor(
+        &store,
+        &job_id,
+        &artifact_id,
+        false,
+        &[root.join("somewhere-else")],
+        &executor,
+    )
+    .unwrap_err();
+
+    assert!(err.contains("outside the job/project allowlist"), "{err}");
+    assert!(executor.commands().is_empty(), "the guard still uploaded");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn attaching_rejects_evidence_for_a_different_upload() {
+    let root = temp_root("zotero-attach-evidence");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let (job_id, artifact_id) =
+        attachable_reading_job(&store, &repo, &ReadingPipelineFixtureExecutor::passing());
+    let roots = attach_roots(&repo);
+
+    for (stdout, expected) in [
+        (
+            // The CLI's own failure category, which it writes to stdout.
+            r#"{"ok":false,"error":{"code":"auth_missing","message":"ZOTERO_API_KEY not set in environment","retryable":false,"hint":null}}"#,
+            "ZOTERO_API_KEY not set",
+        ),
+        (
+            r#"{"ok":true,"data":{"attachmentKey":"OTHER001","parentItemKey":"SOMEONEELSE","filename":"book.epub"}}"#,
+            "does not match the requested upload",
+        ),
+        (
+            r#"{"ok":true,"data":{"attachmentKey":"ATTACH01","parentItemKey":"PARENT01","filename":"someone-elses.epub"}}"#,
+            "does not match the requested upload",
+        ),
+        (r#"{"ok":true,"meta":{}}"#, "success with no attachment"),
+        ("not json at all", "returned no result"),
+    ] {
+        let err = attach_artifact_to_zotero_with_executor(
+            &store,
+            &job_id,
+            &artifact_id,
+            false,
+            &roots,
+            &ZoteroAttachFixtureExecutor::answering(stdout),
+        )
+        .unwrap_err();
+        assert!(err.contains(expected), "{stdout} -> {err}");
+    }
+
+    // Nothing was recorded on the way through any of them.
+    assert!(store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap()
+        .children[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
+        .unwrap()
+        .zotero_key
+        .is_none());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_parent_item_falls_back_to_the_extracted_markdown() {
+    let root = temp_root("zotero-attach-parent-fallback");
+    fs::create_dir_all(&root).unwrap();
+    let markdown_path = root.join("source.md");
+    fs::write(
+        &markdown_path,
+        "---\nparent_item_key: FROMFRONTMATTER\n---\n\n# Body\n",
+    )
+    .unwrap();
+
+    let mut job = excerpt_fixture_job(&markdown_path);
+    job.artifacts[0].kind = "markdown".into();
+    let epub = BookPipelineArtifact {
+        artifact_id: "artifact-epub".into(),
+        kind: "reading_epub".into(),
+        path: display_path(&root.join("book.epub")),
+        ..BookPipelineArtifact::default()
+    };
+
+    // A job queued against a single Zotero item freezes no attachment identity,
+    // so the reading artifact carries no parent of its own -- the conversion
+    // worker's frontmatter is the only place it survives.
+    assert_eq!(
+        attach_parent_item_key(&job, &epub).as_deref(),
+        Some("FROMFRONTMATTER")
+    );
+
+    // The artifact's own record wins when it has one.
+    let mut stamped = epub.clone();
+    stamped.source_refs.parent_item_key = Some("FROMARTIFACT".into());
+    assert_eq!(
+        attach_parent_item_key(&job, &stamped).as_deref(),
+        Some("FROMARTIFACT")
+    );
+
+    // A book from a local file has no parent anywhere, and guessing one would
+    // attach it under a stranger's item.
+    job.artifacts.clear();
+    assert_eq!(attach_parent_item_key(&job, &epub), None);
+
+    let _ = fs::remove_dir_all(root);
+}
