@@ -308,13 +308,18 @@ def load_worker_module() -> ModuleType:
 
 
 def render_page_scaffold_markdown(pages: Sequence[tuple[int, str]]) -> str:
-    """Render the Markdown body the ``pdf-text`` route produces today.
+    """Render the Markdown body the ``pdf-text`` route produced before #135.
 
-    This is ``zotero_llm_worker.render_markdown`` without its front matter and
+    This was ``zotero_llm_worker.render_markdown`` without its front matter and
     ``# {title}`` line, both of which come from the Zotero item rather than
     from the PDF: a conversion benchmark must not credit an engine for metadata
-    it was handed. ``test_pdf_markdown_benchmark.py`` asserts the two stay in
-    step.
+    it was handed.
+
+    #135/#145 retired that renderer — the route now hands the whole body to
+    ``pdf_text.extract_markdown`` and adds no per-page heading. This stays as
+    the frozen "before" the harness measures against, so the improvement has a
+    fixed reference; ``test_pdf_markdown_benchmark.py`` guards the direction
+    that still matters, that production does not grow scaffolding back.
     """
 
     body: list[str] = []
@@ -327,7 +332,7 @@ def render_page_scaffold_markdown(pages: Sequence[tuple[int, str]]) -> str:
 
 
 class PyMuPdfEngine:
-    """The route we ship today: PyMuPDF text per page under a page heading."""
+    """The pre-#135 baseline: PyMuPDF text per page under a page heading."""
 
     name = PYMUPDF_ENGINE
 

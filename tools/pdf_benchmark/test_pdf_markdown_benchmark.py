@@ -232,29 +232,40 @@ class HomeRelativeTests(unittest.TestCase):
 
 
 class ProductionShapeTests(unittest.TestCase):
-    """The benchmark must render what the shipped route renders.
+    """`render_page_scaffold_markdown` is the frozen pre-#135 baseline.
 
-    `render_page_scaffold_markdown` deliberately drops the Zotero front matter
-    and the `# {title}` line, because neither comes from the PDF. Everything
-    below that has to stay byte-identical to `render_markdown`, or the harness
-    starts measuring a document the pipeline never produces.
+    It was pinned byte-for-byte to `zotero_llm_worker.render_markdown` while
+    that renderer shipped. #135/#145 retired it: the route now delegates the
+    whole body to `pdf_text.extract_markdown` and `render_extracted_markdown`
+    adds no per-page heading. So the pin has no live counterpart to track, and
+    the baseline stays frozen — a benchmark needs a fixed "before" to measure
+    against, and the adoption numbers in `docs/planning/pdf-inspector-adoption.md`
+    were taken with exactly this rendering.
+
+    What is still worth pinning is the opposite direction: production must not
+    grow page scaffolding back. That is the defect the baseline exists to
+    quantify, and it reached the EPUB table of contents last time.
     """
 
-    def test_page_body_matches_the_worker_renderer(self):
+    def test_the_shipped_renderer_adds_no_page_scaffolding(self):
         try:
             worker = load_worker_module()
         except Exception as exc:  # pragma: no cover - environment-dependent
             self.skipTest(f"zotero_llm_worker is not importable here: {exc}")
-        pages = [(1, "first page text"), (2, ""), (3, "third page text")]
-        produced = worker.render_markdown(
+        self.assertFalse(
+            hasattr(worker, "render_markdown"),
+            "render_markdown came back; re-pin the baseline to it or drop this guard",
+        )
+        produced = worker.render_extracted_markdown(
             title="A Book",
             metadata={"route": "pdf-text", "page_count": 3},
-            pages=pages,
+            body="first page text\n\nthird page text\n",
         )
-        self.assertTrue(
-            produced.endswith(render_page_scaffold_markdown(pages)),
-            "benchmark page rendering drifted from zotero_llm_worker.render_markdown",
-        )
+        self.assertEqual(measure_markdown(produced).scaffolding_headings, 0)
+
+    def test_the_frozen_baseline_still_renders_page_scaffolding(self):
+        pages = [(1, "first page text"), (2, ""), (3, "third page text")]
+        self.assertEqual(measure_markdown(render_page_scaffold_markdown(pages)).scaffolding_headings, 3)
 
     def test_empty_pages_keep_the_worker_placeholder(self):
         markdown = render_page_scaffold_markdown([(1, "")])
