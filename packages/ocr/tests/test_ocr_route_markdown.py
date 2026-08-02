@@ -35,8 +35,11 @@ from zotero_llm_worker import (  # noqa: E402
     Attachment,
     StateDB,
     get_config,
+    markdown_page_numbers,
     md5_file,
     process_ocr_route,
+    selection_status,
+    sidecar_page_numbers,
 )
 
 
@@ -73,6 +76,24 @@ class FakeBaiduOCRClient:
         return json.dumps({"result": {"ocrResults": results}}, ensure_ascii=False) + "\n"
 
 
+class FakeLayoutClient(FakeBaiduOCRClient):
+    """The shape a PaddleOCR-VL model answers with: per-page Markdown.
+
+    The other fake cannot stand in for this one — the layout branch reads
+    `layoutParsingResults`, which is exactly what
+    `test_a_layout_model_still_takes_the_other_branch` relies on it not
+    finding — so a claim about what the layout branch writes needs its own.
+    """
+
+    def download_jsonl(self, url: str) -> str:
+        _, start, end = url.split("-")
+        results = [
+            {"markdown": {"text": " ".join(PAGE_TEXTS[page]), "images": {}}}
+            for page in range(int(start), int(end) + 1)
+        ]
+        return json.dumps({"result": {"layoutParsingResults": results}}, ensure_ascii=False) + "\n"
+
+
 def write_pdf(path: Path, page_count: int) -> Path:
     doc = fitz.open()
     for number in range(page_count):
@@ -98,7 +119,7 @@ class OcrRouteMarkdownTests(unittest.TestCase):
             content_type="application/pdf",
         )
 
-    def run_route(self, *, baidu_model: str = "PP-OCRv5"):  # type: ignore[no-untyped-def]
+    def run_route(self, *, baidu_model: str = "PP-OCRv5", client=FakeBaiduOCRClient):  # type: ignore[no-untyped-def]
         config = dataclasses.replace(
             get_config(),
             output_root=self.root / "out",
@@ -108,7 +129,7 @@ class OcrRouteMarkdownTests(unittest.TestCase):
             baidu_max_upload_mb=64,
         )
         state = StateDB(self.root / "state.sqlite3")
-        with mock.patch("zotero_llm_worker.BaiduOCRClient", FakeBaiduOCRClient):
+        with mock.patch("zotero_llm_worker.BaiduOCRClient", client):
             status, pages_used = process_ocr_route(
                 attachment=self.attachment,
                 config=config,
@@ -171,6 +192,35 @@ class OcrRouteMarkdownTests(unittest.TestCase):
 
         self.assertEqual(sorted(PAGE_TEXTS), [entry["page"] for entry in lines])
         self.assertEqual(len(PAGE_TEXTS), pages_used)
+
+    def assert_upload_test_sees_a_whole_book(self, markdown_path: Path, sidecar_path: Path) -> None:
+        """`upload_test()` decides the recorded status from these two readers.
+
+        It takes `sidecar_page_numbers(...) or markdown_page_numbers(...)`, and
+        an OCR route writes no page marker into the Markdown at all, so the
+        sidecar is the only source there is. When it read back empty, a fully
+        converted book was recorded `uploaded_partial`: `StateDB.completed()`
+        then never matched the row, so the next run paid to OCR the book again
+        and `emit_attachment_evidence()` stayed silent about it.
+        """
+        self.assertEqual([], markdown_page_numbers(markdown_path))
+        pages = sidecar_page_numbers(sidecar_path) or markdown_page_numbers(markdown_path)
+
+        self.assertEqual(sorted(PAGE_TEXTS), pages)
+        self.assertEqual("completed", selection_status(pages, len(PAGE_TEXTS), uploaded=True))
+
+    def test_upload_test_reads_every_page_off_an_ocr_sidecar(self) -> None:
+        _, markdown_path, sidecar_path, _ = self.run_route()
+
+        self.assert_upload_test_sees_a_whole_book(markdown_path, sidecar_path)
+
+    def test_upload_test_reads_every_page_off_a_layout_sidecar(self) -> None:
+        _, markdown_path, sidecar_path, _ = self.run_route(
+            baidu_model="PaddleOCR-VL-1.6", client=FakeLayoutClient
+        )
+
+        self.assertIn("Chapter One", markdown_path.read_text(encoding="utf-8"))
+        self.assert_upload_test_sees_a_whole_book(markdown_path, sidecar_path)
 
     def test_a_layout_model_still_takes_the_other_branch(self) -> None:
         """The fake answers `ocrResults`, which the layout branch cannot read.

@@ -1226,20 +1226,43 @@ def markdown_page_numbers(path: Path) -> list[int]:
 
 
 def sidecar_page_numbers(path: Path) -> list[int]:
-    """Page numbers from a pdf-text sidecar's `pages` array."""
+    """Page numbers a sidecar records, in either shape a route writes here.
+
+    The pdf-text route writes one JSON object carrying a `pages` array; both
+    paddle-ocr branches write JSONL, one `{"page": N, "raw": {...}}` per page.
+    Both files are named `.jsonl`, and a one-page JSONL sidecar parses whole
+    just as well, so which shape this is has to be read off what is inside
+    rather than off whether the file parses in one piece.
+
+    Pages come back in the order the file lists them, which is the order the
+    route wrote them in: a chunk that fails and is split retries in the place
+    it was popped from, so the page numbers stay ascending.
+    """
     if not path.exists():
         return []
+    text = path.read_text(encoding="utf-8")
     try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
+        parsed = json.loads(text)
     except Exception:
-        return []
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("pages"), list):
-        return []
-    return [
-        entry["page"]
-        for entry in parsed["pages"]
-        if isinstance(entry, dict) and isinstance(entry.get("page"), int)
-    ]
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("pages"), list):
+        return [
+            entry["page"]
+            for entry in parsed["pages"]
+            if isinstance(entry, dict) and isinstance(entry.get("page"), int)
+        ]
+    pages: list[int] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("page"), int):
+            pages.append(entry["page"])
+    return pages
 
 
 def selection_status(pages: list[int], page_count: int, *, uploaded: bool) -> str:
