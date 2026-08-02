@@ -23,11 +23,13 @@ would mean paying for OCR on hundreds of perfectly extractable pages. Whether a
 PDF has a usable text layer stays a question about PyMuPDF's character count,
 which is what the callers already ask.
 
-Pages are extracted one at a time rather than as one document-wide blob. That
-is what makes `_strip_running_heads()` possible — see its docstring for why a
-book's running heads have to go — and it also keeps pdf-inspector's heading
-levels stable, because the per-page call derives its font statistics from the
-whole document instead of from whichever pages the caller asked for.
+Pages are extracted one at a time rather than as one document-wide blob. Two
+of the passes below need to know which page a line was printed on:
+`_strip_running_heads()` to tell furniture from a heading that repeats, and
+`_demote_subsections()` to tell a chapter from a section — see their docstrings
+for why. It also keeps pdf-inspector's heading levels stable, because the
+per-page call derives its font statistics from the whole document instead of
+from whichever pages the caller asked for.
 """
 
 from __future__ import annotations
@@ -146,7 +148,7 @@ def extract_markdown(
         )
 
     trimmed, heads = _strip_running_heads(parsed)
-    markdown = _join_pages(trimmed)
+    markdown = _join_pages(_normalize_heading_levels(trimmed))
     return PdfTextResult(
         markdown=markdown,
         engine=engine,
@@ -362,6 +364,208 @@ def _strip_running_heads(
         trimmed.append((page_no, "\n".join(kept).strip()))
     ordered = sorted(heads, key=lambda key: (-len(seen[key]), key))
     return trimmed, tuple(ordered)
+
+
+#: An ATX heading, split into its hashes and its title.
+_HEADING = re.compile(r"^(#{1,6})(?:[ \t]+(.*))?$")
+#: A section number printed on a heading: `2.`, `3.2`, `3.2.2`. A chapter in
+#: the same book is numbered `5` — bare, no dot — which is what makes the dot
+#: worth reading, and why one is required for the number to count as a
+#: section's rather than a chapter's.
+_SECTION_NUMBER = re.compile(r"^\d{1,3}(?:(?:\.\d{1,3})*\.|(?:\.\d{1,3})+)(?=\s|$)")
+#: Words no title begins with, so a heading opening with one is the tail of a
+#: title that wrapped onto a second printed line. `the` and `a` are deliberately
+#: absent: plenty of real chapters start with them.
+_CONTINUES = frozenset({"of", "and", "or", "nor", "but"})
+#: Words no title line ends on, read from the other side of the same break.
+_DANGLES = frozenset(
+    {
+        "a", "an", "the", "of", "and", "or", "nor", "but", "to", "in", "on",
+        "for", "with", "as", "at", "from", "by", "into", "over", "under",
+        "between", "about", "against", "toward", "towards", "its", "their",
+    }
+)
+#: A line break inside a title lands on one of these when it does not land
+#: between words.
+_BROKEN_TAIL = re.compile(r"[-‐-―,;:]$")
+_TITLE_WORDS = re.compile(r"[^\W\d_]+")
+
+
+def _heading(line: str) -> tuple[int, str] | None:
+    match = _HEADING.match(line)
+    if match is None:
+        return None
+    return len(match.group(1)), (match.group(2) or "").strip()
+
+
+def _wraps_onto(first: str, second: str) -> bool:
+    """Whether two headings are one title broken across two printed lines.
+
+    Only the shape of the break is read, never the words themselves, and only
+    breaks that cannot be anything else count. A wrong merge destroys a real
+    chapter title, while a missed one costs a single spare table-of-contents
+    entry, so every unclear case is left alone: `EVIDENCE` followed by
+    `IS IT FINALLY TIME TO PUT ...` is a section divider above a chapter title
+    and reads exactly like a wrap until you know the book.
+    """
+    if not first or not second:
+        return False
+    if _BROKEN_TAIL.search(first.rstrip()):
+        return True
+    words = _TITLE_WORDS.findall(first)
+    if words and words[-1].casefold() in _DANGLES:
+        return True
+    tail = _TITLE_WORDS.findall(second)
+    return bool(tail) and tail[0].casefold() in _CONTINUES
+
+
+def _merge_wrapped_headings(pages: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Rejoin a heading pdf-inspector reported as two, one per printed line.
+
+    A title set over two lines is two headings of the same level with nothing
+    between them, and the launcher's splitter reads each as a chapter boundary:
+    `# 5 On the Artifactual— and Natural—` and `# Character of Legal
+    Institutions` become two chapters, the second of them named after the
+    second half of one title.
+    """
+    merged: list[tuple[int, str]] = []
+    for page_no, markdown in pages:
+        lines = markdown.splitlines()
+        kept: list[str] = []
+        joined = False
+        index = 0
+        while index < len(lines):
+            here = _heading(lines[index])
+            if here is None:
+                kept.append(lines[index])
+                index += 1
+                continue
+            level, title = here
+            after = index + 1
+            while after < len(lines) and not lines[after].strip():
+                after += 1
+            following = _heading(lines[after]) if after < len(lines) else None
+            if (
+                following is not None
+                and following[0] == level
+                and _wraps_onto(title, following[1])
+            ):
+                kept.append(f"{'#' * level} {title} {following[1]}".rstrip())
+                joined = True
+                index = after + 1
+                continue
+            kept.append(lines[index])
+            index += 1
+        merged.append((page_no, "\n".join(kept) if joined else markdown))
+    return merged
+
+
+def _opens_page(lines: list[str], index: int) -> bool:
+    """Whether this line is the first thing printed on its page.
+
+    A folio sitting on its own line above the title is stepped over, the same
+    way `_edge_lines()` steps over it.
+    """
+    for position, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or _BARE_NUMBER.match(stripped):
+            continue
+        return position == index
+    return False
+
+
+def _demote_subsections(pages: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Push a chapter's own sections below the level the chapters sit at.
+
+    pdf-inspector sizes headings by font, and in a book whose section titles
+    are set at or near the size of its chapter titles the two land on the same
+    level: `# 1 Legal Positivism about the Artifact Law` is a chapter while
+    `# 2. Legal Positivism, Some Preliminaries` and `# 3.2 Hans Kelsen` are
+    sections inside it. `split_source_markdown()` cuts a chapter at every
+    heading of the shallowest level present, so each of those sections becomes
+    a chapter of the finished book — 71 of them in a book with 12.
+
+    Two things say a heading is a chapter rather than a section, and a heading
+    has to satisfy both:
+
+    * It starts a page. Chapters open on a fresh page and sections run on from
+      the text above them. This is the load-bearing test, because it reads the
+      book's layout rather than its typographic conventions, and it is the only
+      one of the two that works on a book whose sections are unnumbered —
+      `The Conditions of Legal Validity` and `<u>Further Reading</u>` are
+      sections of one companion volume and carry no number to demote them by.
+    * It is not numbered like a section. `6. The Case of Dworkin-Lite` happens
+      to fall at the top of a page and is still a section.
+
+    Two guards keep either test from taking the whole level with it, which
+    would achieve nothing in any case — the splitter would simply read the
+    level below as the new shallowest one. Nothing is demoted at all unless
+    some heading opens a page, and the dotted test is dropped as soon as no
+    undotted chapter is left to compare against, so a book whose chapters
+    really are numbered `1.`, `2.` keeps them. Between them those two leave at
+    least one heading standing, which is why no third guard follows.
+    """
+    levels = [
+        heading[0]
+        for _, markdown in pages
+        for heading in (_heading(line) for line in markdown.splitlines())
+        if heading is not None
+    ]
+    if not levels:
+        return pages
+    primary = min(levels)
+    if primary >= 6:
+        return pages
+
+    found: list[tuple[int, int, bool, bool]] = []
+    for page_index, (_, markdown) in enumerate(pages):
+        lines = markdown.splitlines()
+        for line_index, line in enumerate(lines):
+            heading = _heading(line)
+            if heading is None or heading[0] != primary:
+                continue
+            found.append(
+                (
+                    page_index,
+                    line_index,
+                    _opens_page(lines, line_index),
+                    _SECTION_NUMBER.match(heading[1]) is not None,
+                )
+            )
+
+    openers = [entry for entry in found if entry[2]]
+    if not openers:
+        return pages
+    # Only a book that numbers its sections but not its chapters can be read
+    # this way; where every heading that opens a page is numbered, the number
+    # is the chapter's, not a section's.
+    read_numbers = any(not numbered for *_, numbered in openers)
+    demoted: dict[int, list[int]] = defaultdict(list)
+    for page_index, line_index, opener, numbered in found:
+        if not opener or (read_numbers and numbered):
+            demoted[page_index].append(line_index)
+
+    lowered: list[tuple[int, str]] = []
+    for page_index, (page_no, markdown) in enumerate(pages):
+        on_page = demoted.get(page_index)
+        if not on_page:
+            lowered.append((page_no, markdown))
+            continue
+        lines = markdown.splitlines()
+        for line_index in on_page:
+            lines[line_index] = "#" + lines[line_index].lstrip()
+        lowered.append((page_no, "\n".join(lines)))
+    return lowered
+
+
+def _normalize_heading_levels(pages: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Make the shallowest heading level mean `chapter` and nothing else.
+
+    Both passes exist because that level is what the launcher's splitter cuts
+    the book into chapters at; see the two docstrings below for what each one
+    finds sitting there that is not a chapter.
+    """
+    return _demote_subsections(_merge_wrapped_headings(pages))
 
 
 def _join_pages(pages: list[tuple[int, str]]) -> str:
