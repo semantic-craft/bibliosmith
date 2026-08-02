@@ -206,6 +206,36 @@
 .pl-island-preflight { max-height: 240px; overflow: auto; border-radius: var(--radius); background: var(--sub); }
 .pl-island-foot { display: flex; align-items: center; gap: 8px; }
 
+/* The two book tracks, offered only for a single text PDF. */
+.pl-island-track { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pl-track-options { display: flex; gap: 8px; }
+.pl-track-option {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--sub);
+  text-align: left;
+}
+.pl-track-option:hover { border-color: var(--pl-jade); }
+.pl-track-option.picked { border-color: transparent; background: var(--pl-jade-soft); }
+.pl-track-name { display: block; color: var(--muted); font-size: 12.5px; }
+.pl-track-option.picked .pl-track-name { color: var(--pl-jade); font-weight: 550; }
+/* The trade-off is the point of the control, so it is always readable rather
+   than hidden behind the title attribute. Clamped so a long hint cannot push
+   the launch button off a short window. */
+.pl-track-hint {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
 /* ---------- hero (empty shelf) ---------- */
 
 .pl-hero {
@@ -257,7 +287,7 @@
   color: #fff;
 }
 .pl-cover span {
-  font-family: "Songti SC", "Noto Serif SC", Georgia, serif;
+  font-family: var(--font-reading);
   font-size: 15px;
   line-height: 1.3;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -408,11 +438,17 @@
 .pl-ci-field small { display: block; margin-top: 3px; color: var(--pl-faint); font-size: 10.5px; text-align: right; }
 .pl-ci-field small.over, .pl-ci-error { color: var(--pl-failed); }
 .pl-ci-error { margin: 8px 0 0; font-size: 11.5px; }
-.pl-ci-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.pl-ci-actions,
+.pl-ocrcard-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 
 /* ---------- three-phase strip ---------- */
 
 .pl-phases { display: flex; margin-bottom: 16px; }
+/* The layout-preserving track is one pass, so its strip has a single segment.
+   Left-aligned rather than stretched: one circle centred across the full width
+   reads as a three-step strip that failed to render the other two. */
+.pl-phases.single { justify-content: flex-start; }
+.pl-phases.single .pl-phase { flex: 0 0 auto; min-width: 140px; }
 .pl-phase { position: relative; flex: 1; padding: 0 4px; text-align: center; }
 .pl-phase::before {
   content: "";
@@ -474,7 +510,7 @@
   border-radius: 10px;
   background: var(--sub);
   color: var(--ink);
-  font-family: "Songti SC", "Noto Serif SC", Georgia, serif;
+  font-family: var(--font-reading);
   font-size: 12.5px;
   line-height: 1.75;
   white-space: pre-wrap;
@@ -508,11 +544,14 @@
   background: var(--sub);
 }
 .pl-scompare-head h4 { margin: 0 0 4px; color: var(--ink); font-size: 13px; }
-.pl-scompare-head p { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.pl-scompare-head p,
+.pl-ocrcard-lead { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
 .pl-scontrols { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: end; }
-.pl-scontrols label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.pl-scontrols label,
+.pl-ocrcard-controls label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
 .pl-scontrols select,
-.pl-scontrols input {
+.pl-scontrols input,
+.pl-ocrcard-controls input {
   min-width: 0;
   width: 100%;
   padding: 7px 8px;
@@ -537,10 +576,11 @@
 .pl-scolumns > div { min-width: 0; padding: 9px; }
 .pl-scolumns > div + div { border-left: 1px solid var(--line); }
 .pl-scolumns h5 { margin: 0 0 5px; color: var(--muted); font-size: 10.5px; }
-.pl-scolumns p {
+.pl-scolumns p,
+.pl-ocrpane-text {
   margin: 0;
   color: var(--ink);
-  font-family: "Songti SC", "Noto Serif SC", Georgia, serif;
+  font-family: var(--font-reading);
   font-size: 11px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -625,9 +665,53 @@
 .pl-evi-row .pl-v { overflow: hidden; color: var(--ink); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .pl-drawer .pl-evi-row .pl-v { min-width: 0; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
 
+/* OCR engine comparison (#97). Two panes side by side, each one engine's answer
+   for the same sampled pages; picking one writes a conversion route override.
+   Selection is the accent ring the design system reserves for a committed
+   choice, drawn as an inset so choosing a side shifts no layout. Hover lifts to
+   the sub-surface colour -- islands take no shadow and no movement. */
+.pl-ocrcard {
+  /* .pl-card carries no padding of its own; every consumer supplies it, and
+     this one is not inside .pl-det-cards. */
+  margin-top: 14px;
+  padding: 13px 15px;
+}
+.pl-ocrcard-controls { display: flex; align-items: end; gap: 8px; }
+/* A page count, not a full-width field. */
+.pl-ocrcard-controls input { width: 76px; border-radius: var(--radius-sm); }
+.pl-ocrpanes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.pl-ocrpane {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  /* The sub-surface, not another --island: the drawer and the card are both
+     island-coloured, and hard rule 1 separates layers by tone, not by lines. */
+  background: var(--sub);
+  color: var(--ink);
+  transition: background 180ms ease-out, border-color 180ms ease-out, box-shadow 180ms ease-out;
+}
+.pl-ocrpane:has(input:enabled):hover { background: var(--island); }
+/* 2px ring per the design system's selected state, drawn half as border and
+   half as an inset so the pane does not move when it is chosen. */
+.pl-ocrpane.picked { border-color: var(--pl-jade); box-shadow: inset 0 0 0 1px var(--pl-jade); }
+/* The global button:disabled fade does not reach here — the pane is a div and
+   only its radio is disabled — so the failure text keeps full contrast against
+   the soft red. */
+.pl-ocrpane.failed { background: var(--pl-failed-soft); border-color: transparent; }
+.pl-ocrpane-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; cursor: pointer; }
+.pl-ocrpane-head:has(input:disabled) { cursor: default; }
+.pl-ocrpane-head input { margin: 0; accent-color: var(--pl-jade); }
+.pl-ocrpane-name { color: var(--ink); font-size: 12px; font-weight: 600; }
+.pl-ocrpane-meta { display: flex; gap: 10px; margin-bottom: 6px; color: var(--muted); font-size: 10.5px; }
+.pl-ocrpane-error { margin: 0; color: var(--pl-failed); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+/* Only the scroll box differs from the translation comparison column. */
+.pl-ocrpane-text { max-height: 190px; overflow: auto; }
+
 @container (max-width: 560px) {
   .pl-det-cards,
   .pl-scolumns,
+  .pl-ocrpanes,
   .pl-diff-grid { grid-template-columns: 1fr; }
   .pl-tabs { gap: 0; }
   .pl-tab { flex: 1; min-width: 0; padding-inline: 6px; }

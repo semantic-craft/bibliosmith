@@ -153,6 +153,25 @@ export function pipelineCopy(locale: PipelineLocale) {
     sampleReady: zh ? "翻译对照样张已生成" : "Translation comparison is ready",
     sampleSource: zh ? "原文" : "Source",
     sampleTranslation: zh ? "译文" : "Translation",
+    ocrCompareTitle: zh ? "OCR 引擎对比" : "OCR engine comparison",
+    ocrCompareLead: zh
+      ? "抽几页正文，两个引擎各跑一次，挑出更适合这本书的那个。只上传抽出的这几页，和全书长度无关。"
+      : "Sample a few interior pages, run both engines over them, and pick the one that suits this book. Only the sampled pages are uploaded, whatever the book's length.",
+    ocrCompareRun: zh ? "生成对比" : "Compare engines",
+    ocrCompareRetry: zh ? "重抽" : "Re-sample",
+    ocrComparePages: zh ? "抽样页数" : "Pages",
+    ocrCompareReady: zh ? "OCR 引擎对比已生成" : "OCR comparison is ready",
+    ocrCompareSampledPages: zh ? "抽样页" : "Sampled pages",
+    ocrCompareCharacters: zh ? "字符" : "characters",
+    ocrCompareSeconds: zh ? "秒" : "s",
+    ocrCompareEmpty: zh ? "这个引擎没有返回文字。" : "This engine returned no text.",
+    ocrCompareFailed: zh ? "未能完成" : "Did not finish",
+    ocrComparePick: zh ? "用这个引擎转换" : "Convert with this engine",
+    // Said plainly because the pages cost money: the report is a preview of the
+    // real conversion, not the conversion itself.
+    ocrCompareNote: zh
+      ? "对比不会改动这本书，选定后才会写入转换路由。"
+      : "Comparing changes nothing about this book; only picking a side writes the conversion route.",
     sampleDegradationNone: zh ? "完整" : "Complete",
     sampleDegradationAligned: zh ? "已对齐修复" : "Aligned fallback",
     sampleDegradationSource: zh ? "保留原文" : "Source fallback",
@@ -367,6 +386,21 @@ export function pipelineCopy(locale: PipelineLocale) {
     islandEnqueue: (n: number) => (zh ? `开始 · ${n} 本` : `Start · ${n} book(s)`),
     islandEnqueueEmpty: zh ? "开始" : "Start",
     islandPreflightBusy: zh ? "正在预检路线…" : "Checking routes…",
+
+    // The two book tracks. Offered only for a single text PDF; every other
+    // input has exactly one track it can take, and picks it without asking.
+    trackChoiceLabel: zh ? "成书方式" : "Output",
+    trackReflow: zh ? "重排 EPUB" : "Reflowed EPUB",
+    trackReflowHint: zh
+      ? "拆成 Markdown 分章翻译，过两道审批门，重排成 EPUB / HTML。可校对、可换模型、可断点续跑。"
+      : "Split into Markdown, translated chapter by chapter behind two approval gates, rebuilt as EPUB / HTML. Reviewable, re-modellable, resumable.",
+    trackLayout: zh ? "保版式双语 PDF" : "Layout-preserving PDF",
+    trackLayoutHint: zh
+      ? "交给 BabelDOC 原地翻译，左原文右中文，图表公式和版式保持原样。一次过，没有审批门，中途失败要整本重跑。"
+      : "Handed to BabelDOC and translated in place, original left and translation right, with figures, formulae and layout untouched. One pass, no approval gates; a failure means rerunning the whole book.",
+    trackLayoutOnlyForTextPdf: zh
+      ? "保版式轨只对文字版 PDF 开放：扫描件没有文字层，一次多本也没有单一版式可保。"
+      : "The layout-preserving track needs a single text PDF: a scan has no text layer, and a batch has no one layout to preserve.",
     shelfCount: (n: number) => (zh ? `书架 · ${n} 本` : `Bookshelf · ${n} book(s)`),
 
     // Route preflight (shown inline in the input island)

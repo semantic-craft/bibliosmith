@@ -1,7 +1,9 @@
 export { pipelineCopy, type PipelineCopy, type PipelineLocale } from "./copy";
 export {
   defaultPipelineDraft,
+  effectivePipelineMode,
   firstMarkdownArtifact,
+  isTrackOnlyDraftPatch,
   type BookUnit,
   type PipelineBusy,
   type PipelineDraft,

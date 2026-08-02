@@ -10,6 +10,7 @@ import type { PipelineCopy } from "./copy";
 import {
   activePhaseIndex,
   allArtifacts,
+  currentArtifact,
   currentStage,
   firstMarkdownArtifact,
   phaseStates,
@@ -19,6 +20,7 @@ import {
   phaseSummaryCaption,
   phaseName,
   phaseStatusCaption,
+  visiblePhaseIndexes,
   sourceChangedRequiresRebuild,
   translationFailureSummary,
   unitAdvanceAction,
@@ -71,6 +73,7 @@ export type BookDrawerProps = {
   ) => void;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
+  onSampleOcr: (jobId: string, childId: string, samplePages: number) => void;
   onOpenOutput: (jobId: string) => void;
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
 };
@@ -150,12 +153,15 @@ const PHASE_MARKS: Record<PhaseState, (index: number) => string> = {
 
 function PhaseStrip({ unit, copy }: { unit: BookUnit; copy: PipelineCopy }) {
   const states = phaseStates(unit);
+  // Only the phases this job has. The layout-preserving track is one pass, so
+  // it draws a single segment rather than three with two of them struck out.
+  const visible = visiblePhaseIndexes(unit);
   return (
     <>
-      <div className="pl-phases">
-        {states.map((state, index) => (
-          <div key={index} className={`pl-phase ${state}`}>
-            <div className="pl-phase-dot">{PHASE_MARKS[state](index)}</div>
+      <div className={`pl-phases${visible.length === 1 ? " single" : ""}`}>
+        {visible.map((index) => (
+          <div key={index} className={`pl-phase ${states[index]}`}>
+            <div className="pl-phase-dot">{PHASE_MARKS[states[index]](index)}</div>
             <div className="pl-phase-name">{phaseName(index, copy)}</div>
             <div className="pl-phase-status">{phaseStatusCaption(unit, index, copy)}</div>
           </div>
@@ -187,12 +193,6 @@ function sampleArtifact(unit: BookUnit, stageId: GateView["stageId"]): BookPipel
     if (hit) return hit;
   }
   return null;
-}
-
-function translationSampleArtifact(unit: BookUnit): BookPipelineArtifact | null {
-  return allArtifacts(unit).find(
-    (artifact) => artifact.kind === "translation_sample_report" && !artifact.supersededBy,
-  ) ?? null;
 }
 
 /** The 3-5 "take a look" confirmation card for a pending human gate. */
@@ -249,7 +249,7 @@ function GateCard({
   // otherwise be blocked here with no picker on screen to unblock them.
   const jobSlotRetired = canRunProviderSample && !slotMeta(jobProfile, jobConfig);
 
-  const reportArtifact = canRunProviderSample ? translationSampleArtifact(unit) : null;
+  const reportArtifact = canRunProviderSample ? currentArtifact(unit, "translation_sample_report") : null;
   const reportVersion = reportArtifact?.sha256 ?? reportArtifact?.artifactId ?? null;
   const [sampleReportState, setSampleReport] = useState<SampleReportState | null>(null);
   const sampleReport = sampleReportState?.version === reportVersion ? sampleReportState.report : null;
@@ -575,6 +575,7 @@ function AdvancedDetails(props: BookDrawerProps) {
     onAdvance: props.onAdvance,
     onApproveGate: props.onApproveGate,
     onRouteOverride: props.onRouteOverride,
+    onSampleOcr: props.onSampleOcr,
     onOpenOutput: props.onOpenOutput,
     onHandoff: props.onHandoff,
     onGoApproval: () => setTab("approval"),

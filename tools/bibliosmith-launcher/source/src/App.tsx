@@ -24,6 +24,7 @@ import {
   queueBookPipelineJob,
   recordFrontendActivity,
   retryBookPipelineJob,
+  runBookPipelineOcrSample,
   runBookPipelineTranslationSample,
   setBookPipelineTranslationProvider,
   runBookPipelineJob,
@@ -54,6 +55,8 @@ import launcherVersionManifest from "../launcher-version.json";
 import {
   PipelineWorkbench,
   defaultPipelineDraft,
+  effectivePipelineMode,
+  isTrackOnlyDraftPatch,
   pipelineCopy,
   type PipelineBusy,
   type PipelineDraft,
@@ -282,7 +285,11 @@ export default function App() {
         pipelineDraft.translationMode === "expert"
           ? { translationMode: "expert" as const, profileId: "expert-agent", configId: "default", skillIds: ["expert-translation-quality"], secondPassEnabled: false, textCleanup: false, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
           : { translationMode: "fast" as const, profileId: pipelineDraft.providerProfileId, configId: pipelineDraft.providerConfigId, skillIds: [], secondPassEnabled: pipelineDraft.secondPassEnabled, textCleanup: pipelineDraft.textCleanup, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats };
-      const queued = await queueBookPipelineJob(source, pipelineDraft.mode, translationIntent, pipelineConfig);
+      // Not `pipelineDraft.mode` directly: the layout-preserving track is only
+      // eligible for a single text PDF, and the draft can still be carrying that
+      // choice from a book the user has since swapped away from.
+      const mode = effectivePipelineMode(pipelineDraft.mode, pipelinePreview);
+      const queued = await queueBookPipelineJob(source, mode, translationIntent, pipelineConfig);
       setPipelineState((current) => upsertPipelineJob(current, queued));
       setPipelinePreview(queued.route);
       if (!queued.route.some((item) => item.canRun)) {
@@ -308,7 +315,10 @@ export default function App() {
     // providerConfigId selects the billing slot within a brand and is read at
     // the fast-route branch above; leaving it out of the deps kept the memoized
     // callback on the slot that was selected when the profile last changed.
-  }, [addActivity, buildPipelineSource, pipelineConfig, pipelineDraft.digestMode, pipelineDraft.mode, pipelineDraft.outputFormats, pipelineDraft.providerConfigId, pipelineDraft.providerProfileId, pipelineDraft.secondPassEnabled, pipelineDraft.textCleanup, pipelineDraft.translationMode, showFloatingToast]);
+    // pipelinePreview is here for the same reason: the effective mode is decided
+    // from the current preflight, and a stale one would queue the layout track
+    // for a book whose route no longer allows it.
+  }, [addActivity, buildPipelineSource, pipelineConfig, pipelineDraft.digestMode, pipelineDraft.mode, pipelineDraft.outputFormats, pipelineDraft.providerConfigId, pipelineDraft.providerProfileId, pipelineDraft.secondPassEnabled, pipelineDraft.textCleanup, pipelineDraft.translationMode, pipelinePreview, showFloatingToast]);
 
   const retryPipeline = useCallback(async (jobId: string) => {
     setPipelineBusy("retry");
@@ -443,6 +453,29 @@ export default function App() {
       setPipelineBusy(null);
     }
   }, [addActivity, bookPipelineCopy.sampleReady, showFloatingToast]);
+
+  // Run both OCR engines over the same sampled pages. Like the translation
+  // sample it adopts nothing: the user picks a side afterwards, which goes
+  // through the ordinary route override.
+  const samplePipelineOcr = useCallback(async (jobId: string, childId: string, samplePages: number) => {
+    setPipelineBusy("sample");
+    try {
+      const job = await runBookPipelineOcrSample(jobId, childId, samplePages);
+      setPipelineState((current) => upsertPipelineJob(current, job));
+      // "requested", not "sampled": a book with fewer interior pages than asked
+      // for yields fewer, and the count that was actually compared is in the
+      // job's own log summary. Claiming ten pages here when four were sampled
+      // would misstate what the run spent.
+      addActivity("success", `OCR sample ready; requested up to ${samplePages} page(s)`);
+      showFloatingToast(bookPipelineCopy.ocrCompareReady, "success");
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+    } finally {
+      setPipelineBusy(null);
+    }
+  }, [addActivity, bookPipelineCopy.ocrCompareReady, showFloatingToast]);
 
   // The explicit half of the sample flow: adopt the slot the sample was run with
   // as the book's own, which is what the full run uses.
@@ -830,7 +863,12 @@ export default function App() {
               busy={pipelineBusy}
               onDraftChange={(patch) => {
                 setPipelineDraft((draft) => ({ ...draft, ...patch }));
-                setPipelinePreview([]);
+                // A draft change invalidates the routes the backend returned,
+                // with one exception: the track choice does not feed the
+                // preflight at all. Clearing on it emptied the route table and
+                // took the choice itself away with it, because the auto-preview
+                // effect is keyed on the source identity and never re-fired.
+                if (!isTrackOnlyDraftPatch(patch)) setPipelinePreview([]);
               }}
               onPreview={() => void previewPipeline()}
               onQueueRun={queueAndRunPipeline}
@@ -853,6 +891,9 @@ export default function App() {
               onApproveGate={(jobId, childId, stageId) => void approvePipelineGate(jobId, childId, stageId)}
               onRouteOverride={(jobId, childId, routeItemId, routeOverride) =>
                 void overridePipelineRoute(jobId, childId, routeItemId, routeOverride)
+              }
+              onSampleOcr={(jobId, childId, samplePages) =>
+                void samplePipelineOcr(jobId, childId, samplePages)
               }
               onOpenOutput={(jobId) => void openPipelineOutput(jobId)}
               routeOverrides={pipelineRouteOverrides}

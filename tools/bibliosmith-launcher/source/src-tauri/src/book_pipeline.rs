@@ -412,6 +412,12 @@ fn derive_job(job: &mut BookPipelineJob) {
             job.status = aggregate_parent_status(&job.summary);
             job.current_stage_id = "children".into();
         }
+    } else if job.children.len() > 1 {
+        // A local PDF folder splits into one child per converted book. Copying
+        // the first child's state would let the parent report completion while
+        // its siblings are still pending or already failed.
+        job.status = aggregate_parent_status(&job.summary);
+        job.current_stage_id = "children".into();
     } else if let Some(child) = job.children.first() {
         job.status = child.status.clone();
         job.current_stage_id = child.current_stage_id.clone();
@@ -1009,7 +1015,9 @@ fn source_reference_sha256(source: &BookPipelineSource) -> String {
 fn artifact_default_stage(kind: &str) -> &'static str {
     match kind {
         "collection_manifest" => "discover",
-        "markdown" | "html" | "epub" | "metadata" | "index" | "ocr_sample_report" => "extract",
+        "markdown" | "html" | "epub" | "pdf" | "metadata" | "index" | "ocr_sample_report" => {
+            "extract"
+        }
         "translation_source"
         | "source_manifest"
         | "translation_draft"
@@ -1207,6 +1215,25 @@ fn refresh_navigation_targets(job: &mut BookPipelineJob) {
             Path::new(output_dir),
             None,
         );
+        // The layout track's whole deliverable is one PDF sitting in the job
+        // output directory -- it builds no reading project, so without this the
+        // finished book offers "Open workspace" and leaves the user to find the
+        // file themselves.
+        if job.mode == MODE_LAYOUT_PRESERVING {
+            if let Some(artifact) = job
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "pdf" && artifact.validation.hash_matches)
+            {
+                register_navigation_target(
+                    &mut targets,
+                    "bilingual_pdf",
+                    Path::new(&artifact.path),
+                    Path::new(output_dir),
+                    Some(&artifact.artifact_id),
+                );
+            }
+        }
         if job.kind == "collection" {
             if let Some(manifest) = job
                 .artifacts
@@ -1422,7 +1449,9 @@ fn select_book_pipeline_open_target(job: &BookPipelineJob) -> Option<BookPipelin
             "Open collection results",
         ),
         STATUS_COMPLETED => {
-            if let Some(target) = find(&["reading_output_directory"]) {
+            if let Some(target) = find(&["bilingual_pdf"]) {
+                (Some(target), "Open bilingual PDF")
+            } else if let Some(target) = find(&["reading_output_directory"]) {
                 (Some(target), "Open reading output")
             } else {
                 (find(&["project_workspace", "workspace"]), "Open workspace")
@@ -3483,6 +3512,28 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
     Ok(())
 }
 
+/// Guards the queue boundary. An unknown mode is refused instead of being given
+/// whichever pipeline shape it happens to miss, and the retired conversion-only
+/// mode is refused by name so the message says why rather than reading as a
+/// typo. Stored jobs are not re-checked: retiring the mode must not stop an
+/// existing library from opening.
+fn validate_enqueue_mode(mode: &str) -> Result<(), String> {
+    if ENQUEUEABLE_MODES.contains(&mode) {
+        return Ok(());
+    }
+    if mode == MODE_CONVERSION_ONLY {
+        return Err(format!(
+            "Book Pipeline mode {MODE_CONVERSION_ONLY} was retired: conversion now always \
+             continues into translation. Enqueue {MODE_CONVERT_THEN_TRANSLATE} instead. Jobs \
+             queued before the retirement keep running and stay readable."
+        ));
+    }
+    Err(format!(
+        "Unknown Book Pipeline mode {mode}. Valid modes: {}.",
+        ENQUEUEABLE_MODES.join(", ")
+    ))
+}
+
 fn queue_job_with_translation_intent(
     store: &dyn BookPipelineStateStore,
     source: BookPipelineSource,
@@ -3490,6 +3541,7 @@ fn queue_job_with_translation_intent(
     translation_intent: BookPipelineTranslationIntent,
     config: BookPipelinePreviewConfig,
 ) -> Result<BookPipelineJob, String> {
+    validate_enqueue_mode(&mode)?;
     queue_job_with_translation_intent_and_executor(
         store,
         &SystemCommandExecutor,
@@ -3500,6 +3552,10 @@ fn queue_job_with_translation_intent(
     )
 }
 
+/// Builds the job for a mode the caller has already cleared. `validate_enqueue_mode`
+/// sits one frame up in `queue_job_with_translation_intent`, which is the path the
+/// Tauri command takes; entering here directly skips that gate and is how tests
+/// reconstruct jobs in the retired conversion-only shape.
 fn queue_job_with_translation_intent_and_executor<E: RunnerCommandExecutor>(
     store: &dyn BookPipelineStateStore,
     executor: &E,
@@ -4142,6 +4198,10 @@ fn collection_snapshot_route(
     })
 }
 
+/// Tests reach the queue through here. The retired conversion-only mode goes
+/// around `validate_enqueue_mode` on purpose: the tests below assert on the
+/// three-stage shape of jobs queued before the retirement, and that shape has to
+/// stay reachable to stay covered. Every other mode goes through the real gate.
 #[cfg(test)]
 fn queue_job(
     store: &dyn BookPipelineStateStore,
@@ -4149,22 +4209,27 @@ fn queue_job(
     mode: String,
     config: BookPipelinePreviewConfig,
 ) -> Result<BookPipelineJob, String> {
-    queue_job_with_translation_intent(
-        store,
-        source,
-        mode,
-        BookPipelineTranslationIntent {
-            translation_mode: TRANSLATION_MODE_FAST.into(),
-            profile_id: "fake-provider-profile".into(),
-            config_id: "fake-provider-config".into(),
-            skill_ids: Vec::new(),
-            second_pass_enabled: false,
-            text_cleanup: false,
-            digest_mode: false,
-            output_formats: default_output_formats(),
-        },
-        config,
-    )
+    let intent = BookPipelineTranslationIntent {
+        translation_mode: TRANSLATION_MODE_FAST.into(),
+        profile_id: "fake-provider-profile".into(),
+        config_id: "fake-provider-config".into(),
+        skill_ids: Vec::new(),
+        second_pass_enabled: false,
+        text_cleanup: false,
+        digest_mode: false,
+        output_formats: default_output_formats(),
+    };
+    if mode == MODE_CONVERSION_ONLY {
+        return queue_job_with_translation_intent_and_executor(
+            store,
+            &SystemCommandExecutor,
+            source,
+            mode,
+            intent,
+            config,
+        );
+    }
+    queue_job_with_translation_intent(store, source, mode, intent, config)
 }
 
 fn handoff_job_markdown(
@@ -4202,8 +4267,11 @@ fn handoff_job_markdown_with_runner(
         .push("Translation handoff started".into());
     state.jobs[index].updated_at = now_label();
     let execution_owner = store.execution_owner()?;
-    let handoff_child_id = mark_handoff_running(&mut state.jobs[index], execution_owner)
-        .ok_or_else(|| "No completed extraction is ready for translation handoff.".to_string())?;
+    let handoff_child_id =
+        mark_handoff_running(&mut state.jobs[index], execution_owner, &BTreeSet::new())
+            .ok_or_else(|| {
+                "No completed extraction is ready for translation handoff.".to_string()
+            })?;
     store.save(&state)?;
 
     let result = handoff_runner.handoff(&state.jobs[index], artifact_path, repo_root);
@@ -4868,14 +4936,25 @@ fn ensure_translation_stages(child: &mut BookPipelineChildJob, digest_mode: bool
     }
 }
 
-fn mark_handoff_running(job: &mut BookPipelineJob, execution_owner: &str) -> Option<String> {
+/// Start the next child's handoff stage, skipping any child in `attempted`.
+///
+/// A failed handoff leaves the stage `failed`, which this predicate accepts so
+/// a retry can pick it up. Within one run that would re-select the child that
+/// just failed and leave it `running`, so the caller's set of children it has
+/// already tried has to be honoured here, before any state is touched.
+fn mark_handoff_running(
+    job: &mut BookPipelineJob,
+    execution_owner: &str,
+    attempted: &BTreeSet<String>,
+) -> Option<String> {
     let digest_mode = job.digest_mode;
     let index = job.children.iter().position(|child| {
-        child
-            .stages
-            .iter()
-            .find(|stage| stage.stage_id == "extract")
-            .is_some_and(|stage| stage.status == STATUS_COMPLETED)
+        !attempted.contains(&child.id)
+            && child
+                .stages
+                .iter()
+                .find(|stage| stage.stage_id == "extract")
+                .is_some_and(|stage| stage.status == STATUS_COMPLETED)
             && child
                 .stages
                 .iter()
@@ -4987,9 +5066,77 @@ fn apply_runner_output_to_children(job: &mut BookPipelineJob) {
         child.artifacts = job.artifacts.clone();
         child.attempts = job.attempts;
         child.last_error = None;
+        split_children_per_book(job);
     }
     prepare_item_index_after_extract(job);
     derive_job(job);
+}
+
+/// Give every converted book its own child, so every book reaches translation.
+///
+/// A local PDF folder can hold several books and each one produces its own
+/// cleaned Markdown, but a non-collection job carries a single child. The
+/// handoff hands off one child at a time and picks a job's first `markdown`
+/// artifact, so all but one book was silently dropped from the translation
+/// track. The split runs only when a conversion really produced more than one
+/// book; a single-book run keeps the child it already had, untouched.
+fn split_children_per_book(job: &mut BookPipelineJob) {
+    let [child] = job.children.as_slice() else {
+        return;
+    };
+    let markdowns = child
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "markdown")
+        .cloned()
+        .collect::<Vec<_>>();
+    if markdowns.len() < 2 {
+        return;
+    }
+    let template = child.clone();
+    job.children = markdowns
+        .iter()
+        .enumerate()
+        .map(|(index, markdown)| {
+            let mut book = template.clone();
+            book.id = format!("{}-book{:03}", job.id, index + 1);
+            book.artifacts = artifacts_beside(&template.artifacts, &markdown.path);
+            book.source.title = Path::new(&markdown.path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+                .or_else(|| template.source.title.clone());
+            derive_child(&mut book);
+            book
+        })
+        .collect();
+}
+
+/// The artifacts that belong to one book: everything the wrapper wrote inside
+/// that book's own output directory, which is where its Markdown sits.
+fn artifacts_beside(
+    artifacts: &[BookPipelineArtifact],
+    markdown_path: &str,
+) -> Vec<BookPipelineArtifact> {
+    let Some(book_dir) = Path::new(markdown_path).parent() else {
+        return Vec::new();
+    };
+    artifacts
+        .iter()
+        .filter(|artifact| Path::new(&artifact.path).starts_with(book_dir))
+        .cloned()
+        .collect()
+}
+
+/// The Markdown a specific child is responsible for handing off.
+fn child_markdown_artifact_path(job: &BookPipelineJob, child_id: &str) -> Option<String> {
+    job.children
+        .iter()
+        .find(|child| child.id == child_id)?
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "markdown")
+        .map(|artifact| artifact.path.clone())
 }
 
 fn prepare_item_index_after_extract(job: &mut BookPipelineJob) {
@@ -6235,78 +6382,111 @@ fn run_job_with_handoff_mode(
                         "Source preparation completed; translation handoff started".into()
                     });
                 let execution_owner = store.execution_owner()?;
-                // Everything the runner produced is still only in memory here.
-                // Returning through `?` would drop the whole conversion along
-                // with it — and leave the extract stage `running` on disk from
-                // the save above — so the user had to re-OCR just to retry a
-                // handoff. Persist the run, then record the handoff as failed.
-                let Some(handoff_child_id) =
-                    mark_handoff_running(&mut state.jobs[index], execution_owner)
-                else {
-                    let error = "No completed extraction is ready for translation handoff.";
-                    state.jobs[index].current_step = "Translation handoff failed".into();
-                    state.jobs[index].last_error = Some(error.into());
-                    state.jobs[index]
-                        .log_summary
-                        .push(format!("Translation handoff failed: {error}"));
-                    mark_handoff_unavailable(&mut state.jobs[index], error);
+                // A folder can convert several books, and each one is its own
+                // child with its own Markdown. Hand every one of them off before
+                // returning, or the books after the first stay out of the
+                // translation track with nothing saying so.
+                let mut state = state;
+                let mut index = index;
+                // Every failure is kept so the job still reports one, but the
+                // loop carries on: the books are independent, and a child whose
+                // extract already completed cannot be resumed by a retry —
+                // mark_extract_running only picks up `ready` or `failed`
+                // extractions, so an early return would strand them for good.
+                let mut failures: Vec<String> = Vec::new();
+                // A child is handed off at most once per run. The stage status
+                // should already guarantee that, but this loop drives the whole
+                // conversion's return path and must terminate on its own terms.
+                let mut attempted: BTreeSet<String> = BTreeSet::new();
+                loop {
+                    // Everything the runner produced is still only in memory
+                    // here. Returning through `?` would drop the whole
+                    // conversion along with it — and leave the extract stage
+                    // `running` on disk from the save above — so the user had to
+                    // re-OCR just to retry a handoff. Persist the run, then
+                    // record the handoff as failed.
+                    let Some(handoff_child_id) =
+                        mark_handoff_running(&mut state.jobs[index], execution_owner, &attempted)
+                    else {
+                        if !attempted.is_empty() {
+                            break;
+                        }
+                        let error = "No completed extraction is ready for translation handoff.";
+                        state.jobs[index].current_step = "Translation handoff failed".into();
+                        state.jobs[index].last_error = Some(error.into());
+                        state.jobs[index]
+                            .log_summary
+                            .push(format!("Translation handoff failed: {error}"));
+                        mark_handoff_unavailable(&mut state.jobs[index], error);
+                        state.jobs[index].log_summary =
+                            trim_log_summary(&state.jobs[index].log_summary);
+                        state.jobs[index].updated_at = now_label();
+                        let finished = state.jobs[index].clone();
+                        store.save(&state)?;
+                        return Ok(finished);
+                    };
+                    attempted.insert(handoff_child_id.clone());
+                    // Hand off this child's own book. Without it every child
+                    // would select the job's first Markdown artifact and the
+                    // same book would be handed off again and again.
+                    let artifact_path =
+                        child_markdown_artifact_path(&state.jobs[index], &handoff_child_id);
                     state.jobs[index].log_summary =
                         trim_log_summary(&state.jobs[index].log_summary);
                     state.jobs[index].updated_at = now_label();
-                    let finished = state.jobs[index].clone();
+                    let handoff_job = state.jobs[index].clone();
                     store.save(&state)?;
-                    return Ok(finished);
-                };
-                state.jobs[index].log_summary = trim_log_summary(&state.jobs[index].log_summary);
-                state.jobs[index].updated_at = now_label();
-                let handoff_job = state.jobs[index].clone();
-                store.save(&state)?;
 
-                let handoff_result = if let Some(repo_root) = repo_root {
-                    handoff_runner.handoff(&handoff_job, None, repo_root)
+                    let selected = artifact_path.as_deref();
+                    let handoff_result = if let Some(repo_root) = repo_root {
+                        handoff_runner.handoff(&handoff_job, selected, repo_root)
+                    } else {
+                        local_reading_repo_root().and_then(|repo_root| {
+                            handoff_runner.handoff(&handoff_job, selected, &repo_root)
+                        })
+                    };
+                    state = store.load()?;
+                    index = state
+                        .jobs
+                        .iter()
+                        .position(|job| job.id == job_id)
+                        .ok_or_else(|| {
+                            "Book Pipeline job not found after handoff completed.".to_string()
+                        })?;
+                    match handoff_result {
+                        Ok(handoff) => {
+                            state.jobs[index]
+                                .artifacts
+                                .extend(handoff.artifacts.clone());
+                            state.jobs[index]
+                                .log_summary
+                                .extend(handoff.log_summary.clone());
+                            mark_handoff_finished(
+                                &mut state.jobs[index],
+                                Some(&handoff_child_id),
+                                Ok(&handoff),
+                            );
+                        }
+                        Err(error) => {
+                            let redacted = redact_runner_message(&error);
+                            state.jobs[index]
+                                .log_summary
+                                .push(format!("Translation handoff failed: {redacted}"));
+                            failures.push(redacted);
+                            mark_handoff_finished(
+                                &mut state.jobs[index],
+                                Some(&handoff_child_id),
+                                Err(&error),
+                            );
+                        }
+                    }
+                }
+                if failures.is_empty() {
+                    state.jobs[index].current_step = "Translation handoff ready".into();
+                    state.jobs[index].last_error = None;
                 } else {
-                    local_reading_repo_root().and_then(|repo_root| {
-                        handoff_runner.handoff(&handoff_job, None, &repo_root)
-                    })
-                };
-                let mut state = store.load()?;
-                let index = state
-                    .jobs
-                    .iter()
-                    .position(|job| job.id == job_id)
-                    .ok_or_else(|| {
-                        "Book Pipeline job not found after handoff completed.".to_string()
-                    })?;
-                match handoff_result {
-                    Ok(handoff) => {
-                        state.jobs[index].current_step = "Translation handoff ready".into();
-                        state.jobs[index].last_error = None;
-                        state.jobs[index]
-                            .artifacts
-                            .extend(handoff.artifacts.clone());
-                        state.jobs[index]
-                            .log_summary
-                            .extend(handoff.log_summary.clone());
-                        mark_handoff_finished(
-                            &mut state.jobs[index],
-                            Some(&handoff_child_id),
-                            Ok(&handoff),
-                        );
-                    }
-                    Err(error) => {
-                        state.jobs[index].current_step = "Translation handoff failed".into();
-                        state.jobs[index].last_error = Some(redact_runner_message(&error));
-                        state.jobs[index]
-                            .log_summary
-                            .push(redact_runner_message(&format!(
-                                "Translation handoff failed: {error}"
-                            )));
-                        mark_handoff_finished(
-                            &mut state.jobs[index],
-                            Some(&handoff_child_id),
-                            Err(&error),
-                        );
-                    }
+                    state.jobs[index].current_step = "Translation handoff failed".into();
+                    state.jobs[index].last_error = Some(failures.join(" | "));
                 }
                 state.jobs[index].log_summary = trim_log_summary(&state.jobs[index].log_summary);
                 state.jobs[index].updated_at = now_label();
@@ -6354,8 +6534,19 @@ fn collection_awaits_attachment_routing(job: &BookPipelineJob) -> bool {
         })
 }
 
+/// Every live mode hands off to translation once the run finishes. The retired
+/// conversion-only mode is the single exception, and it is named here rather
+/// than inferred: before it was retired any string that was not one of the two
+/// live modes silently inherited its half pipeline, so a typo in stored state
+/// produced a job that stopped after extraction and looked finished.
+/// Whether extraction is followed by a translation handoff.
+///
+/// Phrased as exclusions because conversion now always continues into
+/// translation: the two modes that stop are the retired `conversion_only`, which
+/// never translated, and the layout-preserving track, which already has -- its
+/// single pass is the translation, and there is no Markdown to hand anywhere.
 fn should_handoff_after_run(mode: &str) -> bool {
-    mode == MODE_CONVERT_THEN_TRANSLATE || mode == MODE_TRANSLATE_ONLY
+    mode != MODE_CONVERSION_ONLY && mode != MODE_LAYOUT_PRESERVING
 }
 
 impl PipelineRunner for SystemPipelineRunner {
@@ -6429,12 +6620,24 @@ impl TranslationHandoffRunner for LocalProjectHandoffRunner {
     }
 }
 
+/// Whether `run` may take its two source-kind shortcuts instead of building a
+/// command.
+///
+/// Both shortcuts assume the reflow track. The layout track is dispatched inside
+/// the command builder, so it has to skip them -- a Zotero title search is a
+/// "batch" source, and a layout job queued from one would otherwise be handed to
+/// the OCR worker with its mode silently ignored.
+fn takes_reflow_source_shortcut(job: &BookPipelineJob) -> bool {
+    job.mode != MODE_LAYOUT_PRESERVING
+        && (job.source.kind == "markdown_source" || is_zotero_batch_source(&job.source))
+}
+
 impl<E: RunnerCommandExecutor> PipelineRunner for CommandPipelineRunner<E> {
     fn run(&self, job: &BookPipelineJob, output_dir: &Path) -> Result<RunnerOutput, String> {
-        if job.source.kind == "markdown_source" {
-            return run_markdown_source_job(job, output_dir);
-        }
-        if is_zotero_batch_source(&job.source) {
+        if takes_reflow_source_shortcut(job) {
+            if job.source.kind == "markdown_source" {
+                return run_markdown_source_job(job, output_dir);
+            }
             let root = self
                 .book_ocr_conversion_root
                 .as_deref()
@@ -6558,6 +6761,9 @@ fn execute_conversion_command<E: RunnerCommandExecutor>(
     if command_uses_ocr_credentials(&command) {
         inject_ocr_credentials(&mut command);
     }
+    if command.label == LAYOUT_PDF_COMMAND_LABEL {
+        inject_layout_pdf_model_env(&mut command)?;
+    }
     fs::create_dir_all(&command.output_dir).map_err(|err| err.to_string())?;
     let command_result = executor.execute(&command)?;
     let zotero_key = extract_zotero_attachment_key(&command_result);
@@ -6587,6 +6793,13 @@ fn execute_conversion_command<E: RunnerCommandExecutor>(
     ));
     if let Some(key) = zotero_key {
         log_summary.push(format!("Zotero Markdown attachment recorded: {key}"));
+    }
+    if command.label == LAYOUT_PDF_COMMAND_LABEL {
+        // Stated unconditionally because BabelDOC has no runtime warning for it,
+        // so there is no marker to forward -- and a reader who opens the
+        // bibliography of a finished book deserves to know before they conclude
+        // the translation is broken.
+        log_summary.push(LAYOUT_PDF_REFERENCE_LIMITATION.into());
     }
     Ok(RunnerOutput {
         log_summary: trim_log_summary(&log_summary),
@@ -6712,6 +6925,27 @@ fn inject_zotero_credentials(command: &mut RunnerCommand) {
     for (key_env, value) in crate::zotero_settings::resolve_credential_env() {
         command.env.push((key_env, value));
     }
+}
+
+/// Point BabelDOC at the model the user chose in Settings.
+///
+/// Unlike the OCR injection above there is no fallback: BabelDOC has no registry
+/// and no `.env` lookup of its own, so a missing key or a non-OpenAI provider has
+/// to fail here with something the user can act on rather than a stack trace from
+/// inside the subprocess.
+fn inject_layout_pdf_model_env(command: &mut RunnerCommand) -> Result<(), String> {
+    let repo_root = translation_engine_repo_root()?;
+    let endpoint = crate::model_settings::resolve_openai_compatible_endpoint(&repo_root)?;
+    command
+        .env
+        .push((LAYOUT_PDF_BASE_URL_ENV.into(), endpoint.base_url));
+    command
+        .env
+        .push((LAYOUT_PDF_API_KEY_ENV.into(), endpoint.api_key));
+    command
+        .env
+        .push((LAYOUT_PDF_MODEL_ENV.into(), endpoint.model));
+    Ok(())
 }
 
 fn validated_item_index_artifact(
@@ -7047,6 +7281,12 @@ fn build_runner_command_with_root(
     output_dir: &Path,
     book_ocr_root: Option<&Path>,
 ) -> Result<RunnerCommand, String> {
+    // Dispatched on the mode before the source kind: this track replaces the
+    // conversion step outright rather than being one more way to convert. The
+    // eligibility rule -- a single `direct_text` PDF -- lives in the builder.
+    if job.mode == MODE_LAYOUT_PRESERVING {
+        return build_layout_pdf_command(job, output_dir);
+    }
     match job.source.kind.as_str() {
         "fake" => build_fake_runner_command(job, output_dir),
         "external_adapter" => build_external_adapter_command(job, output_dir),
@@ -7263,6 +7503,132 @@ fn build_local_pdf_folder_command_for_root(
             ]);
             args
         },
+        env: Vec::new(),
+        cwd: Some(root.to_path_buf()),
+        output_dir: output_dir.to_path_buf(),
+        attempts: job.attempts,
+        accepted_exit_codes: vec![0],
+    })
+}
+
+/// The repository root, having checked that the layout-preserving package is
+/// actually there. `uv run --package` resolves against the workspace root, so a
+/// repoRoot pointing somewhere without this member fails inside uv with a much
+/// worse message than this one.
+fn layout_pdf_repo_root() -> Result<PathBuf, String> {
+    let repo_root = local_reading_repo_root()?;
+    let package_manifest = repo_root
+        .join("packages")
+        .join("layout-pdf")
+        .join("pyproject.toml");
+    if !package_manifest.is_file() {
+        return Err(format!(
+            "Layout-preserving PDF package not found at {}",
+            display_path(&package_manifest)
+        ));
+    }
+    Ok(repo_root)
+}
+
+/// The source PDF for a layout-track route.
+///
+/// `source_ref` carries the worker's fingerprint as a `#source_md5=` fragment,
+/// so the raw value is a path that does not exist and whose extension is not
+/// `.pdf`. Every real Zotero attachment arrives this way; only hand-built
+/// fixtures come through clean, which is exactly why this is easy to get wrong.
+fn layout_pdf_source_path(route: &BookPipelineRouteItem) -> Result<PathBuf, String> {
+    // Split on the exact marker from the right, never on a bare `#`: `#` is a
+    // legal filename character, and `draft#2.pdf` would otherwise be truncated
+    // to `draft`. Taking the last occurrence keeps the one this code appended.
+    let raw = route
+        .source_ref
+        .rsplit_once("#source_md5=")
+        .map(|(path, _)| path)
+        .unwrap_or(&route.source_ref)
+        .trim();
+    if raw.is_empty() {
+        return Err("The layout-preserving track has no source PDF path.".into());
+    }
+    let path = PathBuf::from(raw);
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+        != Some("pdf")
+    {
+        return Err(format!(
+            "The layout-preserving track only accepts PDFs, not {}",
+            display_path(&path)
+        ));
+    }
+    if !path.is_file() {
+        return Err(format!("Source PDF not found at {}", display_path(&path)));
+    }
+    Ok(path)
+}
+
+/// The one route this track is allowed to run.
+///
+/// `direct_text` means the worker found a usable text layer. A scanned book has
+/// nothing for BabelDOC to translate, and a multi-item source has no single
+/// document to preserve the layout of, so both are refused here rather than
+/// failing halfway through a run.
+fn layout_pdf_route(job: &BookPipelineJob) -> Result<&BookPipelineRouteItem, String> {
+    let runnable: Vec<&BookPipelineRouteItem> = job
+        .route
+        .iter()
+        .filter(|route| route.can_run && route.route_kind != "translation_handoff")
+        .collect();
+    match runnable.as_slice() {
+        [] => Err(
+            "The layout-preserving track has no runnable item. Only a text PDF is eligible."
+                .into(),
+        ),
+        [route] if route.route_kind == "direct_text" => Ok(route),
+        [route] => Err(format!(
+            "The layout-preserving track is only available for text PDFs, and this item routed as {}.",
+            route.route_kind
+        )),
+        _ => Err(
+            "The layout-preserving track handles one book at a time. Queue each PDF separately."
+                .into(),
+        ),
+    }
+}
+
+fn build_layout_pdf_command(
+    job: &BookPipelineJob,
+    output_dir: &Path,
+) -> Result<RunnerCommand, String> {
+    build_layout_pdf_command_for_root(job, output_dir, &layout_pdf_repo_root()?)
+}
+
+fn build_layout_pdf_command_for_root(
+    job: &BookPipelineJob,
+    output_dir: &Path,
+    root: &Path,
+) -> Result<RunnerCommand, String> {
+    let source_path = layout_pdf_source_path(layout_pdf_route(job)?)?;
+    Ok(RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: LAYOUT_PDF_COMMAND_LABEL.into(),
+        program: PathBuf::from("uv"),
+        args: vec![
+            "run".into(),
+            "--package".into(),
+            "layout-pdf".into(),
+            // BabelDOC is an optional extra so the shared venv every other suite
+            // runs in stays light; asking for it here is what installs it, from
+            // uv's cache after the first run. See packages/layout-pdf/README.md.
+            "--extra".into(),
+            "babeldoc".into(),
+            "layout-pdf".into(),
+            "--input".into(),
+            display_path(&source_path),
+            "--output-dir".into(),
+            display_path(output_dir),
+        ],
         env: Vec::new(),
         cwd: Some(root.to_path_buf()),
         output_dir: output_dir.to_path_buf(),
@@ -8003,6 +8369,12 @@ fn runner_command_timeout(command: &RunnerCommand) -> Duration {
     let hours = match command.label.as_str() {
         TRANSLATION_ENGINE_COMMAND_LABEL => 12,
         ZOTERO_CONVERSION_COMMAND_LABEL => 6,
+        // Measured, not guessed: 37s/page on dense academic pages and 23s/page
+        // on lighter ones, against Qwen at the default qps of 4. Twelve hours
+        // therefore covers a book of roughly 1100 dense pages, which is well
+        // past anything in the library, and absorbs the one-off model download
+        // (~4 minutes) on the first run.
+        LAYOUT_PDF_COMMAND_LABEL => 12,
         _ => 2,
     };
     Duration::from_secs(hours * 60 * 60)
@@ -8200,6 +8572,11 @@ fn parse_allowlisted_worker_markers(value: &str, allowed_roots: &[&Path]) -> Vec
                         | STATUS_SKIPPED
                 ),
                 "count" => !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()),
+                // A classification, never the warning text. BabelDOC warns in
+                // free English that interpolates page numbers and sometimes file
+                // paths; `layout_pdf/warnings.py` counts by kind so none of it
+                // has to cross into a job log.
+                "warning" => LAYOUT_PDF_WARNING_KINDS.contains(&value),
                 "sha256" => value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()),
                 "path" => {
                     let path = Path::new(value);
@@ -8897,6 +9274,22 @@ fn scan_artifacts(output_dir: &Path) -> Result<Vec<BookPipelineArtifact>, String
     Ok(artifacts)
 }
 
+/// `.state/chunks` under an OCR output root, where `zotero_llm_worker.py` splits
+/// a long book into page ranges before uploading them. Those splits are PDFs, so
+/// once `artifact_kind` learned to recognise PDFs they would otherwise be
+/// registered as deliverables -- dozens of `pages-0001-0050.pdf` per book. The
+/// worker's other private subtrees hold no PDFs and are left alone; `.state`
+/// itself must stay scanned, because the finished Markdown lives in
+/// `.state/staging`.
+fn is_ocr_worker_chunk_dir(path: &Path) -> bool {
+    path.file_name().and_then(OsStr::to_str) == Some("chunks")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            == Some(".state")
+}
+
 fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> Result<(), String> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -8917,6 +9310,20 @@ fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> R
             // this scan walks. Registered here, its report would become a
             // `metadata` artifact of a conversion that never produced it.
             if path.file_name().and_then(|name| name.to_str()) == Some(OCR_SAMPLE_DIR_NAME) {
+                continue;
+            }
+            if is_ocr_worker_chunk_dir(&path) {
+                continue;
+            }
+            // The PaddleOCR wrapper keeps its own resumable chunk JSONL in
+            // `.temp` inside the very directory this scan walks -- a different
+            // tree from the Zotero worker's `.state/chunks` above. Registered
+            // here, that scratch shows up to the user as conversion output and
+            // leaves artifact rows pointing at nothing once the disk is
+            // reclaimed. Only this directory is excluded, not hidden
+            // directories at large: the Zotero worker writes its real Markdown
+            // under `.state/staging`.
+            if path.file_name().and_then(|name| name.to_str()) == Some(WRAPPER_SCRATCH_DIR_NAME) {
                 continue;
             }
             collect_artifacts(&path, artifacts)?;
@@ -8942,11 +9349,20 @@ fn create_translation_handoff_project(
     artifact_path: Option<&str>,
     repo_root: &Path,
 ) -> Result<TranslationHandoffOutput, String> {
+    // With several books in one job the job title names the folder, not any one
+    // book, so every project would be slugged the same. Fall through to the
+    // Markdown's own file stem in that case.
+    let one_book = job
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "markdown")
+        .count()
+        <= 1;
     create_translation_handoff_project_with_title(
         job,
         artifact_path,
         repo_root,
-        job.source.title.as_deref(),
+        one_book.then_some(job.source.title.as_deref()).flatten(),
     )
 }
 
@@ -8980,17 +9396,19 @@ fn create_translation_handoff_project_with_title(
     let source = project_root.join("source").join("source.md");
     fs::copy(&markdown_path, &original).map_err(|err| err.to_string())?;
     fs::copy(&markdown_path, &source).map_err(|err| err.to_string())?;
-    let mineru_source = markdown_path.with_extension("mineru");
-    let source_resources_path = if mineru_source.is_dir() {
-        let directory_name = mineru_source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "MinerU artifact directory has an invalid name.".to_string())?;
-        let target = project_root.join("source").join(directory_name);
-        copy_directory_tree(&mineru_source, &target)?;
-        Some(format!("source/{directory_name}"))
-    } else {
-        None
+    let source_resources_path = match markdown_resource_directory(&markdown_path) {
+        Some(resources) => {
+            let directory_name = resources
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "Markdown resource directory has an invalid name.".to_string())?;
+            // Keep the directory name: the Markdown references it by that exact
+            // relative path, so renaming it here would dangle every figure link.
+            let target = project_root.join("source").join(directory_name);
+            copy_directory_tree(&resources, &target)?;
+            Some(format!("source/{directory_name}"))
+        }
+        None => None,
     };
     let source_sha256 = sha256_file(&markdown_path)?;
     write_source_manifest(
@@ -9029,17 +9447,33 @@ fn create_translation_handoff_project_with_title(
     })
 }
 
+/// The sibling directory a cleaned Markdown file needs in order to render.
+///
+/// MinerU writes `<stem>.mineru`. The PaddleOCR wrapper writes `<stem>_assets`
+/// and rewrites every image reference in the Markdown to the relative path
+/// `<stem>_assets/<file>`, so that directory has to travel with the file or the
+/// handed-off project has a figure link pointing at nothing.
+fn markdown_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
+    let mineru = markdown_path.with_extension("mineru");
+    if mineru.is_dir() {
+        return Some(mineru);
+    }
+    let stem = markdown_path.file_stem().and_then(|name| name.to_str())?;
+    let assets = markdown_path.with_file_name(format!("{stem}_assets"));
+    assets.is_dir().then_some(assets)
+}
+
 fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(source).map_err(|err| err.to_string())?;
     if metadata.file_type().is_symlink() {
         return Err(format!(
-            "Refusing to copy a symlink from the MinerU artifact tree: {}",
+            "Refusing to copy a symlink from the Markdown resource tree: {}",
             display_path(source)
         ));
     }
     if !metadata.is_dir() {
         return Err(format!(
-            "MinerU artifact path is not a directory: {}",
+            "Markdown resource path is not a directory: {}",
             display_path(source)
         ));
     }
@@ -9051,7 +9485,7 @@ fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
         let entry_metadata = fs::symlink_metadata(&source_path).map_err(|err| err.to_string())?;
         if entry_metadata.file_type().is_symlink() {
             return Err(format!(
-                "Refusing to copy a symlink from the MinerU artifact tree: {}",
+                "Refusing to copy a symlink from the Markdown resource tree: {}",
                 display_path(&source_path)
             ));
         }
@@ -9061,7 +9495,7 @@ fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
             fs::copy(&source_path, &target_path).map_err(|err| err.to_string())?;
         } else {
             return Err(format!(
-                "Unsupported entry in MinerU artifact tree: {}",
+                "Unsupported entry in the Markdown resource tree: {}",
                 display_path(&source_path)
             ));
         }
@@ -9161,6 +9595,10 @@ fn artifact_kind(path: &Path) -> Option<&'static str> {
         Some("md") | Some("markdown") => Some("markdown"),
         Some("html") | Some("htm") => Some("html"),
         Some("epub") => Some("epub"),
+        // The layout-preserving track's deliverable. `collect_artifacts` skips
+        // the OCR worker's chunk directory, which is the only other place a PDF
+        // appears under a job output root.
+        Some("pdf") => Some("pdf"),
         Some("json") | Some("jsonl") => Some("metadata"),
         Some("idx") | Some("index") => Some("index"),
         _ if is_index_artifact(path) => Some("index"),
