@@ -766,6 +766,266 @@ fn wrapper_chunk_scratch_is_not_registered_as_an_artifact() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// The same layout as `MultiBookLayoutExecutor` for a folder holding one book.
+struct SingleBookLayoutExecutor;
+
+impl RunnerCommandExecutor for SingleBookLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        fs::create_dir_all(&book_dir).unwrap();
+        fs::write(book_dir.join("Sample_Book.md"), "# Sample Book\n\nBody\n").unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Wrapper converted one book".into()],
+        })
+    }
+}
+
+const MULTI_BOOK_TITLES: [&str; 3] = ["Alpha_Book", "Beta_Book", "Gamma_Book"];
+
+/// Converts a folder into three books, the way the wrapper does: one output
+/// directory per book, each holding its own cleaned Markdown.
+struct MultiBookLayoutExecutor;
+
+impl RunnerCommandExecutor for MultiBookLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        for title in MULTI_BOOK_TITLES {
+            let book_dir = command.output_dir.join(title);
+            fs::create_dir_all(&book_dir).unwrap();
+            fs::write(
+                book_dir.join(format!("{title}.md")),
+                format!("# {title}\n\nBody of {title}\n"),
+            )
+            .unwrap();
+            fs::write(
+                book_dir.join(format!("{title}.html")),
+                format!("<h1>{title}</h1>\n"),
+            )
+            .unwrap();
+        }
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Wrapper converted three books".into()],
+        })
+    }
+}
+
+fn run_multi_book_job(root: &Path) -> BookPipelineJob {
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    for title in MULTI_BOOK_TITLES {
+        fs::write(input.join(format!("{title}.pdf")), "%PDF fixture").unwrap();
+    }
+    let repo = handoff_repo_fixture(root);
+    let wrapper_root = fake_wrapper_root(root);
+    let store = BookPipelineStore::for_test(root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            MultiBookLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo),
+    )
+    .unwrap()
+}
+
+#[test]
+fn every_converted_book_reaches_the_translation_track() {
+    let root = temp_root("multi-book-handoff");
+
+    let handed_off = run_multi_book_job(&root);
+
+    assert_eq!(handed_off.status, STATUS_READY);
+    assert_eq!(
+        handed_off.children.len(),
+        3,
+        "each converted book needs its own child"
+    );
+    assert_eq!(
+        handed_off.current_stage_id, "children",
+        "a multi-book job must aggregate its children, not mirror the first"
+    );
+    let project_roots = handed_off
+        .children
+        .iter()
+        .filter_map(|child| child.local_project_root.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        project_roots.len(),
+        3,
+        "every book must reach a local project, got {project_roots:?}"
+    );
+
+    // The decisive check: three distinct projects, each carrying its own book.
+    let mut bodies = project_roots
+        .iter()
+        .map(|project| {
+            fs::read_to_string(Path::new(project).join("source").join("source.md")).unwrap()
+        })
+        .collect::<Vec<_>>();
+    bodies.sort();
+    for title in MULTI_BOOK_TITLES {
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body.contains(&format!("Body of {title}"))),
+            "{title} never reached translation: {bodies:?}"
+        );
+    }
+    assert_eq!(
+        bodies.len(),
+        bodies
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "two projects carry the same book"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn each_book_project_is_named_after_its_own_book() {
+    let root = temp_root("multi-book-naming");
+
+    let handed_off = run_multi_book_job(&root);
+
+    let names = handed_off
+        .children
+        .iter()
+        .filter_map(|child| child.local_project_root.as_deref())
+        .filter_map(|project| Path::new(project).file_name())
+        .filter_map(|name| name.to_str())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for title in MULTI_BOOK_TITLES {
+        assert!(
+            names.iter().any(|name| name.contains(title)),
+            "no project named after {title}: {names:?}"
+        );
+    }
+    assert_eq!(names.len(), 3, "{names:?}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Fails the first book's handoff and lets the rest through.
+struct FirstBookHandoffFailingRunner;
+
+impl TranslationHandoffRunner for FirstBookHandoffFailingRunner {
+    fn handoff(
+        &self,
+        job: &BookPipelineJob,
+        artifact_path: Option<&str>,
+        repo_root: &Path,
+    ) -> Result<TranslationHandoffOutput, String> {
+        if artifact_path.is_some_and(|path| path.contains(MULTI_BOOK_TITLES[0])) {
+            return Err("Fixture handoff failure".into());
+        }
+        LocalProjectHandoffRunner.handoff(job, artifact_path, repo_root)
+    }
+}
+
+#[test]
+fn one_failed_handoff_does_not_strand_the_remaining_books() {
+    let root = temp_root("multi-book-partial-failure");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    for title in MULTI_BOOK_TITLES {
+        fs::write(input.join(format!("{title}.pdf")), "%PDF fixture").unwrap();
+    }
+    let repo = handoff_repo_fixture(&root);
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let finished = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            MultiBookLayoutExecutor,
+            wrapper_root,
+        ),
+        &FirstBookHandoffFailingRunner,
+        &job.id,
+        Some(&repo),
+    )
+    .unwrap();
+
+    // The two books whose handoff succeeded still reached a local project.
+    let projects = finished
+        .children
+        .iter()
+        .filter(|child| child.local_project_root.is_some())
+        .count();
+    assert_eq!(projects, 2, "a failure stranded the books after it");
+    // And the job still reports the failure rather than hiding it.
+    assert_eq!(finished.current_step, "Translation handoff failed");
+    // The parent aggregates over every book instead of mirroring the first, so
+    // one book's failure stays visible however the children happen to be
+    // ordered, and the job cannot report completion while siblings are pending.
+    assert_eq!(finished.current_stage_id, "children");
+    assert_eq!(finished.summary.failed, 1, "{:?}", finished.summary);
+    assert_eq!(finished.summary.ready, 2, "{:?}", finished.summary);
+    assert!(finished
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.contains("Fixture handoff failure")));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_single_book_folder_still_produces_one_child() {
+    let root = temp_root("single-book-handoff");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("Sample Book.pdf"), "%PDF fixture").unwrap();
+    let repo = handoff_repo_fixture(&root);
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let handed_off = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            SingleBookLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo),
+    )
+    .unwrap();
+
+    assert_eq!(handed_off.status, STATUS_READY);
+    assert_eq!(handed_off.children.len(), 1, "no split for a single book");
+    let _ = fs::remove_dir_all(root);
+}
+
 struct LocalPdfFailingExecutor;
 
 impl RunnerCommandExecutor for LocalPdfFailingExecutor {
