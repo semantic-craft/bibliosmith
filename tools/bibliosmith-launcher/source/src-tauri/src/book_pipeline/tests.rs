@@ -679,6 +679,93 @@ impl RunnerCommandExecutor for PaddleWrapperLayoutExecutor {
     }
 }
 
+/// Writes the wrapper's real scratch layout: the book beside a `.temp` tree
+/// holding the resumable chunk JSONL, both under the job's output directory.
+struct PaddleScratchLayoutExecutor;
+
+impl RunnerCommandExecutor for PaddleScratchLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        fs::create_dir_all(&book_dir).unwrap();
+        fs::write(book_dir.join("Sample_Book.md"), "# Sample Book\n").unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        fs::write(book_dir.join("_state.json"), "{\"pages_done\":2}\n").unwrap();
+        let chunks = command
+            .output_dir
+            .join(".temp")
+            .join("Sample_Book")
+            .join("chunks");
+        fs::create_dir_all(&chunks).unwrap();
+        fs::write(chunks.join("pages-0001-0012.jsonl"), "{\"page\":1}\n").unwrap();
+        fs::write(chunks.join("pages-0013-0024.jsonl"), "{\"page\":13}\n").unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Paddle wrapper completed".into()],
+        })
+    }
+}
+
+#[test]
+fn wrapper_chunk_scratch_is_not_registered_as_an_artifact() {
+    let root = temp_root("local-pdf-scratch");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("Sample Book.pdf"), "%PDF fixture").unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let completed = run_job(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            PaddleScratchLayoutExecutor,
+            wrapper_root,
+        ),
+        &job.id,
+    )
+    .unwrap();
+
+    assert!(
+        completed
+            .artifacts
+            .iter()
+            .all(|artifact| !artifact.path.contains("/.temp/")),
+        "chunk scratch was registered: {:?}",
+        completed
+            .artifacts
+            .iter()
+            .map(|artifact| &artifact.path)
+            .collect::<Vec<_>>()
+    );
+    // The book itself is still discovered.
+    assert!(completed
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "markdown" && artifact.path.ends_with("Sample_Book.md")));
+    // Reclaiming the scratch must not leave rows pointing at missing files.
+    let _ = fs::remove_dir_all(
+        completed
+            .output_dir
+            .as_deref()
+            .map(Path::new)
+            .unwrap()
+            .join(".temp"),
+    );
+    assert!(completed
+        .artifacts
+        .iter()
+        .all(|artifact| Path::new(&artifact.path).is_file()));
+    let _ = fs::remove_dir_all(root);
+}
+
 /// The same layout as `MultiBookLayoutExecutor` for a folder holding one book.
 struct SingleBookLayoutExecutor;
 

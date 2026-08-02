@@ -9266,6 +9266,17 @@ fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> R
             if is_ocr_worker_chunk_dir(&path) {
                 continue;
             }
+            // The PaddleOCR wrapper keeps its own resumable chunk JSONL in
+            // `.temp` inside the very directory this scan walks -- a different
+            // tree from the Zotero worker's `.state/chunks` above. Registered
+            // here, that scratch shows up to the user as conversion output and
+            // leaves artifact rows pointing at nothing once the disk is
+            // reclaimed. Only this directory is excluded, not hidden
+            // directories at large: the Zotero worker writes its real Markdown
+            // under `.state/staging`.
+            if path.file_name().and_then(|name| name.to_str()) == Some(WRAPPER_SCRATCH_DIR_NAME) {
+                continue;
+            }
             collect_artifacts(&path, artifacts)?;
             continue;
         }

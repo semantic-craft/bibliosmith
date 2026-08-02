@@ -530,6 +530,22 @@ def build_html(title: str, body_html: str, css: str | None = None) -> str:
 </html>"""
 
 
+def page_anchor(page_no: int) -> str:
+    """Mark where a source page began.
+
+    A comment rather than a visible separator: the assembled Markdown is the
+    translation handoff source, so anything printable here becomes body text the
+    splitter and the translator have to carry. The page number is kept so a
+    reviewer can still map a translated passage back to a page of the original.
+    """
+    return f"<!-- page: {page_no} -->"
+
+
+def page_separator(page_no: int) -> str:
+    """The visible separator the standalone HTML shows for the same page."""
+    return f'<div class="page-break">— Page {page_no} —</div>'
+
+
 def md_to_html(md_text: str) -> str:
     md = markdown.Markdown(extensions=["tables", "fenced_code", "toc", "nl2br"])
     return md.convert(md_text)
@@ -678,6 +694,7 @@ def process_book(
 
     # Build markdown sections
     md_sections: list[str] = []
+    html_sections: list[str] = []
     image_map: dict[str, str] = {}  # original_url -> local_relative_path
 
     for page_no, res in all_results:
@@ -713,12 +730,16 @@ def process_book(
                     text = text.replace(img_url, str(image_map[img_url]))
 
         if text:
-            md_sections.append(f"\n<div class=\"page-break\">— Page {page_no} —</div>\n\n{text}")
+            # Two assemblies rather than one plus a substitution pass: rewriting
+            # anchors afterwards would also rewrite an identical line that came
+            # out of the book itself, which a technical book can easily contain.
+            md_sections.append(f"\n{page_anchor(page_no)}\n\n{text}")
+            html_sections.append(f"\n{page_separator(page_no)}\n\n{text}")
 
     full_md = f"# {book_name}\n\n" + "\n\n".join(md_sections)
     # The translation handoff reads this file, so it has to land on disk
     md_path.write_text(full_md, encoding="utf-8")
-    body_html = md_to_html(full_md)
+    body_html = md_to_html(f"# {book_name}\n\n" + "\n\n".join(html_sections))
     html = build_html(title=book_name, body_html=body_html)
     html_path.write_text(html, encoding="utf-8")
 
