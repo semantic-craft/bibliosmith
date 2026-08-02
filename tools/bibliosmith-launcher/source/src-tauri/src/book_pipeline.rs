@@ -9557,6 +9557,37 @@ fn referenced_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
         _ => None,
     }
 }
+
+/// Relative link targets in `text`: the `(...)` of a Markdown link or image.
+/// Absolute paths, URLs and fragments are skipped — none of them name a
+/// directory that travels with the file.
+fn markdown_relative_references(text: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    let mut index = 0;
+    while let Some(open) = text[index..].find("](") {
+        let start = index + open + 2;
+        let Some(close) = text[start..].find(')') else {
+            break;
+        };
+        let end = start + close;
+        index = end + 1;
+        let target = text[start..end]
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if target.is_empty()
+            || target.starts_with('#')
+            || target.starts_with('/')
+            || target.contains("://")
+            || target.starts_with("mailto:")
+            || Path::new(target).is_absolute()
+        {
+            continue;
+        }
+        references.push(target.to_string());
+    }
+    references
 }
 
 fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
