@@ -68,8 +68,13 @@ pub(crate) const ZOTERO_ATTACH_ACCEPTED_EXIT_CODES: [i32; 7] = [0, 1, 2, 3, 4, 5
 /// Finished books that can be pushed back into Zotero as imported-file
 /// attachments. Deliberately not every artifact: intermediate chapter files and
 /// reports are working state, and the Markdown the conversion worker already
-/// uploaded has its own attachment. BabelDOC's bilingual PDF joins this list
-/// with the kind that ships alongside it (#99).
+/// uploaded has its own attachment.
+///
+/// The layout-preserving track's bilingual PDF is missing for a reason: it is
+/// registered by extension as the generic `pdf` kind, which any PDF sitting
+/// under a job output root also gets -- a source PDF among them. Listing `pdf`
+/// here would offer to attach a book's own source back onto the item it came
+/// from. It joins the list once that deliverable has a kind of its own.
 pub(crate) const ZOTERO_ATTACHABLE_ARTIFACT_KINDS: [&str; 3] =
     ["reading_epub", "reading_bilingual_epub", "reading_html"];
 pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_SCHEMA: &str =
