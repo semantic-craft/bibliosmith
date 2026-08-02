@@ -22,11 +22,19 @@ while PyMuPDF reads text on every single one — so letting them reach a caller
 would mean paying for OCR on hundreds of perfectly extractable pages. Whether a
 PDF has a usable text layer stays a question about PyMuPDF's character count,
 which is what the callers already ask.
+
+Pages are extracted one at a time rather than as one document-wide blob. That
+is what makes `_strip_running_heads()` possible — see its docstring for why a
+book's running heads have to go — and it also keeps pdf-inspector's heading
+levels stable, because the per-page call derives its font statistics from the
+whole document instead of from whichever pages the caller asked for.
 """
 
 from __future__ import annotations
 
+import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -75,6 +83,13 @@ class PdfTextResult:
     fallback_reason: str
     chars: int
     page_count: int
+    #: `(page, non-space characters)` per requested page, always measured on
+    #: PyMuPDF's text so the number means the same thing whichever engine won.
+    #: The worker's sidecar publishes it and downstream readers rely on it.
+    page_chars: tuple[tuple[int, int], ...] = ()
+    #: The running heads `_strip_running_heads()` removed, most repeated first.
+    #: Empty when the document has none or when PyMuPDF supplied the text.
+    running_heads: tuple[str, ...] = ()
 
 
 def extract_markdown(
@@ -92,39 +107,54 @@ def extract_markdown(
     config = dirty_text if dirty_text is not None else DirtyTextConfig()
     page_list = list(pages) if pages is not None else None
     fallback = _PyMuPdfText.read(path, page_list)
+    # pdf-inspector numbers pages from zero here, while this module, the worker
+    # and `process_pdf` all number them from one.
+    zero_based = None if page_list is None else [page_no - 1 for page_no in page_list]
 
     engine = ENGINE_INSPECTOR
     reason = ""
     try:
-        result = pdf_inspector.process_pdf(str(path), page_list)
+        extracted = pdf_inspector.extract_pages_markdown(str(path), zero_based)
     except Exception as parse_error:
         # Rewriting the file with PyMuPDF and letting pdf-inspector have one
         # more go rescues about half of the broken-trailer files; the rest keep
         # today's PyMuPDF-only behaviour.
         reason = f"parse_error={parse_error}"
         try:
-            result = pdf_inspector.process_pdf_bytes(_repaired_bytes(path), page_list)
+            extracted = pdf_inspector.extract_pages_markdown_bytes(
+                _repaired_bytes(path), zero_based
+            )
         except Exception as repair_error:
             return fallback.into_result(f"{reason}; repair_failed={repair_error}")
         engine = ENGINE_INSPECTOR_REPAIRED
 
-    markdown = result.markdown or ""
-    chars = _nonspace(markdown)
+    parsed = [(page.page + 1, page.markdown or "") for page in extracted.pages]
+    # Every check below reads the text as pdf-inspector parsed it, before any
+    # running head is dropped. Measuring the trimmed document instead would let
+    # a book with a head on all 629 pages look like it lost text and send a
+    # perfectly good extraction back to the flat PyMuPDF dump.
+    parsed_markdown = _join_pages(parsed)
+    chars = _nonspace(parsed_markdown)
     if chars == 0:
         return fallback.into_result(_join(reason, "empty_markdown"))
-    degraded, why = zotero_llm_worker.text_layer_quality(markdown, chars, config)
+    degraded, why = zotero_llm_worker.text_layer_quality(parsed_markdown, chars, config)
     if degraded:
         return fallback.into_result(_join(reason, f"dirty_text_layer: {why}"))
     if fallback.chars is not None and chars < fallback.chars:
         return fallback.into_result(
             _join(reason, f"less_text_than_pymupdf: {chars}<{fallback.chars}")
         )
+
+    trimmed, heads = _strip_running_heads(parsed)
+    markdown = _join_pages(trimmed)
     return PdfTextResult(
         markdown=markdown,
         engine=engine,
         fallback_reason=reason,
-        chars=chars,
-        page_count=int(result.page_count),
+        chars=_nonspace(markdown),
+        page_count=fallback.page_count or len(parsed),
+        page_chars=fallback.page_chars(),
+        running_heads=heads,
     )
 
 
@@ -183,7 +213,11 @@ class _PyMuPdfText:
             fallback_reason=reason,
             chars=_nonspace(markdown),
             page_count=self.page_count,
+            page_chars=self.page_chars(),
         )
+
+    def page_chars(self) -> tuple[tuple[int, int], ...]:
+        return tuple((page_no, _nonspace(text)) for page_no, text in self.pages)
 
     def markdown(self) -> str:
         """The flat text dump, page numbers kept as comments rather than headings.
@@ -198,6 +232,140 @@ class _PyMuPdfText:
             if text:
                 blocks.append(text)
         return "\n\n".join(blocks).strip() + "\n"
+
+
+# A page number as it is printed in a running head: arabic, or a roman numeral
+# in the front matter. The lookahead and the strict alternation are what keep
+# `civil` and `did` from reading as numerals; `mix` still does, which is why a
+# token is only ever stripped when enough of the line survives it.
+_ROMAN = r"(?=[ivxlcdmIVXLCDM])[mM]{0,4}(?:[cC][mMdD]|[dD]?[cC]{0,3})(?:[xX][cClL]|[lL]?[xX]{0,3})(?:[iI][xXvV]|[vV]?[iI]{0,3})"
+_NUMBER = rf"(?:\d{{1,4}}|{_ROMAN})"
+_BARE_NUMBER = re.compile(rf"^\W*{_NUMBER}\W*$")
+_LEADING_NUMBER = re.compile(rf"^\W*{_NUMBER}\b\W+")
+_TRAILING_NUMBER = re.compile(rf"\W+\b{_NUMBER}\W*$")
+
+#: A running head has to turn up at the edge of this many pages before it is
+#: treated as one. Three is enough to clear a chapter title that happens to
+#: open a page, and low enough to catch a head over a four-page article.
+_MIN_REPEATS = 3
+#: Below this the "repeats across pages" question has no useful answer.
+_MIN_PAGES = 4
+#: Running heads are short. The cap keeps a body paragraph out of reach.
+_MAX_HEAD_CHARS = 120
+#: How much of the run it spans a head has to be printed on. Furniture is on
+#: every page of its section, or every other page when it alternates with the
+#: facing one, so real heads clear this easily. It is what keeps `Chapter 1`,
+#: `Chapter 2`, `Chapter 3` — which look identical once the number comes off,
+#: and each of which opens a page — from being read as one repeated head and
+#: deleting every chapter title in the book.
+_MIN_SPAN_DENSITY = 0.5
+#: What survives stripping the page number off, so a stripped head still reads
+#: as a head rather than as the empty string.
+_MIN_STEM_CHARS = 3
+
+
+def _normalize_head(line: str) -> str:
+    """The form of a line that ignores what changes from page to page.
+
+    `## viii Editors' Introduction` and `## Editors' Introduction ix` are the
+    same running head printed on a verso and a recto, so both have to reduce to
+    `editors' introduction` before they can be counted together.
+    """
+    stem = line.lstrip("#").replace("\xa0", " ").replace("*", "").strip()
+    stem = re.sub(r"\s+", " ", stem)
+    for pattern in (_LEADING_NUMBER, _TRAILING_NUMBER):
+        shorter = pattern.sub("", stem)
+        if len(shorter) >= _MIN_STEM_CHARS:
+            stem = shorter
+    return stem.casefold().strip(" .,:;-—–_|")
+
+
+def _edge_lines(markdown: str) -> list[tuple[int, str]]:
+    """The topmost and bottommost real lines of a page, with their indices.
+
+    A bare page number is scaffolding sitting in front of the head rather than
+    the head itself, so it is stepped over on the way in from either end.
+    """
+    lines = markdown.splitlines()
+    live = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip() and not _BARE_NUMBER.match(line.strip())
+    ]
+    if not live:
+        return []
+    edges = {live[0], live[-1]}
+    return [(i, lines[i].strip()) for i in sorted(edges)]
+
+
+def _span_density(on_pages: set[int]) -> float:
+    """How solidly a line fills the run of pages it appears on."""
+    return len(on_pages) / (max(on_pages) - min(on_pages) + 1)
+
+
+def _strip_running_heads(
+    pages: list[tuple[int, str]],
+) -> tuple[list[tuple[int, str]], tuple[str, ...]]:
+    """Drop the book's running heads and feet from the pages they repeat on.
+
+    pdf-inspector sizes headings by font, and a running head is set in a font
+    the body does not use, so it comes back as a heading on every page it is
+    printed on: one 267-page book yields 1055 of them. Left in, they become the
+    entire table of contents of the finished EPUB, and — because a head sits
+    between the last line of one page and the first of the next — they also
+    read as a name dropped into the middle of a paragraph.
+
+    Repetition alone cannot be the test. `Further Reading` opens a section on
+    39 pages of one companion volume and is a real heading every time. What
+    separates the two is position: a running head is the first or last thing on
+    its page, and a real heading that repeats is somewhere in between. So only
+    the edges of a page are ever considered, and only a form that turns up
+    there on `_MIN_REPEATS` pages is removed.
+
+    Position is not enough on its own either, because the page number has to be
+    normalised away before two printings of one head can be counted together —
+    and that same normalisation makes `Chapter 1` and `Chapter 2` identical.
+    Density is what separates those: furniture is printed on every page of its
+    run, while chapter titles are scattered the length of the book.
+    """
+    if len(pages) < _MIN_PAGES:
+        return pages, ()
+
+    edges = [_edge_lines(markdown) for _, markdown in pages]
+    seen: dict[str, set[int]] = defaultdict(set)
+    for (page_no, _), page_edges in zip(pages, edges, strict=True):
+        for _, line in page_edges:
+            if len(line) <= _MAX_HEAD_CHARS:
+                key = _normalize_head(line)
+                if key:
+                    seen[key].add(page_no)
+
+    heads = {
+        key
+        for key, on_pages in seen.items()
+        if len(on_pages) >= _MIN_REPEATS and _span_density(on_pages) >= _MIN_SPAN_DENSITY
+    }
+    if not heads:
+        return pages, ()
+
+    trimmed: list[tuple[int, str]] = []
+    for (page_no, markdown), page_edges in zip(pages, edges, strict=True):
+        drop = {
+            index
+            for index, line in page_edges
+            if len(line) <= _MAX_HEAD_CHARS and _normalize_head(line) in heads
+        }
+        if not drop:
+            trimmed.append((page_no, markdown))
+            continue
+        kept = [line for i, line in enumerate(markdown.splitlines()) if i not in drop]
+        trimmed.append((page_no, "\n".join(kept).strip()))
+    ordered = sorted(heads, key=lambda key: (-len(seen[key]), key))
+    return trimmed, tuple(ordered)
+
+
+def _join_pages(pages: list[tuple[int, str]]) -> str:
+    return "\n\n".join(markdown for _, markdown in pages if markdown.strip()).strip()
 
 
 def _repaired_bytes(path: Path) -> bytes:

@@ -55,12 +55,29 @@ def nonspace(text: str) -> int:
     return sum(1 for ch in text if not ch.isspace())
 
 
+class StubPage:
+    """Stands in for pdf_inspector.PageMarkdown, a Rust extension type."""
+
+    def __init__(self, page: int, markdown: str) -> None:
+        self.page = page
+        self.markdown = markdown
+
+
 class StubResult:
-    """Stands in for pdf_inspector.PdfResult, which is a Rust extension type."""
+    """Stands in for pdf_inspector.PagesExtractionResult.
+
+    Takes the document as one string and splits it back into pages on the form
+    feed, so a test that does not care about pages can still pass one string.
+    """
 
     def __init__(self, markdown: str, page_count: int = 3) -> None:
-        self.markdown = markdown
+        texts = markdown.split("\f")
+        self.pages = [StubPage(index, text) for index, text in enumerate(texts)]
         self.page_count = page_count
+
+
+def stub_pages(*page_texts: str) -> StubResult:
+    return StubResult("\f".join(page_texts))
 
 
 def refuse_to_parse(*_args, **_kwargs):
@@ -107,7 +124,7 @@ class HybridChainTests(unittest.TestCase):
         mojibake = "文" * 1000 + PRIVATE_USE * 60
 
         with mock.patch.object(
-            pdf_text.pdf_inspector, "process_pdf", return_value=StubResult(mojibake)
+            pdf_text.pdf_inspector, "extract_pages_markdown", return_value=StubResult(mojibake)
         ):
             result = pdf_text.extract_markdown(pdf)
 
@@ -121,7 +138,7 @@ class HybridChainTests(unittest.TestCase):
         mojibake = "文" * 1000 + PRIVATE_USE * 60
 
         with mock.patch.object(
-            pdf_text.pdf_inspector, "process_pdf", return_value=StubResult(mojibake)
+            pdf_text.pdf_inspector, "extract_pages_markdown", return_value=StubResult(mojibake)
         ):
             result = pdf_text.extract_markdown(
                 pdf, dirty_text=pdf_text.DirtyTextConfig(dirty_text_guard=False)
@@ -137,7 +154,7 @@ class HybridChainTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-            pdf_text.pdf_inspector, "process_pdf", return_value=StubResult("# Paragraph one")
+            pdf_text.pdf_inspector, "extract_pages_markdown", return_value=StubResult("# Paragraph one")
         ):
             result = pdf_text.extract_markdown(pdf)
 
@@ -150,19 +167,19 @@ class HybridChainTests(unittest.TestCase):
         calls: list[str] = []
 
         def refuse(_path, _pages=None):
-            calls.append("process_pdf")
+            calls.append("extract_pages_markdown")
             refuse_to_parse()
 
         def accept(_data, _pages=None):
-            calls.append("process_pdf_bytes")
+            calls.append("extract_pages_markdown_bytes")
             return StubResult("# Recovered after the repair save", page_count=1)
 
-        with mock.patch.object(pdf_text.pdf_inspector, "process_pdf", refuse), mock.patch.object(
-            pdf_text.pdf_inspector, "process_pdf_bytes", accept
-        ):
+        with mock.patch.object(
+            pdf_text.pdf_inspector, "extract_pages_markdown", refuse
+        ), mock.patch.object(pdf_text.pdf_inspector, "extract_pages_markdown_bytes", accept):
             result = pdf_text.extract_markdown(pdf)
 
-        self.assertEqual(calls, ["process_pdf", "process_pdf_bytes"])
+        self.assertEqual(calls, ["extract_pages_markdown", "extract_pages_markdown_bytes"])
         self.assertEqual(result.engine, pdf_text.ENGINE_INSPECTOR_REPAIRED)
         self.assertIn("invalid file trailer", result.fallback_reason)
         self.assertEqual(result.markdown, "# Recovered after the repair save")
@@ -171,8 +188,8 @@ class HybridChainTests(unittest.TestCase):
         pdf = write_pdf(self.tmp / "trailer.pdf", ["Still readable by PyMuPDF"])
 
         with mock.patch.object(
-            pdf_text.pdf_inspector, "process_pdf", refuse_to_parse
-        ), mock.patch.object(pdf_text.pdf_inspector, "process_pdf_bytes", refuse_to_parse):
+            pdf_text.pdf_inspector, "extract_pages_markdown", refuse_to_parse
+        ), mock.patch.object(pdf_text.pdf_inspector, "extract_pages_markdown_bytes", refuse_to_parse):
             result = pdf_text.extract_markdown(pdf)
 
         self.assertEqual(result.engine, pdf_text.ENGINE_PYMUPDF)
@@ -206,7 +223,18 @@ class OcrRoutingBoundaryTests(unittest.TestCase):
     def test_result_carries_only_markdown_and_provenance(self) -> None:
         names = {field.name for field in dataclasses.fields(pdf_text.PdfTextResult)}
 
-        self.assertEqual(names, {"markdown", "engine", "fallback_reason", "chars", "page_count"})
+        self.assertEqual(
+            names,
+            {
+                "markdown",
+                "engine",
+                "fallback_reason",
+                "chars",
+                "page_count",
+                "page_chars",
+                "running_heads",
+            },
+        )
 
     def test_the_module_offers_a_single_entry_point(self) -> None:
         functions = {
@@ -219,6 +247,190 @@ class OcrRoutingBoundaryTests(unittest.TestCase):
         }
 
         self.assertEqual(functions, {"extract_markdown"})
+
+
+HEAD = "EDITORS’ INTRODUCTION"
+FOOT = "THOMSON REUTERS"
+
+
+def book_page(number: int, body: str, *, head: bool = True, foot: bool = True) -> str:
+    """One page of a six-page book, with the running head printed as a heading.
+
+    The page number moves from the front of the head to the back on facing
+    pages, the way a book prints it, so the fixture exercises the part of
+    detection that has to see through it.
+    """
+    lines = []
+    if head:
+        lines.append(f"## {number} {HEAD}" if number % 2 == 0 else f"## {HEAD} {number}")
+    lines.append(body)
+    if foot:
+        lines.append(FOOT)
+    return "\n\n".join(lines)
+
+
+def book(*, head: bool = True, foot: bool = True) -> list[tuple[int, str]]:
+    """Six pages. Page 3 carries a real heading that repeats mid-page later."""
+    bodies = [
+        "# A Real Chapter Title\n\nThe opening paragraph sets out the problem.",
+        "A second page arguing that the received view cannot be right.",
+        "Objections are considered next.\n\n## Further Reading\n\nWorks on the received view.",
+        "The fourth page turns to the consequences of rejecting it.",
+        "A rival account is set out here.\n\n## Further Reading\n\nWorks on the rival account.",
+        "The argument is drawn together.\n\n## Further Reading\n\nWorks on both accounts.",
+    ]
+    return [(i + 1, book_page(i + 1, body, head=head, foot=foot)) for i, body in enumerate(bodies)]
+
+
+class RunningHeadTests(unittest.TestCase):
+    """pdf-inspector sizes headings by font, so a running head becomes one.
+
+    Left in, they are the whole table of contents of the finished book: one
+    267-page volume produced 1055 headings this way.
+    """
+
+    def strip(self, pages):  # type: ignore[no-untyped-def]
+        trimmed, heads = pdf_text._strip_running_heads(pages)
+        return "\n\n".join(text for _, text in trimmed), heads
+
+    def test_a_running_head_is_removed_from_every_page(self) -> None:
+        markdown, heads = self.strip(book())
+
+        self.assertNotIn(HEAD, markdown)
+        self.assertIn("editors’ introduction", heads)
+
+    def test_a_running_foot_is_removed_too(self) -> None:
+        markdown, heads = self.strip(book())
+
+        self.assertNotIn(FOOT, markdown)
+        self.assertIn("thomson reuters", heads)
+
+    def test_a_heading_that_repeats_mid_page_is_kept(self) -> None:
+        """`Further Reading` opens a section on 39 pages of one real book.
+
+        Repetition alone would delete it. Position is what tells the two
+        apart, and this is the case that says so.
+        """
+        markdown, heads = self.strip(book())
+
+        self.assertEqual(markdown.count("## Further Reading"), 3)
+        self.assertNotIn("further reading", heads)
+
+    def test_the_body_and_the_real_chapter_heading_survive(self) -> None:
+        markdown, _ = self.strip(book())
+
+        self.assertIn("# A Real Chapter Title", markdown)
+        self.assertIn("The opening paragraph sets out the problem.", markdown)
+        self.assertIn("The fourth page turns to the consequences of rejecting it.", markdown)
+
+    def test_a_book_that_never_had_a_running_head_is_left_alone(self) -> None:
+        """The mutation the ticket asks for: delete the heads from the input.
+
+        Nothing else about the document changes, so anything removed here is
+        collateral damage. The paired assertions above — where the very same
+        bodies do lose their heads — are what stop this from passing for the
+        trivial reason that the code removes nothing at all.
+        """
+        clean = book(head=False, foot=False)
+
+        trimmed, heads = pdf_text._strip_running_heads(clean)
+
+        self.assertEqual(trimmed, clean)
+        self.assertEqual(heads, ())
+
+    def test_a_document_too_short_to_judge_is_left_alone(self) -> None:
+        pages = [(1, "## A Title\n\nBody."), (2, "## A Title\n\nBody."), (3, "## A Title\n\nBody.")]
+
+        trimmed, heads = pdf_text._strip_running_heads(pages)
+
+        self.assertEqual(trimmed, pages)
+        self.assertEqual(heads, ())
+
+    def test_a_bare_page_number_does_not_hide_the_head_behind_it(self) -> None:
+        """Some pages print the folio on its own line above the head."""
+        bodies = [
+            "The opening of the argument.",
+            "A distinction is drawn.",
+            "An objection is raised.",
+            "The objection is answered.",
+            "A second objection follows.",
+            "The chapter closes.",
+        ]
+        pages = [(i + 1, f"{i + 1}\n\n## {HEAD}\n\n{body}") for i, body in enumerate(bodies)]
+
+        markdown, heads = self.strip(pages)
+
+        self.assertNotIn(HEAD, markdown)
+        self.assertIn("The chapter closes.", markdown)
+        self.assertIn("editors’ introduction", heads)
+
+    def test_numbered_chapter_titles_are_not_mistaken_for_one_head(self) -> None:
+        """`Chapter 1` and `Chapter 2` are the same string once the number goes.
+
+        They open a page each, so position alone would take every one of them
+        and leave the book with no chapter titles at all. What saves them is
+        that they are scattered down the book rather than printed on every
+        page of a run.
+        """
+        pages = []
+        for chapter in range(1, 5):
+            pages.append((len(pages) + 1, f"# Chapter {chapter}\n\nThe chapter opens."))
+            for step in range(4):
+                pages.append(
+                    (len(pages) + 1, f"Chapter {chapter} argues its {step}th point at length.")
+                )
+
+        markdown, heads = self.strip(pages)
+
+        self.assertEqual(heads, ())
+        for chapter in range(1, 5):
+            self.assertIn(f"# Chapter {chapter}", markdown)
+
+
+class RunningHeadChainTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def test_removing_heads_does_not_send_the_document_back_to_pymupdf(self) -> None:
+        """The text-loss guard has to judge the document as parsed.
+
+        Measure the trimmed text against PyMuPDF instead and a book with a
+        head on all 629 pages looks like it lost text, so a perfectly good
+        structured extraction gets thrown away for the flat dump.
+        """
+        pdf = write_pdf(self.tmp / "headed.pdf", ["Body one", "Body two"])
+        pages = [text for _, text in book()]
+
+        with mock.patch.object(
+            pdf_text.pdf_inspector, "extract_pages_markdown", return_value=stub_pages(*pages)
+        ):
+            result = pdf_text.extract_markdown(pdf)
+
+        self.assertEqual(result.engine, pdf_text.ENGINE_INSPECTOR)
+        self.assertEqual(result.fallback_reason, "")
+        self.assertNotIn(HEAD, result.markdown)
+        self.assertIn("# A Real Chapter Title", result.markdown)
+        self.assertEqual(result.chars, nonspace(result.markdown))
+
+    def test_the_removed_heads_are_reported_to_the_caller(self) -> None:
+        pdf = write_pdf(self.tmp / "headed.pdf", ["Body one", "Body two"])
+        pages = [text for _, text in book()]
+
+        with mock.patch.object(
+            pdf_text.pdf_inspector, "extract_pages_markdown", return_value=stub_pages(*pages)
+        ):
+            result = pdf_text.extract_markdown(pdf)
+
+        self.assertIn("editors’ introduction", result.running_heads)
+        self.assertIn("thomson reuters", result.running_heads)
+
+    def test_per_page_characters_are_reported_for_the_sidecar(self) -> None:
+        pdf = write_pdf(self.tmp / "two.pdf", ["Alpha the quick brown fox", "Beta the lazy dog"])
+
+        result = pdf_text.extract_markdown(pdf)
+
+        self.assertEqual([page for page, _ in result.page_chars], [1, 2])
+        self.assertTrue(all(chars > 0 for _, chars in result.page_chars))
 
 
 @unittest.skipUnless(REAL_CORPUS.is_dir(), "no ~/Zotero/storage on this machine")
