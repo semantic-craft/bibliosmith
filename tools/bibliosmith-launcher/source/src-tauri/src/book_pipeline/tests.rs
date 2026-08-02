@@ -14794,3 +14794,306 @@ fn the_layout_track_is_enqueueable() {
     assert!(validate_enqueue_mode(MODE_LAYOUT_PRESERVING).is_ok());
     assert!(ENQUEUEABLE_MODES.contains(&MODE_LAYOUT_PRESERVING));
 }
+
+// ---------------------------------------------------------------------------
+// EPUB source route (issue #98)
+// ---------------------------------------------------------------------------
+
+fn fake_epub_extractor_root(root: &Path) -> PathBuf {
+    let wrapper_root = fake_wrapper_root(root);
+    let script = wrapper_root.join("scripts").join("epub_to_markdown.py");
+    fs::write(&script, "print('epub fixture')\n").unwrap();
+    wrapper_root
+}
+
+#[test]
+fn a_dropped_epub_file_routes_to_extraction_without_any_ocr() {
+    let root = temp_root("epub-route-single-file");
+    fs::create_dir_all(&root).unwrap();
+    let book = root.join("Some Book.epub");
+    fs::write(&book, "PK fixture").unwrap();
+    let mut source = local_pdf_source(&root);
+    // The input island hands a dropped `.epub` over as the file's own path; only
+    // a `.pdf` is rewritten to its folder.
+    source.path = Some(display_path(&book));
+
+    // No credentials configured at all: an EPUB must still be runnable.
+    let route = preview_route(&source, MODE_CONVERT_THEN_TRANSLATE, Default::default());
+
+    let execution: Vec<_> = route
+        .iter()
+        .filter(|item| item.route_kind != "translation_handoff")
+        .collect();
+    assert_eq!(execution.len(), 1);
+    assert_eq!(execution[0].route_kind, "epub_source");
+    assert_eq!(execution[0].title, "Some Book.epub");
+    assert!(execution[0].can_run);
+    assert!(execution[0].blocked_reason.is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_folder_of_epubs_lists_every_book_it_found() {
+    let root = temp_root("epub-route-folder");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("one.epub"), "PK one").unwrap();
+    fs::write(input.join("two.epub"), "PK two").unwrap();
+
+    let route = preview_route(
+        &local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE,
+        Default::default(),
+    );
+
+    let kinds: Vec<_> = route
+        .iter()
+        .filter(|item| item.route_kind != "translation_handoff")
+        .map(|item| item.route_kind.as_str())
+        .collect();
+    assert_eq!(kinds, ["epub_source", "epub_source"]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_mixed_folder_names_both_kinds_rather_than_hiding_the_pdfs() {
+    let root = temp_root("epub-route-mixed-folder");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("book.epub"), "PK fixture").unwrap();
+    fs::write(input.join("scan.pdf"), "%PDF fixture").unwrap();
+
+    let route = preview_route(
+        &local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE,
+        Default::default(),
+    );
+
+    let kinds: Vec<_> = route
+        .iter()
+        .filter(|item| item.route_kind != "translation_handoff")
+        .map(|item| item.route_kind.as_str())
+        .collect();
+    assert_eq!(kinds, ["epub_source", "remote_paddleocr"]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_epub_route_runs_the_extractor_in_the_ocr_workspace() {
+    let root = temp_root("epub-extract-command");
+    let input = root.join("input");
+    let output = root.join("output");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("book.epub"), "PK fixture").unwrap();
+    let wrapper_root = fake_epub_extractor_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let command = build_local_pdf_folder_command_for_root(&job, &output, &wrapper_root).unwrap();
+
+    assert_eq!(command.label, EPUB_EXTRACT_COMMAND_LABEL);
+    assert_runs_in_the_ocr_workspace(&command, "epub_to_markdown.py");
+    assert!(has_arg_pair(
+        &command.args,
+        "--input",
+        &display_path(&input)
+    ));
+    assert!(has_arg_pair(
+        &command.args,
+        "--output-dir",
+        &display_path(&output)
+    ));
+    // Extraction is entirely offline; nothing here may carry a credential.
+    assert!(command.env.is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_missing_extractor_script_is_named_rather_than_silently_skipped() {
+    let root = temp_root("epub-extract-missing-script");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("book.epub"), "PK fixture").unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let error = build_local_pdf_folder_command_for_root(&job, &root.join("output"), &wrapper_root)
+        .unwrap_err();
+
+    assert!(error.contains("EPUB extractor not found"), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn one_job_cannot_mix_epub_extraction_with_pdf_conversion() {
+    let root = temp_root("epub-extract-mixed-batch");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("book.epub"), "PK fixture").unwrap();
+    fs::write(input.join("scan.pdf"), "%PDF fixture").unwrap();
+    let wrapper_root = fake_epub_extractor_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            ..BookPipelinePreviewConfig::default()
+        },
+    )
+    .unwrap();
+
+    let error = build_local_pdf_folder_command_for_root(&job, &root.join("output"), &wrapper_root)
+        .unwrap_err();
+
+    assert!(error.contains("cannot mix EPUB extraction"), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_epub_route_is_not_offered_an_ocr_engine_override() {
+    // Forcing PaddleOCR onto a book that has no page images would be nonsense;
+    // the override list is what keeps the wizard from offering it.
+    assert!(!OVERRIDABLE_ROUTE_KINDS.contains(&"epub_source"));
+}
+
+#[test]
+fn an_extracted_asset_sidecar_is_not_collected_as_its_own_artifact() {
+    let root = temp_root("epub-sidecar-artifacts");
+    fs::create_dir_all(root.join("Book_assets")).unwrap();
+    fs::write(root.join("Book.md"), "# Chapter\n\nBody.\n").unwrap();
+    // A book whose images directory happens to hold markup must not have that
+    // markup outrank the assembled Markdown.
+    fs::write(root.join("Book_assets").join("cover.html"), "<p>cover</p>").unwrap();
+    fs::write(root.join("Book_assets").join("figure.png"), "PNG").unwrap();
+
+    let artifacts = scan_artifacts(&root).unwrap();
+
+    let kinds: Vec<_> = artifacts
+        .iter()
+        .map(|artifact| artifact.kind.as_str())
+        .collect();
+    assert_eq!(kinds, ["markdown"]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it() {
+    let root = temp_root("epub-sidecar-handoff");
+    let extract_dir = root.join("extract");
+    let repo_root = root.join("repo");
+    fs::create_dir_all(extract_dir.join("Some_Book_assets")).unwrap();
+    let markdown_path = extract_dir.join("Some_Book.md");
+    fs::write(
+        &markdown_path,
+        "# Chapter One\n\n![A figure](Some_Book_assets/figure.png)\n\n# Chapter Two\n\nBody.\n",
+    )
+    .unwrap();
+    fs::write(
+        extract_dir.join("Some_Book_assets").join("figure.png"),
+        "PNG bytes",
+    )
+    .unwrap();
+    let job: BookPipelineJob = serde_json::from_value(serde_json::json!({
+        "id": "job-epub-sidecar",
+        "mode": MODE_CONVERT_THEN_TRANSLATE,
+        "source": { "kind": "local_pdf_folder", "title": "Some Book" },
+        "route": [],
+        "status": "running",
+        "currentStep": "handoff",
+        "lastError": null,
+        "logSummary": [],
+        "artifacts": [{
+            "artifactId": "art-md",
+            "kind": "markdown",
+            "path": display_path(&markdown_path),
+            "sha256": sha256_file(&markdown_path).unwrap(),
+            "zoteroKey": null
+        }],
+        "outputDir": display_path(&extract_dir),
+        "attempts": 1,
+        "createdAt": "2026-08-01T00:00:00Z",
+        "updatedAt": "2026-08-01T00:00:00Z"
+    }))
+    .unwrap();
+
+    create_translation_handoff_project_with_title(&job, None, &repo_root, Some("Some Book"))
+        .unwrap();
+
+    let project_root = fs::read_dir(repo_root.join("books").join("local").join("zh-Hans"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(
+        project_root
+            .join("source")
+            .join("Some_Book_assets")
+            .join("figure.png")
+            .is_file(),
+        "the images an EPUB extraction pulled out must reach the translation project"
+    );
+
+    let source_text = fs::read_to_string(project_root.join("source").join("source.md")).unwrap();
+    let rewritten =
+        rewrite_sidecar_asset_references_for_chapters(&project_root.join("source"), &source_text)
+            .unwrap();
+    assert!(
+        rewritten.contains("](../../source/Some_Book_assets/figure.png)"),
+        "chapter files sit two levels below source/: {rewritten}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn extracted_chapter_headings_are_exactly_the_split_boundaries() {
+    // The extractor gives every spine document one level-1 heading and demotes
+    // the document's own headings. This is the whole reason split-policy-v3
+    // needs no passthrough mode for EPUB: its shallowest-heading rule already
+    // lands on the spine.
+    let merged = concat!(
+        "# Opening\n\n",
+        "Body of the first chapter.\n\n",
+        "## An inner section\n\n",
+        "More body.\n\n",
+        "\\# Not a heading, merely a line that starts with a hash.\n\n",
+        "```\n# a comment inside a fence\n```\n\n",
+        "# Second Movement\n\n",
+        "Body of the second chapter.\n\n",
+        "# Notes\n\n",
+        "Body of the third chapter.\n"
+    );
+
+    let plan = split_source_markdown(merged);
+
+    assert_eq!(plan.primary_heading_level, 1);
+    let titles: Vec<_> = plan
+        .chapters
+        .iter()
+        .map(|chapter| chapter.title.as_str())
+        .collect();
+    assert_eq!(titles, ["Opening", "Second Movement", "Notes"]);
+    assert!(
+        plan.chapters[0].text.contains("## An inner section"),
+        "an inner section belongs to its chapter, not to a chapter of its own"
+    );
+    assert!(
+        plan.chapters[0].text.contains("# a comment inside a fence"),
+        "a hash inside a fence is not a boundary"
+    );
+}

@@ -58,6 +58,14 @@ pub(crate) const ITEM_INDEX_PROFILE_COMMAND_LABEL: &str = "Zotero item index pro
 pub(crate) const ZOTERO_COLLECTION_SNAPSHOT_COMMAND_LABEL: &str = "Zotero collection snapshot";
 pub(crate) const ZOTERO_COLLECTION_SNAPSHOT_SCHEMA: &str = "zotero-collection-snapshot-v1";
 pub(crate) const ZOTERO_CONVERSION_COMMAND_LABEL: &str = "Zotero conversion worker";
+pub(crate) const EPUB_EXTRACT_COMMAND_LABEL: &str = "EPUB chapter extraction";
+/// Name suffixes marking a sidecar of supporting files for the Markdown beside
+/// it: MinerU's per-part tree (`<stem>.mineru`) and the images the PaddleOCR
+/// wrapper and the EPUB extractor pull out of a book (`<stem>_assets`). Both are
+/// named from the Markdown's stem by the worker that writes them, both are
+/// skipped when artifacts are collected, and both travel into the translation
+/// project so the chapter rewrite can address them.
+pub(crate) const MARKDOWN_SIDECAR_SUFFIXES: [&str; 2] = [".mineru", "_assets"];
 pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_SCHEMA: &str =
     "zotero-worker-attachment-evidence-v1";
 pub(crate) const ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION: &str = "zotero-worker-extraction-v1";

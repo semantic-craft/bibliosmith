@@ -565,6 +565,7 @@ export function routeKindLabel(routeKind: string, copy: PipelineCopy): string {
     translation_handoff: copy.routeTranslationHandoff,
     translation_ready: copy.routeTranslationReady,
     external_adapter: copy.routeExternalAdapter,
+    epub_source: copy.routeEpubSource,
   };
   return labels[routeKind] ?? routeKind.replaceAll("_", " ");
 }
@@ -572,7 +573,9 @@ export function routeKindLabel(routeKind: string, copy: PipelineCopy): string {
 export type RouteTone = "ok" | "info" | "block" | "warn" | "neutral";
 
 export function routeTone(routeKind: string): RouteTone {
-  if (routeKind === "direct_text" || routeKind === "translation_ready") return "ok";
+  // epub_source is "ok" alongside direct_text: both extract text the source
+  // already carries, so neither waits on an OCR credential.
+  if (routeKind === "direct_text" || routeKind === "translation_ready" || routeKind === "epub_source") return "ok";
   if (routeKind === "remote_paddleocr" || routeKind === "mineru") return "info";
   if (routeKind.startsWith("blocked")) return "block";
   if (routeKind === "missing_credentials") return "warn";
