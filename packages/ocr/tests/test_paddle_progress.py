@@ -36,7 +36,14 @@ def run_main(tmp_path: Path, *, failure: Exception | None = None):  # type: igno
     if failure is not None:
         process_result = failure
     with (
-        mock.patch.object(paddle, "load_config", return_value=SimpleNamespace(workers=1)),
+        # baidu_token: these books route to remote OCR (the fixture bytes are
+        # not a readable PDF, so the text-layer sample finds nothing), and since
+        # #137 main() refuses that route without a credential.
+        mock.patch.object(
+            paddle,
+            "load_config",
+            return_value=SimpleNamespace(workers=1, baidu_token="token"),
+        ),
         mock.patch.object(paddle, "pdf_page_count", return_value=3),
         mock.patch.object(
             paddle,

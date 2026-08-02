@@ -99,6 +99,17 @@ pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_SCHEMA: &str =
 pub(crate) const ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION: &str = "zotero-worker-extraction-v1";
 pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_MARKER: &str =
     "BOOK_PIPELINE_ATTACHMENT_EVIDENCE ";
+/// The local PDF wrapper's routing plan, as it reports one line per book from
+/// `--route-plan-only`. Same shape as the Zotero worker's attachment evidence:
+/// a marker prefix, then one JSON object carrying its own schema version.
+///
+/// The plan is what stops the folder route from sending every PDF to the paid
+/// engine. It is a forecast, not an instruction: the wrapper re-derives the same
+/// decision from the same sampler when it actually runs, so a probe that could
+/// not be run costs a pessimistic route chip in the preview and nothing else.
+pub(crate) const LOCAL_PDF_ROUTE_PLAN_SCHEMA: &str = "local-pdf-route-plan-v1";
+pub(crate) const LOCAL_PDF_ROUTE_PLAN_MARKER: &str = "BOOK_PIPELINE_LOCAL_PDF_ROUTE ";
+pub(crate) const LOCAL_PDF_ROUTE_PLAN_COMMAND_LABEL: &str = "local PDF text-layer probe";
 pub(crate) const MIGRATED_INTERRUPTED_OWNER: &str = "migrated-interrupted";
 pub(crate) const SPLIT_POLICY_VERSION: &str = "split-policy-v3";
 pub(crate) const TASK_POLICY_VERSION: &str = "task-policy-v1";

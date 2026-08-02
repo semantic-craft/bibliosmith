@@ -22,7 +22,7 @@ Known monorepo/package roots:
 - Source PDF child attachments are normalized too: the PDF title, Zotero filename, and imported storage filename should follow `作者_年份_题名.pdf`, matching the Markdown basename. Do not leave processed PDFs displayed as `PDF`, numeric download names, SS-number names, or download-site tail names.
 - Local Markdown/JSONL files are internal staging artifacts under `$HOME/Zotero/OCR_OUTPUT/.state/staging/`; they are not the user-facing destination.
 - User-facing export bundles, including EPUB, standalone HTML, export indexes, and cleaned Markdown, should be written under this repository's `output/` directory.
-- Standalone local book PDFs can be converted with `scripts/pdf_to_html_paddleocr.py`, which writes `<book>/<book>.md` and `<book>/<book>.html` side by side. The Markdown is what the launcher's translation handoff picks up.
+- Standalone local book PDFs can be converted with `scripts/pdf_to_html_paddleocr.py`, which writes `<book>/<book>.md` and `<book>/<book>.html` side by side. The Markdown is what the launcher's translation handoff picks up. Each book is routed first, by the same `sample_text_layer()` check the Zotero worker uses: a born-digital PDF is extracted locally through `pdf_text.py` at no cost, and only a scan or a mojibake text layer is uploaded. `BAIDU_PADDLEOCR_TOKEN` is therefore needed only when some book actually routes to OCR. `--route-plan-only` prints the decision for every book without converting, `--force-text` / `--force-ocr` override it per file name.
 - MinerU Precision Extract API work uses `mineru.py` or the existing MinerU queue scripts; it is API-based unless `docs/windows.md` explicitly says otherwise for a local native CLI experiment.
 
 ## Files
@@ -39,7 +39,7 @@ Known monorepo/package roots:
 - `scripts/zotero_llm_worker.py`: main worker.
 - `scripts/run_windows.ps1`: Windows task dispatcher.
 - `scripts/smoke_windows.ps1`: Windows smoke check.
-- `scripts/pdf_to_html_paddleocr.py`: standalone PDF folder to Markdown + HTML converter.
+- `scripts/pdf_to_html_paddleocr.py`: standalone PDF folder to Markdown + HTML converter, routing each book to local text extraction or remote OCR.
 - `scripts/paddleocr_vl_cli.py`: script-local PaddleOCR-VL client used by the Windows runner.
 - `scripts/normalize_pdf_attachment_names.py`: audits/fixes PDF attachment display names and storage filenames.
 - `scripts/run_daily.sh`: launchd entrypoint, capped to 55 minutes.

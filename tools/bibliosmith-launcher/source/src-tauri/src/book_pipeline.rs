@@ -2432,6 +2432,12 @@ fn preview_book_pipeline_route_with_executor<E: RunnerCommandExecutor>(
             &book_ocr_conversion_root(),
         );
     }
+    // A local folder gets the same treatment as a Zotero source: the route is
+    // real evidence about the books on disk, not a guess from the source kind.
+    if source.kind == "local_pdf_folder" {
+        let plan = local_pdf_route_plan(executor, source, &book_ocr_conversion_root());
+        return Ok(preview_route_with_local_plan(source, mode, config, &plan));
+    }
     Ok(preview_route(source, mode, config))
 }
 
@@ -3625,6 +3631,13 @@ fn queue_standard_job_for_root<E: RunnerCommandExecutor>(
     // discovery evidence and would otherwise queue phantom children.
     let route = if is_zotero_source(&source) && source.fake_zotero_items.is_none() {
         preview_zotero_route_from_worker(executor, &source, &mode, config, 20, root)?
+    } else if source.kind == "local_pdf_folder" {
+        // Re-probed rather than carried over from the wizard's preview, for the
+        // same reason the Zotero route is re-discovered here: the queued route
+        // is what the run and the UI both read, and the folder can have changed
+        // between the preview and the click.
+        let plan = local_pdf_route_plan(executor, &source, root);
+        preview_route_with_local_plan(&source, &mode, config, &plan)
     } else {
         preview_route(&source, &mode, config)
     };
@@ -7548,26 +7561,52 @@ fn build_local_pdf_folder_command_for_root(
             display_path(&script)
         ));
     }
+    let mut args = ocr_python_args(&script);
+    args.extend([
+        "--input-dir".into(),
+        input_dir.into(),
+        "--output-dir".into(),
+        display_path(output_dir),
+    ]);
+    args.extend(local_pdf_route_override_args(&runnable_routes));
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: "local PDF conversion wrapper".into(),
         program: PathBuf::from("uv"),
-        args: {
-            let mut args = ocr_python_args(&script);
-            args.extend([
-                "--input-dir".into(),
-                input_dir.into(),
-                "--output-dir".into(),
-                display_path(output_dir),
-            ]);
-            args
-        },
+        args,
         env: Vec::new(),
         cwd: Some(root.to_path_buf()),
         output_dir: output_dir.to_path_buf(),
         attempts: job.attempts,
         accepted_exit_codes: vec![0],
     })
+}
+
+/// Carry the wizard's per-book re-routes into the wrapper's own flags.
+///
+/// Only overrides travel. The wrapper classifies every other book itself, from
+/// the same sampler the route preview used, so repeating the automatic decision
+/// here would only create a second copy of it to drift. An override is the one
+/// thing the wrapper cannot re-derive, and before #137 it was accepted in the
+/// wizard and then silently dropped: forcing `direct` on a local PDF changed
+/// the chip and uploaded the book anyway.
+fn local_pdf_route_override_args(routes: &[&BookPipelineRouteItem]) -> Vec<String> {
+    let mut args = Vec::new();
+    for route in routes {
+        let flag = match route.route_override.as_deref() {
+            Some("direct") => "--force-text",
+            Some("paddle") => "--force-ocr",
+            _ => continue,
+        };
+        // The wrapper matches on the file name, which is unambiguous inside the
+        // one folder it was given.
+        let Some(name) = file_name_label(Path::new(&route.source_ref)) else {
+            continue;
+        };
+        args.push(flag.into());
+        args.push(name);
+    }
+    args
 }
 
 /// Extract stage for the `epub_source` route: the EPUB extractor, no OCR.
@@ -9021,10 +9060,24 @@ fn apply_route_overrides(
     }
 }
 
+/// The offline route: everything that can be decided without running anything.
+///
+/// A local PDF folder previewed through here has no text-layer plan, so every
+/// PDF in it names the paid engine. `preview_route_with_local_plan` is the
+/// entry point that first asks; this one is for callers that have no executor.
 fn preview_route(
     source: &BookPipelineSource,
     mode: &str,
     config: BookPipelinePreviewConfig,
+) -> Vec<BookPipelineRouteItem> {
+    preview_route_with_local_plan(source, mode, config, &LocalPdfRoutePlan::default())
+}
+
+fn preview_route_with_local_plan(
+    source: &BookPipelineSource,
+    mode: &str,
+    config: BookPipelinePreviewConfig,
+    local_plan: &LocalPdfRoutePlan,
 ) -> Vec<BookPipelineRouteItem> {
     let override_config = config.clone();
     let mut route = match source.kind.as_str() {
@@ -9044,7 +9097,7 @@ fn preview_route(
         }],
         "markdown_source" => preview_markdown_source(source),
         "external_adapter" => preview_external_adapter(source),
-        "local_pdf_folder" => preview_local_pdf_folder(source),
+        "local_pdf_folder" => preview_local_pdf_folder(source, local_plan),
         "zotero_attachment" | "zotero_collection" | "zotero_filter" => {
             preview_zotero_source(source, config)
         }
@@ -9209,22 +9262,29 @@ fn preview_external_adapter(source: &BookPipelineSource) -> Vec<BookPipelineRout
     }]
 }
 
-fn preview_local_pdf_folder(source: &BookPipelineSource) -> Vec<BookPipelineRouteItem> {
+fn preview_local_pdf_folder(
+    source: &BookPipelineSource,
+    plan: &LocalPdfRoutePlan,
+) -> Vec<BookPipelineRouteItem> {
     let folder = source.path.as_deref().unwrap_or("");
     // An EPUB settles its own route: the book already carries the structure OCR
     // would have to recover, so the extractor replaces OCR rather than preceding
     // it and no credential check applies. Both file kinds are listed when the
     // folder holds both, so the preflight names every book it found; the command
     // builder is where a mixed batch is refused, with the reason.
-    let epubs = local_file_route_items(&epub_files(folder), "epub");
-    let pdfs = local_file_route_items(&pdf_files(folder), "pdf");
+    let epubs = local_file_route_items(&epub_files(folder), "epub", plan);
+    let pdfs = local_file_route_items(&pdf_files(folder), "pdf", plan);
     if epubs.is_empty() && pdfs.is_empty() {
         return vec![BookPipelineRouteItem {
             id: "local-pdf-folder".into(),
             title: source_title(source),
             source_kind: "local_pdf_folder".into(),
             source_ref: folder.into(),
-            route_kind: "remote_paddleocr".into(),
+            // Nothing was found to route, so this row is a placeholder for a
+            // folder rather than a decision about a book. It names no engine:
+            // claiming the paid one here was what made an empty folder look
+            // like an OCR bill waiting to happen.
+            route_kind: "local_pdf_folder".into(),
             can_run: !folder.is_empty(),
             blocked_reason: folder
                 .is_empty()
@@ -9238,32 +9298,165 @@ fn preview_local_pdf_folder(source: &BookPipelineSource) -> Vec<BookPipelineRout
     epubs.into_iter().chain(pdfs).collect()
 }
 
-fn local_file_route_items(paths: &[PathBuf], extension: &str) -> Vec<BookPipelineRouteItem> {
+fn local_file_route_items(
+    paths: &[PathBuf],
+    extension: &str,
+    plan: &LocalPdfRoutePlan,
+) -> Vec<BookPipelineRouteItem> {
     let epub = extension == "epub";
     paths
         .iter()
-        .enumerate()
-        .map(|(index, path)| BookPipelineRouteItem {
-            id: format!("local-{extension}-{}", index + 1),
-            title: path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(extension)
-                .to_string(),
-            source_kind: "local_pdf_folder".into(),
-            source_ref: display_path(path),
-            route_kind: if epub { "epub_source" } else { "remote_paddleocr" }.into(),
-            can_run: true,
-            blocked_reason: None,
-            summary: if epub {
-                "Extract EPUB chapters straight to Markdown through scripts/epub_to_markdown.py; no OCR engine runs."
+        .map(|path| {
+            let route_kind = if epub {
+                "epub_source"
             } else {
-                "Run through scripts/pdf_to_html_paddleocr.py from packages/ocr."
+                plan.route_for(path)
+            };
+            BookPipelineRouteItem {
+                // Overrides are keyed by this ID across the wizard preview and
+                // the queue-time re-probe. A sorted position can move to a
+                // different book when the folder changes; the source path
+                // cannot, and its digest keeps private paths out of job IDs.
+                id: format!(
+                    "local-{extension}-{}",
+                    sha256_str(&display_path(path))
+                ),
+                title: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(extension)
+                    .to_string(),
+                source_kind: "local_pdf_folder".into(),
+                source_ref: display_path(path),
+                route_kind: route_kind.into(),
+                can_run: true,
+                blocked_reason: None,
+                summary: match route_kind {
+                    "epub_source" => "Extract EPUB chapters straight to Markdown through scripts/epub_to_markdown.py; no OCR engine runs.",
+                    "direct_text" => "This PDF carries its own text layer; scripts/pdf_to_html_paddleocr.py will extract it locally, with no OCR engine and no cost.",
+                    _ => "Run through scripts/pdf_to_html_paddleocr.py from packages/ocr.",
+                }
+                .into(),
+                route_override: None,
             }
-            .into(),
-            route_override: None,
         })
         .collect()
+}
+
+/// What the wrapper's text-layer probe found for the PDFs in one folder, keyed
+/// by the absolute path it reported.
+///
+/// An absent entry is not "needs OCR" — it is "not asked". The probe is skipped
+/// for folders with no PDF in them and it is allowed to fail, so a missing entry
+/// means the preview falls back to naming the paid engine, which is what this
+/// route always claimed before #137. What actually runs is decided again by the
+/// wrapper itself, from the same sampler, so a failed probe costs an
+/// over-cautious chip rather than an OCR bill.
+#[derive(Debug, Clone, Default)]
+struct LocalPdfRoutePlan {
+    routes: BTreeMap<String, String>,
+}
+
+impl LocalPdfRoutePlan {
+    fn route_for(&self, path: &Path) -> &'static str {
+        match self.routes.get(&display_path(path)).map(String::as_str) {
+            Some("direct_text") => "direct_text",
+            _ => "remote_paddleocr",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalPdfRoutePlanEntry {
+    schema_version: String,
+    path: String,
+    route: String,
+}
+
+/// Read the wrapper's plan lines out of a probe run's output.
+///
+/// Never fails: an unparseable or wrong-schema line is dropped rather than
+/// raised, because the route preview has a correct answer without the probe and
+/// refusing to preview a folder over a malformed log line would be worse than
+/// showing the pre-#137 route.
+fn parse_local_pdf_route_plan(text: &str) -> LocalPdfRoutePlan {
+    let mut routes = BTreeMap::new();
+    for line in text.lines() {
+        let Some((_, payload)) = line.split_once(LOCAL_PDF_ROUTE_PLAN_MARKER) else {
+            continue;
+        };
+        let Ok(entry) = serde_json::from_str::<LocalPdfRoutePlanEntry>(payload.trim()) else {
+            continue;
+        };
+        if entry.schema_version != LOCAL_PDF_ROUTE_PLAN_SCHEMA {
+            continue;
+        }
+        routes.insert(entry.path, entry.route);
+    }
+    LocalPdfRoutePlan { routes }
+}
+
+fn build_local_pdf_route_plan_command(
+    input_dir: &str,
+    root: &Path,
+) -> Result<RunnerCommand, String> {
+    let script = root.join("scripts").join("pdf_to_html_paddleocr.py");
+    if !script.is_file() {
+        return Err(format!(
+            "Local PDF conversion wrapper not found at {}",
+            display_path(&script)
+        ));
+    }
+    let mut args = ocr_python_args(&script);
+    args.extend([
+        "--input-dir".into(),
+        input_dir.into(),
+        "--route-plan-only".into(),
+    ]);
+    Ok(RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: LOCAL_PDF_ROUTE_PLAN_COMMAND_LABEL.into(),
+        program: PathBuf::from("uv"),
+        args,
+        // No credential: sampling a text layer is PyMuPDF reading five pages,
+        // and this command must stay unable to reach the paid API at all.
+        env: Vec::new(),
+        cwd: Some(root.to_path_buf()),
+        // The probe writes nothing, and `--route-plan-only` is the one mode that
+        // does not create its output tree. This is only the directory the runner
+        // hangs its live-progress file off, named the way Zotero discovery names
+        // its own -- never the user's book folder.
+        output_dir: root
+            .join("output")
+            .join("book-pipeline")
+            .join("local-pdf-route-plan"),
+        attempts: 0,
+        accepted_exit_codes: vec![0],
+    })
+}
+
+/// Ask the wrapper which of a folder's PDFs carry a usable text layer.
+///
+/// Best effort by design. Every failure — no wrapper on disk, no `uv`, a
+/// Python error, a folder with no PDF in it — returns an empty plan, and an
+/// empty plan is the pre-#137 preview.
+fn local_pdf_route_plan<E: RunnerCommandExecutor>(
+    executor: &E,
+    source: &BookPipelineSource,
+    root: &Path,
+) -> LocalPdfRoutePlan {
+    let folder = source.path.as_deref().unwrap_or("");
+    if folder.is_empty() || pdf_files(folder).is_empty() {
+        return LocalPdfRoutePlan::default();
+    }
+    let Ok(command) = build_local_pdf_route_plan_command(folder, root) else {
+        return LocalPdfRoutePlan::default();
+    };
+    let Ok(result) = executor.execute(&command) else {
+        return LocalPdfRoutePlan::default();
+    };
+    parse_local_pdf_route_plan(&format!("{}\n{}", result.stdout, result.stderr))
 }
 
 fn preview_zotero_source(

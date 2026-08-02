@@ -230,6 +230,7 @@ export function pipelineCopy(locale: PipelineLocale) {
     routeTranslationReady: zh ? "直进翻译" : "Translation ready",
     routeExternalAdapter: zh ? "外部适配器" : "External adapter",
     routeEpubSource: zh ? "EPUB 章节抽取" : "EPUB extraction",
+    routeLocalPdfFolder: zh ? "待逐本判定" : "Decided per book",
 
     // Overview tab
     evidenceTitle: zh ? "路由证据" : "Route evidence",

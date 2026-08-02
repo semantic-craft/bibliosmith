@@ -679,6 +679,38 @@ impl RunnerCommandExecutor for PaddleWrapperLayoutExecutor {
     }
 }
 
+/// What `extract_book_text()` leaves on disk for a `direct_text` book: the same
+/// `<book>/<book>.md` and `.html` the OCR route writes, and nothing else. No
+/// `_assets` (a text layer has no images to download) and no `.temp` chunk tree
+/// (nothing was uploaded, so there is nothing to resume).
+const DIRECT_TEXT_WRAPPER_MARKDOWN: &str = "# Sample Book\n\n## Chapter One\n\nBody text.\n";
+
+struct DirectTextWrapperLayoutExecutor;
+
+impl RunnerCommandExecutor for DirectTextWrapperLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        fs::create_dir_all(&book_dir).unwrap();
+        fs::write(
+            book_dir.join("Sample_Book.md"),
+            DIRECT_TEXT_WRAPPER_MARKDOWN,
+        )
+        .unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        fs::write(
+            book_dir.join("_state.json"),
+            "{\"route\":\"direct_text\",\"engine\":\"pdf-inspector\"}\n",
+        )
+        .unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["direct text extraction completed".into()],
+        })
+    }
+}
+
 /// Writes the wrapper's real scratch layout: the book beside a `.temp` tree
 /// holding the resumable chunk JSONL, both under the job's output directory.
 struct PaddleScratchLayoutExecutor;
@@ -6433,6 +6465,8 @@ fn local_pdf_folder_forced_to_mineru_uses_precision_batch_client() {
     let mineru_script = wrapper_root.join("mineru.py");
     fs::write(&mineru_script, "print('mineru fixture')\n").unwrap();
     let store = BookPipelineStore::for_test(&root);
+    let one_id = local_pdf_route_id(&input, "one.pdf");
+    let two_id = local_pdf_route_id(&input, "two.pdf");
     let job = queue_job(
         &store,
         local_pdf_source(&input),
@@ -6440,10 +6474,7 @@ fn local_pdf_folder_forced_to_mineru_uses_precision_batch_client() {
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: false,
             has_mineru_credentials: true,
-            route_overrides: BTreeMap::from([
-                ("local-pdf-1".into(), "mineru".into()),
-                ("local-pdf-2".into(), "mineru".into()),
-            ]),
+            route_overrides: BTreeMap::from([(one_id, "mineru".into()), (two_id, "mineru".into())]),
         },
     )
     .unwrap();
@@ -6474,6 +6505,7 @@ fn local_pdf_folder_rejects_a_mixed_mineru_and_paddle_batch() {
     let wrapper_root = fake_wrapper_root(&root);
     fs::write(wrapper_root.join("mineru.py"), "print('mineru fixture')\n").unwrap();
     let store = BookPipelineStore::for_test(&root);
+    let one_id = local_pdf_route_id(&input, "one.pdf");
     let job = queue_job(
         &store,
         local_pdf_source(&input),
@@ -6481,7 +6513,7 @@ fn local_pdf_folder_rejects_a_mixed_mineru_and_paddle_batch() {
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
-            route_overrides: BTreeMap::from([("local-pdf-1".into(), "mineru".into())]),
+            route_overrides: BTreeMap::from([(one_id, "mineru".into())]),
         },
     )
     .unwrap();
@@ -15793,5 +15825,433 @@ fn the_parent_item_falls_back_to_the_extracted_markdown() {
     job.artifacts.clear();
     assert_eq!(attach_parent_item_key(&job, &epub), None);
 
+    let _ = fs::remove_dir_all(root);
+}
+
+// ---------------------------------------------------------------------------
+// Local PDF folder text-layer routing (issue #137)
+// ---------------------------------------------------------------------------
+
+/// Stands in for the wrapper's `--route-plan-only` pass over a folder holding
+/// `born.pdf` and `scan.pdf`, reporting one plan line per book on stderr, which
+/// is where the wrapper's logging actually goes.
+struct LocalPdfRoutePlanExecutor;
+
+impl RunnerCommandExecutor for LocalPdfRoutePlanExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.label, LOCAL_PDF_ROUTE_PLAN_COMMAND_LABEL);
+        assert!(command.args.iter().any(|arg| arg == "--route-plan-only"));
+        let input = command
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--input-dir")
+            .map(|pair| pair[1].clone())
+            .expect("the probe must name the folder it is reading");
+        let line = |name: &str, route: &str| {
+            format!(
+                "12:00:00 INFO {}{}",
+                LOCAL_PDF_ROUTE_PLAN_MARKER,
+                serde_json::json!({
+                    "schemaVersion": LOCAL_PDF_ROUTE_PLAN_SCHEMA,
+                    "path": display_path(&Path::new(&input).join(name)),
+                    "name": name,
+                    "route": route,
+                    "reason": "fixture",
+                })
+            )
+        };
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: [
+                line("born.pdf", "direct_text"),
+                line("scan.pdf", "remote_paddleocr"),
+            ]
+            .join("\n"),
+            log_summary: vec!["local PDF route plan completed".into()],
+        })
+    }
+}
+
+struct LocalPdfRoutePlanFailingExecutor;
+
+impl RunnerCommandExecutor for LocalPdfRoutePlanFailingExecutor {
+    fn execute(&self, _command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        Err("PyMuPDF is not installed".into())
+    }
+}
+
+fn local_pdf_folder_with_two_books(name: &str) -> PathBuf {
+    let root = temp_root(name);
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("born.pdf"), "%PDF born digital").unwrap();
+    fs::write(input.join("scan.pdf"), "%PDF scanned").unwrap();
+    root
+}
+
+fn local_pdf_route_id(input: &Path, file_name: &str) -> String {
+    preview_local_pdf_folder(&local_pdf_source(input), &LocalPdfRoutePlan::default())
+        .into_iter()
+        .find(|item| item.title == file_name)
+        .unwrap_or_else(|| panic!("preview did not list {file_name}"))
+        .id
+}
+
+fn execution_routes(route: &[BookPipelineRouteItem]) -> Vec<(String, String)> {
+    route
+        .iter()
+        .filter(|item| item.route_kind != "translation_handoff")
+        .map(|item| (item.title.clone(), item.route_kind.clone()))
+        .collect()
+}
+
+#[test]
+fn a_pdf_with_a_text_layer_is_not_sent_to_the_paid_engine() {
+    let root = local_pdf_folder_with_two_books("local-pdf-plan-preview");
+    let source = local_pdf_source(&root.join("input"));
+
+    let route = preview_book_pipeline_route_with_executor(
+        &LocalPdfRoutePlanExecutor,
+        &source,
+        MODE_CONVERT_THEN_TRANSLATE,
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        execution_routes(&route),
+        [
+            ("born.pdf".to_string(), "direct_text".to_string()),
+            ("scan.pdf".to_string(), "remote_paddleocr".to_string()),
+        ],
+        "every PDF used to be routed to remote OCR regardless of its text layer"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_probe_that_cannot_run_leaves_the_pre_existing_route() {
+    // Falling back to "needs OCR" is the safe direction for a *display*: the
+    // wrapper classifies again for itself when it runs, so a failed probe costs
+    // an over-cautious chip and never an unexpected upload.
+    let root = local_pdf_folder_with_two_books("local-pdf-plan-failure");
+    let source = local_pdf_source(&root.join("input"));
+
+    let route = preview_book_pipeline_route_with_executor(
+        &LocalPdfRoutePlanFailingExecutor,
+        &source,
+        MODE_CONVERT_THEN_TRANSLATE,
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let kinds: Vec<_> = execution_routes(&route)
+        .into_iter()
+        .map(|(_, kind)| kind)
+        .collect();
+    assert_eq!(kinds, ["remote_paddleocr", "remote_paddleocr"]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_text_layer_probe_runs_offline_in_the_ocr_workspace() {
+    let root = local_pdf_folder_with_two_books("local-pdf-plan-command");
+    let input = root.join("input");
+    let wrapper_root = fake_wrapper_root(&root);
+
+    let command = build_local_pdf_route_plan_command(&display_path(&input), &wrapper_root).unwrap();
+
+    assert_runs_in_the_ocr_workspace(&command, "pdf_to_html_paddleocr.py");
+    assert!(has_arg_pair(
+        &command.args,
+        "--input-dir",
+        &display_path(&input)
+    ));
+    assert!(command.args.iter().any(|arg| arg == "--route-plan-only"));
+    // Sampling a text layer is PyMuPDF reading five pages. A probe that could
+    // reach the paid API would defeat the point of asking.
+    assert!(command.env.is_empty());
+    assert!(!command.args.iter().any(|arg| arg == "--output-dir"));
+    // The runner hangs its live-progress file off output_dir and deletes it
+    // first, so this must never be the user's own book folder.
+    assert_ne!(command.output_dir, input);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_folder_with_no_pdf_in_it_is_never_probed() {
+    struct NeverRuns;
+    impl RunnerCommandExecutor for NeverRuns {
+        fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+            panic!("nothing to classify, yet {} ran", command.label);
+        }
+    }
+    let root = temp_root("local-pdf-plan-empty");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+
+    let plan = local_pdf_route_plan(&NeverRuns, &local_pdf_source(&input), &root);
+
+    assert!(plan.routes.is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_empty_folder_placeholder_names_no_engine() {
+    // The row stands for a folder nothing was found in, so it cannot be a
+    // decision about a book. Claiming PaddleOCR here read as an OCR bill for a
+    // folder that has nothing to convert.
+    let root = temp_root("local-pdf-empty-placeholder");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+
+    let route = preview_local_pdf_folder(&local_pdf_source(&input), &LocalPdfRoutePlan::default());
+
+    assert_eq!(route.len(), 1);
+    assert_eq!(route[0].route_kind, "local_pdf_folder");
+    assert!(!OVERRIDABLE_ROUTE_KINDS.contains(&route[0].route_kind.as_str()));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn plan_lines_are_read_and_anything_else_is_ignored() {
+    let marker = LOCAL_PDF_ROUTE_PLAN_MARKER;
+    let schema = LOCAL_PDF_ROUTE_PLAN_SCHEMA;
+    let plan = parse_local_pdf_route_plan(&format!(
+        "12:00:00 INFO Books to process: 2\n\
+         12:00:00 INFO {marker}{{\"schemaVersion\":\"{schema}\",\"path\":\"/books/born.pdf\",\"route\":\"direct_text\"}}\n\
+         12:00:00 INFO {marker}{{\"schemaVersion\":\"local-pdf-route-plan-v0\",\"path\":\"/books/old.pdf\",\"route\":\"direct_text\"}}\n\
+         12:00:00 INFO {marker}not json at all\n"
+    ));
+
+    assert_eq!(plan.route_for(Path::new("/books/born.pdf")), "direct_text");
+    // A schema the launcher does not understand is not a routing decision it
+    // may act on, so the book keeps the cautious route.
+    assert_eq!(
+        plan.route_for(Path::new("/books/old.pdf")),
+        "remote_paddleocr"
+    );
+    assert_eq!(
+        plan.route_for(Path::new("/books/never-seen.pdf")),
+        "remote_paddleocr"
+    );
+}
+
+#[test]
+fn a_forced_route_reaches_the_wrapper_instead_of_being_dropped() {
+    // Before #137 the wizard accepted "direct" on a local PDF, repainted the
+    // chip, and then ran the same unconditional upload: the override existed in
+    // the UI and nowhere else.
+    let root = local_pdf_folder_with_two_books("local-pdf-force-flags");
+    let input = root.join("input");
+    let output = root.join("output");
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let born_id = local_pdf_route_id(&input, "born.pdf");
+    let scan_id = local_pdf_route_id(&input, "scan.pdf");
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            has_mineru_credentials: false,
+            route_overrides: BTreeMap::from([
+                (born_id, "direct".into()),
+                (scan_id, "paddle".into()),
+            ]),
+        },
+    )
+    .unwrap();
+
+    let command = build_local_pdf_folder_command_for_root(&job, &output, &wrapper_root).unwrap();
+
+    assert!(has_arg_pair(&command.args, "--force-text", "born.pdf"));
+    assert!(has_arg_pair(&command.args, "--force-ocr", "scan.pdf"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_folder_change_cannot_move_an_override_to_another_pdf() {
+    let root = local_pdf_folder_with_two_books("local-pdf-stable-override");
+    let input = root.join("input");
+    let source = local_pdf_source(&input);
+    let preview = preview_book_pipeline_route_with_executor(
+        &LocalPdfRoutePlanExecutor,
+        &source,
+        MODE_CONVERT_THEN_TRANSLATE,
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let scan_id = preview
+        .iter()
+        .find(|item| item.title == "scan.pdf")
+        .unwrap()
+        .id
+        .clone();
+
+    // The folder may change after the wizard preview but before the queue-time
+    // re-probe. A positional ID would now point at born.pdf instead.
+    fs::write(input.join("aardvark.pdf"), "%PDF newly added").unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_standard_job_for_root(
+        &store,
+        &LocalPdfRoutePlanExecutor,
+        source,
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        fast_translation_intent(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            route_overrides: BTreeMap::from([(scan_id, "direct".into())]),
+            ..BookPipelinePreviewConfig::default()
+        },
+        &wrapper_root,
+    )
+    .unwrap();
+
+    let scan = job
+        .route
+        .iter()
+        .find(|item| item.title == "scan.pdf")
+        .unwrap();
+    let born = job
+        .route
+        .iter()
+        .find(|item| item.title == "born.pdf")
+        .unwrap();
+    assert_eq!(scan.route_override.as_deref(), Some("direct"));
+    assert!(born.route_override.is_none());
+
+    let command =
+        build_local_pdf_folder_command_for_root(&job, &root.join("output"), &wrapper_root).unwrap();
+    assert!(has_arg_pair(&command.args, "--force-text", "scan.pdf"));
+    assert!(!has_arg_pair(&command.args, "--force-text", "born.pdf"));
+    assert!(!has_arg_pair(&command.args, "--force-text", "aardvark.pdf"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_automatic_route_sends_no_force_flag() {
+    // The wrapper re-derives the automatic decision from the same sampler the
+    // preview used. Restating it on the command line would create a second copy
+    // of the decision for the two to drift apart on.
+    let root = local_pdf_folder_with_two_books("local-pdf-no-force-flags");
+    let output = root.join("output");
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&root.join("input")),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            ..BookPipelinePreviewConfig::default()
+        },
+    )
+    .unwrap();
+
+    let command = build_local_pdf_folder_command_for_root(&job, &output, &wrapper_root).unwrap();
+
+    assert!(!command
+        .args
+        .iter()
+        .any(|arg| arg == "--force-text" || arg == "--force-ocr"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_directly_routed_local_pdf_can_still_be_forced_back_onto_ocr() {
+    // The user has the last word on a machine-made routing call, which is only
+    // true while direct_text stays on the overridable list.
+    assert!(OVERRIDABLE_ROUTE_KINDS.contains(&"direct_text"));
+    assert!(ROUTE_OVERRIDE_TOKENS.contains(&"direct"));
+    assert!(ROUTE_OVERRIDE_TOKENS.contains(&"paddle"));
+
+    let root = local_pdf_folder_with_two_books("local-pdf-override-direct");
+    let source = local_pdf_source(&root.join("input"));
+    let born_id = local_pdf_route_id(&root.join("input"), "born.pdf");
+
+    let route = preview_book_pipeline_route_with_executor(
+        &LocalPdfRoutePlanExecutor,
+        &source,
+        MODE_CONVERT_THEN_TRANSLATE,
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            has_mineru_credentials: false,
+            route_overrides: BTreeMap::from([(born_id.clone(), "paddle".into())]),
+        },
+    )
+    .unwrap();
+
+    let born = route.iter().find(|item| item.id == born_id).unwrap();
+    assert_eq!(born.route_kind, "remote_paddleocr");
+    assert_eq!(born.route_override.as_deref(), Some("paddle"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_locally_extracted_book_hands_off_to_translation_like_any_other() {
+    // Half of the acceptance question for #137. That the extraction itself
+    // makes no remote call is asserted in packages/ocr/tests; what is checked
+    // here is the other half -- that its output still reaches the translation
+    // handoff. The direct-text route writes no `_assets` and no `.temp`, so a
+    // handoff that had come to depend on either would fail here.
+    let root = local_pdf_folder_with_two_books("local-pdf-direct-handoff");
+    let input = root.join("input");
+    let repo_root = root.join("repo");
+    fs::create_dir_all(repo_root.join("tools")).unwrap();
+    fs::write(repo_root.join("AGENTS.md"), "fixture").unwrap();
+    fs::write(
+        repo_root.join("tools").join("create_local_book_project.py"),
+        "fixture",
+    )
+    .unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let completed = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            DirectTextWrapperLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo_root),
+    )
+    .unwrap();
+
+    assert_eq!(completed.status, STATUS_READY);
+    assert_eq!(completed.current_step, "Translation handoff ready");
+    assert!(completed.last_error.is_none());
+    let markdown = completed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "markdown")
+        .expect("the extracted Markdown is registered as a markdown artifact");
+    assert!(
+        markdown.path.ends_with("Sample_Book.md"),
+        "{}",
+        markdown.path
+    );
+    let project_root = PathBuf::from(
+        completed
+            .children
+            .iter()
+            .find_map(|child| child.local_project_root.as_deref())
+            .expect("registered local project root"),
+    );
+    assert_eq!(
+        fs::read_to_string(project_root.join("source").join("source.md")).unwrap(),
+        DIRECT_TEXT_WRAPPER_MARKDOWN
+    );
     let _ = fs::remove_dir_all(root);
 }
