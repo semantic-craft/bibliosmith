@@ -6465,6 +6465,8 @@ fn local_pdf_folder_forced_to_mineru_uses_precision_batch_client() {
     let mineru_script = wrapper_root.join("mineru.py");
     fs::write(&mineru_script, "print('mineru fixture')\n").unwrap();
     let store = BookPipelineStore::for_test(&root);
+    let one_id = local_pdf_route_id(&input, "one.pdf");
+    let two_id = local_pdf_route_id(&input, "two.pdf");
     let job = queue_job(
         &store,
         local_pdf_source(&input),
@@ -6472,10 +6474,7 @@ fn local_pdf_folder_forced_to_mineru_uses_precision_batch_client() {
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: false,
             has_mineru_credentials: true,
-            route_overrides: BTreeMap::from([
-                ("local-pdf-1".into(), "mineru".into()),
-                ("local-pdf-2".into(), "mineru".into()),
-            ]),
+            route_overrides: BTreeMap::from([(one_id, "mineru".into()), (two_id, "mineru".into())]),
         },
     )
     .unwrap();
@@ -6506,6 +6505,7 @@ fn local_pdf_folder_rejects_a_mixed_mineru_and_paddle_batch() {
     let wrapper_root = fake_wrapper_root(&root);
     fs::write(wrapper_root.join("mineru.py"), "print('mineru fixture')\n").unwrap();
     let store = BookPipelineStore::for_test(&root);
+    let one_id = local_pdf_route_id(&input, "one.pdf");
     let job = queue_job(
         &store,
         local_pdf_source(&input),
@@ -6513,7 +6513,7 @@ fn local_pdf_folder_rejects_a_mixed_mineru_and_paddle_batch() {
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: true,
-            route_overrides: BTreeMap::from([("local-pdf-1".into(), "mineru".into())]),
+            route_overrides: BTreeMap::from([(one_id, "mineru".into())]),
         },
     )
     .unwrap();
@@ -15889,6 +15889,14 @@ fn local_pdf_folder_with_two_books(name: &str) -> PathBuf {
     root
 }
 
+fn local_pdf_route_id(input: &Path, file_name: &str) -> String {
+    preview_local_pdf_folder(&local_pdf_source(input), &LocalPdfRoutePlan::default())
+        .into_iter()
+        .find(|item| item.title == file_name)
+        .unwrap_or_else(|| panic!("preview did not list {file_name}"))
+        .id
+}
+
 fn execution_routes(route: &[BookPipelineRouteItem]) -> Vec<(String, String)> {
     route
         .iter()
@@ -16039,6 +16047,8 @@ fn a_forced_route_reaches_the_wrapper_instead_of_being_dropped() {
     let output = root.join("output");
     let wrapper_root = fake_wrapper_root(&root);
     let store = BookPipelineStore::for_test(&root);
+    let born_id = local_pdf_route_id(&input, "born.pdf");
+    let scan_id = local_pdf_route_id(&input, "scan.pdf");
     let job = queue_job(
         &store,
         local_pdf_source(&input),
@@ -16047,8 +16057,8 @@ fn a_forced_route_reaches_the_wrapper_instead_of_being_dropped() {
             has_paddleocr_credentials: true,
             has_mineru_credentials: false,
             route_overrides: BTreeMap::from([
-                ("local-pdf-1".into(), "direct".into()),
-                ("local-pdf-2".into(), "paddle".into()),
+                (born_id, "direct".into()),
+                (scan_id, "paddle".into()),
             ]),
         },
     )
@@ -16058,6 +16068,66 @@ fn a_forced_route_reaches_the_wrapper_instead_of_being_dropped() {
 
     assert!(has_arg_pair(&command.args, "--force-text", "born.pdf"));
     assert!(has_arg_pair(&command.args, "--force-ocr", "scan.pdf"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_folder_change_cannot_move_an_override_to_another_pdf() {
+    let root = local_pdf_folder_with_two_books("local-pdf-stable-override");
+    let input = root.join("input");
+    let source = local_pdf_source(&input);
+    let preview = preview_book_pipeline_route_with_executor(
+        &LocalPdfRoutePlanExecutor,
+        &source,
+        MODE_CONVERT_THEN_TRANSLATE,
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let scan_id = preview
+        .iter()
+        .find(|item| item.title == "scan.pdf")
+        .unwrap()
+        .id
+        .clone();
+
+    // The folder may change after the wizard preview but before the queue-time
+    // re-probe. A positional ID would now point at born.pdf instead.
+    fs::write(input.join("aardvark.pdf"), "%PDF newly added").unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_standard_job_for_root(
+        &store,
+        &LocalPdfRoutePlanExecutor,
+        source,
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        fast_translation_intent(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            route_overrides: BTreeMap::from([(scan_id, "direct".into())]),
+            ..BookPipelinePreviewConfig::default()
+        },
+        &wrapper_root,
+    )
+    .unwrap();
+
+    let scan = job
+        .route
+        .iter()
+        .find(|item| item.title == "scan.pdf")
+        .unwrap();
+    let born = job
+        .route
+        .iter()
+        .find(|item| item.title == "born.pdf")
+        .unwrap();
+    assert_eq!(scan.route_override.as_deref(), Some("direct"));
+    assert!(born.route_override.is_none());
+
+    let command =
+        build_local_pdf_folder_command_for_root(&job, &root.join("output"), &wrapper_root).unwrap();
+    assert!(has_arg_pair(&command.args, "--force-text", "scan.pdf"));
+    assert!(!has_arg_pair(&command.args, "--force-text", "born.pdf"));
+    assert!(!has_arg_pair(&command.args, "--force-text", "aardvark.pdf"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -16100,6 +16170,7 @@ fn a_directly_routed_local_pdf_can_still_be_forced_back_onto_ocr() {
 
     let root = local_pdf_folder_with_two_books("local-pdf-override-direct");
     let source = local_pdf_source(&root.join("input"));
+    let born_id = local_pdf_route_id(&root.join("input"), "born.pdf");
 
     let route = preview_book_pipeline_route_with_executor(
         &LocalPdfRoutePlanExecutor,
@@ -16108,12 +16179,12 @@ fn a_directly_routed_local_pdf_can_still_be_forced_back_onto_ocr() {
         BookPipelinePreviewConfig {
             has_paddleocr_credentials: true,
             has_mineru_credentials: false,
-            route_overrides: BTreeMap::from([("local-pdf-1".into(), "paddle".into())]),
+            route_overrides: BTreeMap::from([(born_id.clone(), "paddle".into())]),
         },
     )
     .unwrap();
 
-    let born = route.iter().find(|item| item.id == "local-pdf-1").unwrap();
+    let born = route.iter().find(|item| item.id == born_id).unwrap();
     assert_eq!(born.route_kind, "remote_paddleocr");
     assert_eq!(born.route_override.as_deref(), Some("paddle"));
     let _ = fs::remove_dir_all(root);

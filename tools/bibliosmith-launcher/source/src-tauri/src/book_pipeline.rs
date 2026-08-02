@@ -9306,15 +9306,21 @@ fn local_file_route_items(
     let epub = extension == "epub";
     paths
         .iter()
-        .enumerate()
-        .map(|(index, path)| {
+        .map(|path| {
             let route_kind = if epub {
                 "epub_source"
             } else {
                 plan.route_for(path)
             };
             BookPipelineRouteItem {
-                id: format!("local-{extension}-{}", index + 1),
+                // Overrides are keyed by this ID across the wizard preview and
+                // the queue-time re-probe. A sorted position can move to a
+                // different book when the folder changes; the source path
+                // cannot, and its digest keeps private paths out of job IDs.
+                id: format!(
+                    "local-{extension}-{}",
+                    sha256_str(&display_path(path))
+                ),
                 title: path
                     .file_name()
                     .and_then(|name| name.to_str())

@@ -735,6 +735,7 @@ def extract_book_text(
     html_path = book_output_dir / f"{safe_name}.html"
     md_path = book_output_dir / f"{safe_name}.md"
     state_path = book_output_dir / "_state.json"
+    assets_dir = book_output_dir / f"{safe_name}_assets"
 
     operation_progress.update_item(book_name, 0, "extracting")
     logging.info("[%s] Extracting the embedded text layer…", book_name)
@@ -745,6 +746,15 @@ def extract_book_text(
         extracted.engine,
         f" ({extracted.fallback_reason})" if extracted.fallback_reason else "",
     )
+
+    # A book can be re-routed after an earlier OCR run. The launcher carries a
+    # sibling `_assets` directory into the translation project, so leaving that
+    # sidecar behind would attach stale OCR figures to the new text-layer output.
+    # Wait until extraction succeeds before retiring the earlier route's files.
+    if assets_dir.is_symlink() or assets_dir.is_file():
+        assets_dir.unlink()
+    elif assets_dir.is_dir():
+        shutil.rmtree(assets_dir)
 
     full_md = f"# {book_name}\n\n{extracted.markdown}".rstrip() + "\n"
     md_path.write_text(full_md, encoding="utf-8")

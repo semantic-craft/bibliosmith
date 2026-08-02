@@ -249,6 +249,20 @@ def test_the_direct_route_leaves_no_empty_assets_sidecar(tmp_path: Path) -> None
     assert not (output_dir / "Born_Digital" / "Born_Digital_assets").exists()
 
 
+def test_the_direct_route_removes_assets_left_by_an_earlier_ocr_run(
+    tmp_path: Path,
+) -> None:
+    """Changing routes must not hand stale OCR figures to translation."""
+    output_dir = tmp_path / "output"
+    stale_assets = output_dir / "Born_Digital" / "Born_Digital_assets"
+    stale_assets.mkdir(parents=True)
+    (stale_assets / "stale-figure.png").write_bytes(b"stale OCR figure")
+
+    run_direct(tmp_path)
+
+    assert not stale_assets.exists()
+
+
 def test_the_direct_route_records_the_engine_it_used(tmp_path: Path) -> None:
     _, output_dir = run_direct(tmp_path)
 
