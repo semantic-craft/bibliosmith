@@ -84,15 +84,20 @@ jobs:
       # templates, and the digest package. Some of them shell out to node, which
       # this runner provides.
       #
-      # tools/ holds two more suites that live outside both tests/ and
+      # tools/ holds three more suites that live outside both tests/ and
       # packages/, so nothing was running them either: the commit-message
-      # validator that the commit-messages job below depends on, and the
-      # bilingual EPUB builder script. Both are stdlib-only.
+      # validator that the commit-messages job below depends on, the bilingual
+      # EPUB builder script, and the PDF→Markdown conversion benchmark. All
+      # three are stdlib-only. The benchmark suite covers its metric
+      # definitions and its agreement with the shipped renderer; the one test
+      # that needs PyMuPDF skips itself where PyMuPDF is absent, which is the
+      # case in this step's environment.
       - name: Repository suites
         run: |
           uv run --package digest pytest \
             tests \
             tools/git \
+            tools/pdf_benchmark \
             tools/bibliosmith-launcher/source/scripts/tests
 
   launcher-frontend:
