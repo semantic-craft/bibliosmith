@@ -7404,6 +7404,19 @@ fn build_local_pdf_folder_command_for_root(
         .iter()
         .filter(|route| route.can_run && route.route_kind != "translation_handoff")
         .collect();
+    let epub_routes = runnable_routes
+        .iter()
+        .filter(|route| route.route_kind == "epub_source")
+        .count();
+    if epub_routes > 0 {
+        if epub_routes != runnable_routes.len() {
+            return Err(
+                "One local job cannot mix EPUB extraction with PDF conversion. Split the files into separate jobs so neither route silently swallows the other's books."
+                    .into(),
+            );
+        }
+        return build_epub_extract_command(job, output_dir, root);
+    }
     let mineru_routes = runnable_routes
         .iter()
         .filter(|route| route.route_kind == "mineru")
@@ -7465,6 +7478,49 @@ fn build_local_pdf_folder_command_for_root(
             ]);
             args
         },
+        env: Vec::new(),
+        cwd: Some(root.to_path_buf()),
+        output_dir: output_dir.to_path_buf(),
+        attempts: job.attempts,
+        accepted_exit_codes: vec![0],
+    })
+}
+
+/// Extract stage for the `epub_source` route: the EPUB extractor, no OCR.
+///
+/// `--input` is the source path as the user gave it — a dropped `.epub` arrives
+/// as the file itself, a chosen folder as the directory — and the script accepts
+/// either. Nothing about this command needs credentials or the network, so it is
+/// the one conversion route that runs fully offline.
+fn build_epub_extract_command(
+    job: &BookPipelineJob,
+    output_dir: &Path,
+    root: &Path,
+) -> Result<RunnerCommand, String> {
+    let input = job
+        .source
+        .path
+        .as_deref()
+        .ok_or_else(|| "Local EPUB source is missing a path.".to_string())?;
+    let script = root.join("scripts").join("epub_to_markdown.py");
+    if !script.is_file() {
+        return Err(format!(
+            "EPUB extractor not found at {}",
+            display_path(&script)
+        ));
+    }
+    let mut args = ocr_python_args(&script);
+    args.extend([
+        "--input".into(),
+        input.into(),
+        "--output-dir".into(),
+        display_path(output_dir),
+    ]);
+    Ok(RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: EPUB_EXTRACT_COMMAND_LABEL.into(),
+        program: PathBuf::from("uv"),
+        args,
         env: Vec::new(),
         cwd: Some(root.to_path_buf()),
         output_dir: output_dir.to_path_buf(),
@@ -9071,8 +9127,14 @@ fn preview_external_adapter(source: &BookPipelineSource) -> Vec<BookPipelineRout
 
 fn preview_local_pdf_folder(source: &BookPipelineSource) -> Vec<BookPipelineRouteItem> {
     let folder = source.path.as_deref().unwrap_or("");
-    let pdfs = pdf_files(folder);
-    if pdfs.is_empty() {
+    // An EPUB settles its own route: the book already carries the structure OCR
+    // would have to recover, so the extractor replaces OCR rather than preceding
+    // it and no credential check applies. Both file kinds are listed when the
+    // folder holds both, so the preflight names every book it found; the command
+    // builder is where a mixed batch is refused, with the reason.
+    let epubs = local_file_route_items(&epub_files(folder), "epub");
+    let pdfs = local_file_route_items(&pdf_files(folder), "pdf");
+    if epubs.is_empty() && pdfs.is_empty() {
         return vec![BookPipelineRouteItem {
             id: "local-pdf-folder".into(),
             title: source_title(source),
@@ -9089,22 +9151,32 @@ fn preview_local_pdf_folder(source: &BookPipelineSource) -> Vec<BookPipelineRout
             route_override: None,
         }];
     }
+    epubs.into_iter().chain(pdfs).collect()
+}
 
-    pdfs.into_iter()
+fn local_file_route_items(paths: &[PathBuf], extension: &str) -> Vec<BookPipelineRouteItem> {
+    let epub = extension == "epub";
+    paths
+        .iter()
         .enumerate()
         .map(|(index, path)| BookPipelineRouteItem {
-            id: format!("local-pdf-{}", index + 1),
+            id: format!("local-{extension}-{}", index + 1),
             title: path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("PDF")
+                .unwrap_or(extension)
                 .to_string(),
             source_kind: "local_pdf_folder".into(),
-            source_ref: display_path(&path),
-            route_kind: "remote_paddleocr".into(),
+            source_ref: display_path(path),
+            route_kind: if epub { "epub_source" } else { "remote_paddleocr" }.into(),
             can_run: true,
             blocked_reason: None,
-            summary: "Run through scripts/pdf_to_html_paddleocr.py from packages/ocr.".into(),
+            summary: if epub {
+                "Extract EPUB chapters straight to Markdown through scripts/epub_to_markdown.py; no OCR engine runs."
+            } else {
+                "Run through scripts/pdf_to_html_paddleocr.py from packages/ocr."
+            }
+            .into(),
             route_override: None,
         })
         .collect()
@@ -9236,6 +9308,20 @@ fn scan_artifacts(output_dir: &Path) -> Result<Vec<BookPipelineArtifact>, String
     Ok(artifacts)
 }
 
+/// Is this a sidecar directory of supporting files for a Markdown file?
+///
+/// Name-only, because `collect_artifacts` and the chapter rewrite meet these
+/// directories without a Markdown path to derive them from.
+fn is_markdown_sidecar_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            MARKDOWN_SIDECAR_SUFFIXES
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        })
+}
+
 /// `.state/chunks` under an OCR output root, where `zotero_llm_worker.py` splits
 /// a long book into page ranges before uploading them. Those splits are PDFs, so
 /// once `artifact_kind` learned to recognise PDFs they would otherwise be
@@ -9261,10 +9347,11 @@ fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> R
         let entry = entry.map_err(|err| err.to_string())?;
         let path = entry.path();
         if path.is_dir() {
-            // A sibling *.mineru tree is supporting material for its cleaned
+            // A sibling sidecar tree is supporting material for its cleaned
             // Markdown, not a second set of handoff candidates. In particular,
-            // MinerU's per-part Markdown must never outrank the assembled file.
-            if path.extension().and_then(|extension| extension.to_str()) == Some("mineru") {
+            // MinerU's per-part Markdown must never outrank the assembled file,
+            // and an EPUB extraction's images must not be walked for artifacts.
+            if is_markdown_sidecar_dir(&path) {
                 continue;
             }
             // The OCR engine comparison is evidence for choosing a route, not
@@ -9411,34 +9498,40 @@ fn create_translation_handoff_project_with_title(
 
 /// The sibling directory a cleaned Markdown file needs in order to render.
 ///
-/// MinerU writes `<stem>.mineru`. The PaddleOCR wrapper writes `<stem>_assets`
-/// and rewrites every image reference in the Markdown to the relative path
-/// `<stem>_assets/<file>`, so that directory has to travel with the file or the
-/// handed-off project has a figure link pointing at nothing.
+/// MinerU writes `<stem>.mineru`. The PaddleOCR wrapper and the EPUB extractor
+/// write `<stem>_assets` and rewrite every image reference in the Markdown to
+/// the relative path `<stem>_assets/<file>`, so that directory has to travel
+/// with the file or the handed-off project has a figure link pointing at
+/// nothing. Both spellings come from `MARKDOWN_SIDECAR_SUFFIXES` rather than
+/// being repeated here: `is_markdown_sidecar_dir` has to agree with this
+/// function, and two lists would be one more place for them to disagree.
 ///
-/// The `<stem>_assets` convention only holds where the Markdown still has its
-/// original name. Translate-only staging copies the file to `source.md` and
-/// leaves its links pointing at the directory they were written for, so the
-/// last resort is to read the Markdown and take the directory it actually
-/// references. Reading it is deliberate: rewriting the links to match a
-/// convention would edit the book's own prose.
+/// Naming alone only settles it while the Markdown still has its original
+/// name. Translate-only staging copies the file to `source.md` and leaves its
+/// links pointing at the directory they were written for, so the last resort is
+/// to read the Markdown and take the sidecar directory it actually references.
+/// Reading it is deliberate: rewriting the links to match the convention would
+/// edit the book's own prose.
 fn markdown_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
-    let mineru = markdown_path.with_extension("mineru");
-    if mineru.is_dir() {
-        return Some(mineru);
-    }
     if let Some(stem) = markdown_path.file_stem().and_then(|name| name.to_str()) {
-        let assets = markdown_path.with_file_name(format!("{stem}_assets"));
-        if assets.is_dir() {
-            return Some(assets);
+        if let Some(named) = MARKDOWN_SIDECAR_SUFFIXES
+            .iter()
+            .map(|suffix| markdown_path.with_file_name(format!("{stem}{suffix}")))
+            .find(|candidate| candidate.is_dir())
+        {
+            return Some(named);
         }
     }
     referenced_resource_directory(markdown_path)
 }
 
-/// The one sibling directory every relative reference in `markdown_path` points
+/// The one sidecar directory every relative reference in `markdown_path` points
 /// into. `None` unless the references agree on exactly one existing directory,
 /// so an ambiguous document is left alone rather than half-copied.
+///
+/// The directory still has to be a sidecar by name. Anything else would be
+/// copied here and then walked by `collect_artifacts`, which skips sidecars and
+/// would otherwise register the book's own resources as job artifacts.
 fn referenced_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
     let parent = markdown_path.parent()?;
     let text = fs::read_to_string(markdown_path).ok()?;
@@ -9454,7 +9547,7 @@ fn referenced_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
             continue;
         }
         let candidate = parent.join(first);
-        if !candidate.is_dir() {
+        if !candidate.is_dir() || !is_markdown_sidecar_dir(&candidate) {
             return None;
         }
         directories.insert(candidate);
@@ -9464,37 +9557,6 @@ fn referenced_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
         _ => None,
     }
 }
-
-/// Relative link targets in `text`: the `(...)` of a Markdown link or image.
-/// Absolute paths, URLs and fragments are skipped — none of them name a
-/// directory that travels with the file.
-fn markdown_relative_references(text: &str) -> Vec<String> {
-    let mut references = Vec::new();
-    let mut index = 0;
-    while let Some(open) = text[index..].find("](") {
-        let start = index + open + 2;
-        let Some(close) = text[start..].find(')') else {
-            break;
-        };
-        let end = start + close;
-        index = end + 1;
-        let target = text[start..end]
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim();
-        if target.is_empty()
-            || target.starts_with('#')
-            || target.starts_with('/')
-            || target.contains("://")
-            || target.starts_with("mailto:")
-            || Path::new(target).is_absolute()
-        {
-            continue;
-        }
-        references.push(target.to_string());
-    }
-    references
 }
 
 fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
@@ -9717,22 +9779,42 @@ fn clean_path_component(value: &str) -> String {
 }
 
 fn pdf_files(folder: &str) -> Vec<PathBuf> {
+    files_with_extension(folder, "pdf")
+}
+
+/// EPUB inputs the local route can extract without any OCR at all.
+///
+/// A dropped `.epub` arrives as the file's own path (`droppedFolder` in the
+/// input island only rewrites a `.pdf` to its folder, because the PDF wrapper
+/// takes a directory), so both shapes have to be understood here.
+fn epub_files(path: &str) -> Vec<PathBuf> {
+    let candidate = Path::new(path);
+    if candidate.is_file() {
+        if has_extension(candidate, "epub") {
+            return vec![candidate.to_path_buf()];
+        }
+        return Vec::new();
+    }
+    files_with_extension(path, "epub")
+}
+
+fn files_with_extension(folder: &str, extension: &str) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(folder) else {
         return Vec::new();
     };
-    let mut pdfs: Vec<_> = entries
+    let mut files: Vec<_> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-        })
+        .filter(|path| path.is_file() && has_extension(path, extension))
         .collect();
-    pdfs.sort();
-    pdfs
+    files.sort();
+    files
+}
+
+fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
 }
 
 fn markdown_source_path(source: &BookPipelineSource) -> Result<PathBuf, String> {
@@ -10630,7 +10712,7 @@ fn run_split_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Strin
         .map_err(|_| "Source Markdown is missing; run the handoff stage first.".to_string())?;
     let source_sha256 = sha256_str(&source_text);
     let source_text =
-        rewrite_mineru_asset_references_for_chapters(&project_root.join("source"), &source_text)?;
+        rewrite_sidecar_asset_references_for_chapters(&project_root.join("source"), &source_text)?;
     let plan = split_source_markdown(&source_text);
 
     let src_dir = project_root.join("chapters").join("src");
@@ -10714,18 +10796,15 @@ fn run_split_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Strin
     })
 }
 
-fn rewrite_mineru_asset_references_for_chapters(
+fn rewrite_sidecar_asset_references_for_chapters(
     source_dir: &Path,
     markdown: &str,
 ) -> Result<String, String> {
     let mut directory_names = fs::read_dir(source_dir)
         .map_err(|err| err.to_string())?
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            name.ends_with(".mineru").then_some(name)
-        })
+        .filter(|entry| entry.path().is_dir() && is_markdown_sidecar_dir(&entry.path()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
         .collect::<Vec<_>>();
     directory_names.sort();
     let mut rewritten = markdown.to_string();
