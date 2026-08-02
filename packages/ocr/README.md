@@ -34,6 +34,7 @@ Known monorepo/package roots:
 - `docs/MIGRATION.md`: Windows worker split from the previous translation workspace.
 - `paddle.py`: single-file Baidu AI Studio `PaddleOCR-VL-1.6` client.
 - `mineru.py`: single-file MinerU Precision Extract API client.
+- `pdf_text.py`: single-file no-OCR extractor, pdf-inspector for structure with PyMuPDF underneath it.
 - `requirements-win.txt`: Windows runner dependency set.
 - `scripts/zotero_llm_worker.py`: main worker.
 - `scripts/run_windows.ps1`: Windows task dispatcher.
