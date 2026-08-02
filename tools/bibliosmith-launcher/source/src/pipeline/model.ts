@@ -566,6 +566,7 @@ export function routeKindLabel(routeKind: string, copy: PipelineCopy): string {
     translation_ready: copy.routeTranslationReady,
     external_adapter: copy.routeExternalAdapter,
     epub_source: copy.routeEpubSource,
+    local_pdf_folder: copy.routeLocalPdfFolder,
   };
   return labels[routeKind] ?? routeKind.replaceAll("_", " ");
 }

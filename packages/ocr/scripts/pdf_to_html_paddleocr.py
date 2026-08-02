@@ -1,22 +1,49 @@
 #!/usr/bin/env python3
 """
-Standalone PDF -> HTML converter using Baidu AI Studio PaddleOCR-VL-1.6.
+Local PDF folder converter: direct text extraction, or Baidu PaddleOCR-VL-1.6.
 
+Every book is routed before anything is uploaded. A born-digital PDF carries the
+text already, so it is extracted locally and costs nothing; only a scan or a
+low-text document goes to the paid remote OCR. Before #137 this folder route
+uploaded every PDF unconditionally, which on the live corpus meant paying for
+roughly nine books in ten that a local reader could have handled — a 600-page
+book is 50 remote round trips at 12 pages a chunk.
+
+The routing question is the one `zotero_llm_worker.sample_text_layer()` already
+answers on the Zotero side, and it is imported from there rather than restated:
+PyMuPDF's non-space character count over five sampled pages. pdf-inspector's own
+per-page OCR flags are deliberately not consulted — on this corpus they flag
+hundreds of pages that PyMuPDF reads perfectly well, so they would put the paid
+route back. See docs/planning/pdf-inspector-adoption.md.
+
+Direct text route:
+- packages/ocr/pdf_text.py extracts structured Markdown (pdf-inspector, with a
+  PyMuPDF fallback), which is then rendered to standalone HTML
+- no network call of any kind is made
+
+Remote OCR route:
 - Splits PDF into page chunks (max 12 pages / 49 MB per job)
 - Submits to Baidu PaddleOCR async API
 - Polls for completion, downloads JSONL results
 - Extracts markdown text + images
 - Downloads images locally, renders markdown to standalone HTML
-- Writes the assembled markdown next to the HTML as <book>/<book>.md
+
+Both routes write <book>/<book>.md next to <book>/<book>.html, which is what the
+translation handoff picks up.
 
 Usage:
     /opt/homebrew/bin/python3.11 scripts/pdf_to_html_paddleocr.py \
         --input-dir "编程书" \
         --output-dir output/html_books \
         [--workers 2] \
-        [--limit-books 1]
+        [--limit-books 1] \
+        [--force-text "Some Book.pdf"] \
+        [--force-ocr "Scanned Book.pdf"] \
+        [--route-plan-only]
 
-Requires BAIDU_PADDLEOCR_TOKEN in the process environment or monorepo-root .env.
+BAIDU_PADDLEOCR_TOKEN is required in the process environment or monorepo-root
+.env only when at least one book actually routes to remote OCR. A folder of
+born-digital books converts with no credential configured at all.
 """
 
 from __future__ import annotations
@@ -36,13 +63,23 @@ import unicodedata
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from progress import OperationProgress
 
 import markdown
 import requests
+
+APP_ROOT = Path(__file__).resolve().parents[1]
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+# The extractor and the classifier the Zotero route already uses, imported
+# rather than reimplemented: one routing decision and one extraction engine
+# across both entry points is the whole point of #137.
+import pdf_text  # noqa: E402
+import zotero_llm_worker  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # PDF tooling
@@ -65,6 +102,21 @@ DEFAULT_BAIDU_JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 DEFAULT_BAIDU_MODEL = "PaddleOCR-VL-1.6"
 LAYOUT_MODELS = {DEFAULT_BAIDU_MODEL, "PaddleOCR-VL-1.5", "PaddleOCR-VL", "PP-StructureV3"}
 NETWORK_RETRY_DELAYS = (3, 6, 12, 24, 30)
+
+# The two routes a PDF in a local folder can take. The names are the launcher's
+# own route kinds (book_pipeline.rs), so a plan line can be read straight into a
+# route item without a translation table in between.
+ROUTE_DIRECT_TEXT = "direct_text"
+ROUTE_REMOTE_PADDLEOCR = "remote_paddleocr"
+#: Marker the launcher greps for when it previews a folder. Same shape as the
+#: Zotero worker's BOOK_PIPELINE_ATTACHMENT_EVIDENCE: prefix, then one JSON
+#: object per line, carrying its own schema version.
+ROUTE_PLAN_MARKER = "BOOK_PIPELINE_LOCAL_PDF_ROUTE"
+ROUTE_PLAN_SCHEMA = "local-pdf-route-plan-v1"
+MISSING_TOKEN_MESSAGE = (
+    "BAIDU_PADDLEOCR_TOKEN is not set. "
+    "Export it or add it to .env in the monorepo root."
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -131,15 +183,17 @@ def load_root_dotenv(start: Path = Path(__file__).resolve().parent) -> None:
 
 
 def load_config() -> Config:
+    """Read the run's settings; a missing OCR credential is not an error here.
+
+    It used to be: the token was demanded before a single PDF had been looked
+    at, so a folder of born-digital books could not be converted at all without
+    a paid account it was never going to use. The check moved to
+    `require_ocr_credential()`, which runs once the routing plan says some book
+    really is going to the remote engine.
+    """
     load_root_dotenv()
-    token = os.environ.get("BAIDU_PADDLEOCR_TOKEN", "").strip()
-    if not token:
-        raise ConverterError(
-            "BAIDU_PADDLEOCR_TOKEN is not set. "
-            "Export it or add it to .env in the monorepo root."
-        )
     return Config(
-        baidu_token=token,
+        baidu_token=os.environ.get("BAIDU_PADDLEOCR_TOKEN", "").strip(),
         baidu_job_url=os.environ.get("BAIDU_PADDLEOCR_JOB_URL", DEFAULT_BAIDU_JOB_URL).rstrip("/"),
         baidu_model=os.environ.get("BAIDU_PADDLEOCR_MODEL", DEFAULT_BAIDU_MODEL).strip() or DEFAULT_BAIDU_MODEL,
         max_ocr_pages_per_job=int(os.environ.get("MAX_OCR_PAGES_PER_JOB", "12")),
@@ -152,6 +206,102 @@ def load_config() -> Config:
 
 def is_layout_model(config: Config) -> bool:
     return config.baidu_model in LAYOUT_MODELS
+
+
+def require_ocr_credential(config: Config) -> None:
+    if not config.baidu_token:
+        raise ConverterError(MISSING_TOKEN_MESSAGE)
+
+# ---------------------------------------------------------------------------
+# Routing
+# ---------------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def text_layer_thresholds() -> Any:
+    """The worker's Config, read once, for its text-sampling thresholds.
+
+    `get_config()` needs no credential of any kind — every field it reads has a
+    default — so this is safe to call on a machine with nothing configured. It
+    is cached because it re-parses the environment and the root `.env` on every
+    call and the answer cannot change inside one run.
+    """
+    return zotero_llm_worker.get_config()
+
+
+def classify_route(pdf_path: Path, page_count: int, thresholds: Any) -> tuple[str, str]:
+    """Decide whether this book needs the paid engine, and say why.
+
+    Deliberately the PyMuPDF character count and nothing else. A degraded text
+    layer — the mojibake case, where the glyphs did not survive extraction —
+    routes to OCR here rather than to the Zotero route's manual MinerU review:
+    this entry point has no review step to hold a book in, and re-reading a
+    broken text layer is the one case where paying for OCR is the right answer.
+    """
+    sample = zotero_llm_worker.sample_text_layer(pdf_path, page_count, thresholds)
+    if sample.degraded:
+        return ROUTE_REMOTE_PADDLEOCR, f"degraded text layer ({sample.reason})"
+    if sample.extractable:
+        return (
+            ROUTE_DIRECT_TEXT,
+            f"extractable text chars={sample.chars} sample_pages={sample.sample_pages}",
+        )
+    return (
+        ROUTE_REMOTE_PADDLEOCR,
+        f"low extractable text chars={sample.chars} sample_pages={sample.sample_pages}",
+    )
+
+
+def plan_routes(
+    pdf_files: list[Path],
+    *,
+    force_text: Iterable[str] = (),
+    force_ocr: Iterable[str] = (),
+) -> dict[Path, tuple[str, str]]:
+    """Route every book in the batch, honouring the launcher's overrides first.
+
+    A forced book is never sampled: the user's re-route in the wizard is the
+    decision, and re-deriving one that disagrees with the chip they were shown
+    is exactly the drift this function exists to prevent. Names are matched
+    exactly against the file name, which is what `book_pipeline.rs` sends.
+    """
+    forced_text = set(force_text)
+    forced_ocr = set(force_ocr)
+    for name in sorted(forced_text & forced_ocr):
+        raise ConverterError(f"{name} was forced to both text extraction and OCR")
+    named = {path.name for path in pdf_files}
+    for name in sorted((forced_text | forced_ocr) - named):
+        logging.warning("Route override for %r matches no PDF in this folder", name)
+
+    plan: dict[Path, tuple[str, str]] = {}
+    for path in pdf_files:
+        if path.name in forced_text:
+            plan[path] = (ROUTE_DIRECT_TEXT, "forced by route override")
+        elif path.name in forced_ocr:
+            plan[path] = (ROUTE_REMOTE_PADDLEOCR, "forced by route override")
+        else:
+            try:
+                page_count = pdf_page_count(path)
+            except Exception as exc:  # noqa: BLE001 - one unreadable file must not end the run
+                plan[path] = (ROUTE_REMOTE_PADDLEOCR, f"page count failed: {exc}")
+                continue
+            plan[path] = classify_route(path, page_count, text_layer_thresholds())
+    return plan
+
+
+def emit_route_plan(plan: dict[Path, tuple[str, str]]) -> None:
+    """Publish the plan on the log stream for the launcher's route preview."""
+    for path, (route, reason) in plan.items():
+        payload = {
+            "schemaVersion": ROUTE_PLAN_SCHEMA,
+            "path": str(path),
+            "name": path.name,
+            "route": route,
+            "reason": reason,
+        }
+        logging.info(
+            "%s %s",
+            ROUTE_PLAN_MARKER,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        )
 
 # ---------------------------------------------------------------------------
 # PDF helpers
@@ -253,6 +403,9 @@ def make_chunk_specs(source: Path, pages: list[int], chunk_dir: Path, max_bytes:
 # ---------------------------------------------------------------------------
 class BaiduOCRClient:
     def __init__(self, config: Config):
+        # The last gate before anything is uploaded: no code path may reach the
+        # paid API without a credential, whatever the routing plan said.
+        require_ocr_credential(config)
         self.config = config
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"bearer {config.baidu_token}"})
@@ -554,6 +707,76 @@ def md_to_html(md_text: str) -> str:
 # ---------------------------------------------------------------------------
 # Core conversion for one book
 # ---------------------------------------------------------------------------
+def extract_book_text(
+    pdf_path: Path,
+    output_dir: Path,
+    operation_progress: OperationProgress,
+    output_name: str | None = None,
+) -> Path:
+    """Convert one born-digital PDF locally. Returns path to the HTML file.
+
+    Same output shape as the OCR route — `<book>/<book>.md` beside
+    `<book>/<book>.html` and a `_state.json` — because the launcher scans the
+    job output tree for artifacts and the translation handoff reads the
+    Markdown; a book converted this way has to be indistinguishable downstream
+    from one that was uploaded.
+
+    No `_assets` directory: a text layer has no images to download, and an empty
+    sidecar would travel into every reading project for nothing.
+
+    The whole document is rewritten on every run rather than resumed. Local
+    extraction is free and takes seconds, so there is nothing to resume from and
+    a rerun after a fix must not leave the previous text in place.
+    """
+    book_name = pdf_path.stem
+    safe_name = output_name or safe_filename(book_name, max_len=120)
+    book_output_dir = output_dir / safe_name
+    book_output_dir.mkdir(parents=True, exist_ok=True)
+    html_path = book_output_dir / f"{safe_name}.html"
+    md_path = book_output_dir / f"{safe_name}.md"
+    state_path = book_output_dir / "_state.json"
+
+    operation_progress.update_item(book_name, 0, "extracting")
+    logging.info("[%s] Extracting the embedded text layer…", book_name)
+    extracted = pdf_text.extract_markdown(pdf_path)
+    logging.info(
+        "[%s] Extracted with %s%s",
+        book_name,
+        extracted.engine,
+        f" ({extracted.fallback_reason})" if extracted.fallback_reason else "",
+    )
+
+    full_md = f"# {book_name}\n\n{extracted.markdown}".rstrip() + "\n"
+    md_path.write_text(full_md, encoding="utf-8")
+    html_path.write_text(
+        build_html(title=book_name, body_html=md_to_html(full_md)), encoding="utf-8"
+    )
+    state_path.write_text(
+        json.dumps(
+            {
+                "source_name": pdf_path.name,
+                "route": ROUTE_DIRECT_TEXT,
+                "engine": extracted.engine,
+                "fallback_reason": extracted.fallback_reason,
+                "running_heads_removed": list(extracted.running_heads),
+                "chunks_done": [],
+                "pages_total": extracted.page_count,
+                "pages_done": extracted.page_count,
+                "markdown_path": str(md_path),
+                "html_path": str(html_path),
+                "image_count": 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    operation_progress.update_item(book_name, extracted.page_count, "assembling")
+    logging.info("[%s] Markdown saved: %s", book_name, md_path)
+    logging.info("[%s] HTML saved: %s", book_name, html_path)
+    return html_path
+
+
 def process_book(
     pdf_path: Path,
     output_dir: Path,
@@ -561,15 +784,30 @@ def process_book(
     temp_root: Path,
     operation_progress: OperationProgress,
     output_name: str | None = None,
+    route: str | None = None,
 ) -> Path:
     """Convert a single PDF to markdown plus standalone HTML. Returns path to HTML file.
 
     ``output_name`` is the directory name to write under. main() passes the
     collision-free name from assign_output_names(); it falls back to the plain
     derivation when a single book is converted on its own.
+
+    ``route`` is the decision `plan_routes()` already made, which main() passes
+    down so the launcher's overrides are honoured and the book is not sampled
+    twice. ``None`` means classify here, which is what a caller converting one
+    book on its own gets.
     """
     book_name = pdf_path.stem
     safe_name = output_name or safe_filename(book_name, max_len=120)
+
+    if route is None:
+        route, reason = classify_route(
+            pdf_path, pdf_page_count(pdf_path), text_layer_thresholds()
+        )
+        logging.info("[%s] Routed to %s: %s", book_name, route, reason)
+    if route == ROUTE_DIRECT_TEXT:
+        return extract_book_text(pdf_path, output_dir, operation_progress, output_name)
+
     book_output_dir = output_dir / safe_name
     assets_dir = book_output_dir / f"{safe_name}_assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -758,23 +996,44 @@ def process_book(
 # CLI
 # ---------------------------------------------------------------------------
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PDF to HTML via PaddleOCR-VL-1.6")
+    parser = argparse.ArgumentParser(
+        description="Local PDF folder to Markdown + HTML, direct text or PaddleOCR-VL-1.6"
+    )
     parser.add_argument("--input-dir", required=True, help="Directory containing PDF files")
     parser.add_argument("--output-dir", default="output/html_books", help="Output directory")
     parser.add_argument("--workers", type=int, default=2, help="Concurrent books")
     parser.add_argument("--limit-books", type=int, default=0, help="Process only N books (0 = all)")
     parser.add_argument("--book", default="", help="Process a single book by filename substring")
+    parser.add_argument(
+        "--force-text",
+        action="append",
+        default=[],
+        metavar="FILENAME",
+        help="Extract this book's text layer locally, whatever the sample says (repeatable)",
+    )
+    parser.add_argument(
+        "--force-ocr",
+        action="append",
+        default=[],
+        metavar="FILENAME",
+        help="Send this book to remote OCR, whatever the sample says (repeatable)",
+    )
+    parser.add_argument(
+        "--route-plan-only",
+        action="store_true",
+        help="Print the routing decision for every book and exit without converting",
+    )
     args = parser.parse_args()
 
-    try:
-        config = load_config()
-    except ConverterError as exc:
-        logging.error("%s", exc)
-        return 1
+    config = load_config()
 
     input_dir = Path(args.input_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Not in plan-only mode: the launcher previews a folder with the default
+    # output directory, and creating it would leave an empty tree in the OCR
+    # package root every time the wizard looked at a folder.
+    if not args.route_plan_only:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     pdf_files = sorted([p for p in input_dir.glob("*.pdf") if p.is_file()])
     if not pdf_files:
@@ -794,9 +1053,35 @@ def main() -> int:
     if args.limit_books > 0:
         pdf_files = pdf_files[:args.limit_books]
 
-    logging.info("Books to process: %s", len(pdf_files))
+    try:
+        plan = plan_routes(
+            pdf_files, force_text=args.force_text, force_ocr=args.force_ocr
+        )
+    except ConverterError as exc:
+        logging.error("%s", exc)
+        return 1
+    emit_route_plan(plan)
+    if args.route_plan_only:
+        return 0
+
+    needs_ocr = [path for path, (route, _) in plan.items() if route != ROUTE_DIRECT_TEXT]
+    if needs_ocr and not config.baidu_token:
+        logging.error(
+            "%s Needed by: %s",
+            MISSING_TOKEN_MESSAGE,
+            ", ".join(path.name for path in needs_ocr),
+        )
+        return 1
+
+    logging.info(
+        "Books to process: %s (%s local text, %s remote OCR)",
+        len(pdf_files),
+        len(pdf_files) - len(needs_ocr),
+        len(needs_ocr),
+    )
     for p in pdf_files:
-        logging.info("  - %s (%s pages)", p.name, pdf_page_count(p))
+        route, reason = plan[p]
+        logging.info("  - %s (%s pages) -> %s: %s", p.name, pdf_page_count(p), route, reason)
         if output_names[p] != safe_filename(p.stem, max_len=120):
             logging.warning(
                 "[%s] name collides with another PDF in this folder; writing to %s",
@@ -808,7 +1093,14 @@ def main() -> int:
     temp_root.mkdir(parents=True, exist_ok=True)
 
     total_pages = sum(pdf_page_count(p) for p in pdf_files)
-    logging.info("Total pages: %s  Est. chunks: %s  Workers: %s", total_pages, (total_pages + 11) // 12, config.workers)
+    ocr_pages = sum(pdf_page_count(p) for p in needs_ocr)
+    logging.info(
+        "Total pages: %s  Est. chunks: %s (from %s pages of remote OCR)  Workers: %s",
+        total_pages,
+        (ocr_pages + 11) // 12,
+        ocr_pages,
+        config.workers,
+    )
     operation_progress = OperationProgress.from_environment(
         "extract", "pages", total=total_pages
     )
@@ -827,6 +1119,7 @@ def main() -> int:
                     temp_root,
                     operation_progress,
                     output_names[p],
+                    plan[p][0],
                 ): p
                 for p in pdf_files
             }
@@ -842,7 +1135,13 @@ def main() -> int:
         for p in pdf_files:
             try:
                 html_path = process_book(
-                    p, output_dir, config, temp_root, operation_progress, output_names[p]
+                    p,
+                    output_dir,
+                    config,
+                    temp_root,
+                    operation_progress,
+                    output_names[p],
+                    plan[p][0],
                 )
                 logging.info("DONE: %s -> %s", p.name, html_path)
             except Exception as exc:

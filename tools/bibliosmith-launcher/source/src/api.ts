@@ -181,12 +181,16 @@ function previewBookPipelineRoutes(source: BookPipelineSource, mode: string, con
         summary: "Extract EPUB chapters straight to Markdown through scripts/epub_to_markdown.py; no OCR engine runs.",
       }]);
     }
+    // Mirrors the backend's own no-books-found placeholder, which since #137
+    // names no engine: whether a PDF costs anything is a per-book question the
+    // text-layer probe answers, and the browser can neither list the folder nor
+    // run the probe.
     return withTranslationHandoff(source, mode, [{
       id: "local-pdf-folder",
       title: source.title || "Local PDF folder",
       sourceKind: "local_pdf_folder",
       sourceRef: source.path || "",
-      routeKind: "remote_paddleocr",
+      routeKind: "local_pdf_folder",
       canRun: Boolean(source.path),
       blockedReason: source.path ? null : "Choose a folder before running conversion.",
       summary: "The existing local PDF conversion wrapper will decide the PDF extraction details.",
