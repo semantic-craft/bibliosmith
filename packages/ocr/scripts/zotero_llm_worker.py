@@ -392,29 +392,14 @@ def markdown_frontmatter(metadata: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_markdown(
-    *,
-    title: str,
-    metadata: dict[str, Any],
-    pages: list[tuple[int, str]],
-) -> str:
-    body = [markdown_frontmatter(metadata), "", f"# {title}", ""]
-    for page_no, text in pages:
-        body.append(f"## Page {page_no}")
-        body.append("")
-        body.append(text if text else "[no extractable text]")
-        body.append("")
-    return "\n".join(body).rstrip() + "\n"
-
-
 def render_extracted_markdown(*, title: str, metadata: dict[str, Any], body: str) -> str:
     """Front matter, the book's title, then the document as extracted.
 
-    No per-page heading, which is the whole difference from `render_markdown()`.
-    `## Page N` is not a heading any book has, and the split stage cuts a new
-    chapter at every heading of the shallowest level it finds, so a 629-page
-    PDF came out as 629 chapters named "Page 1" through "Page 629" — the entire
-    table of contents of the finished EPUB, with no real chapter name in it.
+    No per-page heading. `## Page N` is not a heading any book has, and the
+    split stage cuts a new chapter at every heading of the shallowest level it
+    finds, so a 629-page PDF came out as 629 chapters named "Page 1" through
+    "Page 629" — the entire table of contents of the finished EPUB, with no
+    real chapter name in it.
     """
     return "\n".join([markdown_frontmatter(metadata), "", f"# {title}", "", body]).rstrip() + "\n"
 
@@ -1226,10 +1211,10 @@ def markdown_page_numbers(path: Path) -> list[int]:
 
     Two shapes, because two are in circulation: the `<!-- page: N -->` anchor
     the PaddleOCR assembler and the PyMuPDF fallback write, and the `## Page N`
-    heading carried by every file converted before the pdf-text route stopped
-    emitting one. Structured pdf-text Markdown has neither — page breaks are
-    not part of what pdf-inspector reconstructs — so its page list lives in the
-    sidecar instead; see `sidecar_page_numbers()`.
+    heading carried by files converted while a route here still emitted one.
+    No route does any more. Structured pdf-text Markdown has neither — page
+    breaks are not part of what pdf-inspector reconstructs — so its page list
+    lives in the sidecar instead; see `sidecar_page_numbers()`.
     """
     pages: list[int] = []
     pattern = re.compile(r"^(?:## Page (\d+)|<!-- page: (\d+) -->)$")
@@ -1823,7 +1808,11 @@ def process_ocr_route(
             source_path=attachment.path,
         )
         markdown_path.write_text(
-            render_markdown(title=attachment.title, metadata=metadata, pages=ocr_pages),
+            render_extracted_markdown(
+                title=attachment.title,
+                metadata=metadata,
+                body="\n\n".join(text for _page, text in ocr_pages if text),
+            ),
             encoding="utf-8",
         )
         sidecar_path.write_text("\n".join(combined_lines) + "\n", encoding="utf-8")
