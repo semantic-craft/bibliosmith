@@ -16,7 +16,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from epub_to_markdown import EpubExtractError, extract_book  # noqa: E402
+from epub_to_markdown import (  # noqa: E402
+    EpubExtractError,
+    extract_book,
+    unique_output_stems,
+)
 
 
 # A 1x1 PNG, so the sidecar copy moves real bytes.
@@ -413,3 +417,103 @@ def test_an_epub_without_a_spine_is_reported() -> None:
             assert "empty spine" in str(error)
         else:  # pragma: no cover - the call above must raise
             raise AssertionError("an empty spine should raise EpubExtractError")
+
+
+# --- Review findings on PR #119 ---------------------------------------------
+
+
+def test_an_ordinary_fragment_link_is_not_turned_into_a_footnote() -> None:
+    # A fragment href alone used to trigger a note lookup, and since every short
+    # id-bearing block is indexed as a candidate body, a plain cross-reference
+    # would pull its target paragraph out of the chapter and re-emit it as a
+    # footnote definition.
+    _, markdown, _, directory = extract(
+        {
+            "one.xhtml": xhtml(
+                '<h1>A</h1><p>See <a href="#details">the discussion</a> below.</p>'
+                '<p id="details">The discussion itself, which belongs right here.</p>'
+            )
+        }
+    )
+    with directory:
+        assert "See the discussion below." in markdown
+        assert "[^" not in markdown
+        # Still in its own place, not relocated into a definition list.
+        assert "The discussion itself, which belongs right here." in markdown
+        assert markdown.index("See the discussion") < markdown.index("The discussion itself")
+
+
+def test_a_declared_noteref_still_works_without_a_superscript() -> None:
+    _, markdown, _, directory = extract(
+        {
+            "one.xhtml": xhtml(
+                '<h1>A</h1><p>Claim<a epub:type="noteref" href="#fn1">1</a>.</p>'
+                '<p id="fn1">The note body.</p>'
+            )
+        }
+    )
+    with directory:
+        assert "Claim[^fn-1-1]." in markdown
+        assert "[^fn-1-1]: The note body." in markdown
+
+
+def test_percent_encoded_hrefs_resolve_to_their_archive_entries() -> None:
+    # Package hrefs are URI references, so a space arrives as %20 while the ZIP
+    # entry has a real space. Undecoded, the spine document is skipped and a book
+    # whose file names all have spaces yields no chapters at all.
+    directory = tempfile.TemporaryDirectory()
+    with directory:
+        root = Path(directory.name)
+        epub_path = root / "Encoded.epub"
+        with ZipFile(epub_path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("mimetype", "application/epub+zip")
+            archive.writestr("META-INF/container.xml", CONTAINER)
+            archive.writestr(
+                "OEBPS/content.opf",
+                package_document(
+                    '<item id="d0" href="chapter%201.xhtml"'
+                    ' media-type="application/xhtml+xml"/>'
+                    '<item id="img" href="my%20image.png" media-type="image/png"/>',
+                    '<itemref idref="d0"/>',
+                ),
+            )
+            archive.writestr(
+                "OEBPS/chapter 1.xhtml",
+                xhtml('<h1>Encoded</h1><p><img src="my%20image.png" alt="Fig"/></p>'),
+            )
+            archive.writestr("OEBPS/my image.png", PNG)
+
+        result = extract_book(epub_path, root / "out")
+
+        markdown = result.markdown_path.read_text(encoding="utf-8")
+        assert result.chapters == 1
+        assert markdown.startswith("# Encoded")
+        assert result.images == 1
+        assert "![Fig](Encoded_assets/my_image.png)" in markdown or "my image.png" in markdown
+
+
+def test_stems_that_fold_together_do_not_overwrite_each_other() -> None:
+    with tempfile.TemporaryDirectory() as name:
+        root = Path(name)
+        for book in ("A B.epub", "A_B.epub"):
+            build_epub(root / book, {"one.xhtml": xhtml(f"<h1>{book}</h1><p>Body.</p>")})
+
+        stems = unique_output_stems(sorted(root.glob("*.epub")))
+
+        assert len(set(stems.values())) == 2
+        assert sorted(stems.values()) == ["A_B", "A_B-2"]
+
+
+def test_a_stem_with_parentheses_cannot_end_the_image_url_early() -> None:
+    # `link_url` in the translation engine is `[^)\s]+`, so a `)` in the path
+    # ends the protected span and leaves the rest of it open to translation.
+    result, markdown, _, directory = extract(
+        {"one.xhtml": xhtml('<h1>T</h1><p><img src="images/figure.png" alt=""/></p>')},
+        {"images/figure.png": PNG},
+        name="Book (2024)",
+    )
+    with directory:
+        assert result.markdown_path.name == "Book_2024.md"
+        assert "](Book_2024_assets/figure.png)" in markdown
+        reference = markdown.split("](", 1)[1].split(")", 1)[0]
+        assert reference == "Book_2024_assets/figure.png"

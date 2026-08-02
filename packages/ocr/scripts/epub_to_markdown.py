@@ -57,6 +57,7 @@ import sys
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
@@ -298,8 +299,14 @@ def read_package(archive: ZipFile) -> Package:
 
 
 def resolve_href(base_path: str, href: str) -> str:
-    """Resolve an href against the document containing it, zip-path style."""
-    href = href.split("#", 1)[0]
+    """Resolve an href against the document containing it, zip-path style.
+
+    Package hrefs are URI references, so a space in a file name reaches us as
+    `chapter%201.xhtml` while the ZIP entry is named `chapter 1.xhtml`. Without
+    decoding, the lookup misses and the spine document is silently skipped —
+    which for a book whose file names all have spaces means no chapters at all.
+    """
+    href = unquote(href.split("#", 1)[0])
     if not href:
         return base_path
     base_directory = posixpath.dirname(base_path)
@@ -540,7 +547,13 @@ def render_image(source: str, alt: str, context: ChapterContext) -> str:
 def render_anchor(node: Element, context: ChapterContext) -> str:
     href = node.attrs.get("href", "")
     label = render_inline(node, context).strip()
-    if href.startswith("#") or is_footnote_reference(node) or context.superscript_depth > 0:
+    # A fragment link is *not* by itself a note reference. `collect_footnote_bodies`
+    # indexes every short id-bearing block, so treating one as a note would let an
+    # ordinary cross-reference ("see [the discussion](#details)") pull the target
+    # paragraph out of its place in the chapter and re-emit it as a definition.
+    # Only declared note semantics, or the superscript that EPUB 2 uses in place
+    # of them, count.
+    if is_footnote_reference(node) or context.superscript_depth > 0:
         target = footnote_target(node, context.document_path)
         # An unresolvable target simply falls through to the label below, so a
         # superscripted ordinary link is not mistaken for a note.
@@ -562,7 +575,8 @@ def footnote_target(node: Element, document_path: str) -> str | None:
     if not separator or not fragment:
         return None
     resolved = resolve_href(document_path, document) if document else document_path
-    return f"{resolved}#{fragment}"
+    # The fragment is URI-encoded too, while the id attribute it names is not.
+    return f"{resolved}#{unquote(fragment)}"
 
 
 def collect_footnote_bodies(documents: dict[str, Element], assets: Assets) -> dict[str, str]:
@@ -806,26 +820,55 @@ class ExtractionResult:
     images: int
 
 
+# Characters that must not reach an image URL. `)` and whitespace end the URL
+# for both Markdown and the translation engine's `link_url` placeholder, which
+# would leave the rest of the path exposed to the model; the others carry URL
+# meaning of their own. `Book (2024).epub` is the everyday case.
+UNSAFE_STEM_CHARACTERS = re.compile(r"[\s()\[\]<>\"'`\\|#?%&]+")
+
+
 def output_stem(epub_path: Path) -> str:
-    """The book's name with whitespace folded away.
+    """A Markdown-URL-safe name for this book's output files.
 
     Both the Markdown file and its sidecar are named from this, and the sidecar
-    name reaches the reader as the image URL. A space there would break Markdown
-    link syntax and, worse, would stop the translation engine's `link_url`
-    placeholder from matching -- leaving the path itself open to being
-    "translated". Folding whitespace is enough; the rest of the name is already
-    a legal file name because it came from one.
+    name reaches the reader as the image URL, so anything that would end a URL
+    early is folded to an underscore. Characters outside that set are left alone:
+    they came from a real file name, and CJK titles must survive intact.
     """
-    return re.sub(r"\s+", "_", epub_path.stem).strip("_") or "book"
+    return UNSAFE_STEM_CHARACTERS.sub("_", epub_path.stem).strip("_") or "book"
+
+
+def unique_output_stems(paths: list[Path]) -> dict[Path, str]:
+    """Assign each book a distinct output stem.
+
+    Folding unsafe characters can map two different books onto one name --
+    `A B.epub` and `A_B.epub` are the plain case -- and the second extraction
+    would then overwrite the first while both were reported as successful.
+    """
+    stems: dict[Path, str] = {}
+    taken: set[str] = set()
+    for path in paths:
+        stem = output_stem(path)
+        candidate = stem
+        counter = 2
+        while candidate in taken:
+            candidate = f"{stem}-{counter}"
+            counter += 1
+        taken.add(candidate)
+        stems[path] = candidate
+    return stems
 
 
 def extract_book(
     epub_path: Path,
     output_dir: Path,
     progress: OperationProgress | None = None,
+    stem: str | None = None,
 ) -> ExtractionResult:
+    """Extract one book. `stem` overrides the output name, which is how a batch
+    keeps two books whose names fold together from writing over each other."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = output_stem(epub_path)
+    stem = stem or output_stem(epub_path)
     markdown_path = output_dir / f"{stem}.md"
     sidecar_name = f"{stem}{SIDECAR_SUFFIX}"
 
@@ -933,11 +976,12 @@ def main() -> int:
     progress = OperationProgress.from_environment("extract", "chapters")
     progress.start("starting")
 
+    stems = unique_output_stems(books)
     failures: list[str] = []
     for book in books:
         logging.info("Extracting %s", book.name)
         try:
-            result = extract_book(book, output_dir, progress)
+            result = extract_book(book, output_dir, progress, stems[book])
         except EpubExtractError as error:
             logging.error("%s: %s", book.name, error)
             failures.append(book.name)
