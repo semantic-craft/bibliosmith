@@ -17,6 +17,10 @@ directory. The `build_reading` stage runs it with `--book-root` and registers
 - Input alignment comes from `metadata/source_map.json` and matching
   `chapters/final/*.md` files.
 - Equal paragraph counts produce paragraph-level source/target pairs.
+- Paragraphs are separated by blank lines, except inside a fenced code block: a
+  fence counts as one paragraph however many blank lines it holds, and renders
+  as `<pre><code>` on both sides of its pair. Counting its parts separately
+  would inflate one side's total and cost the whole chapter its pairing.
 - A count mismatch falls back to a whole-chapter pair and reports
   `alignment=chapter-fallback`.
 - The output is `output/reading/book_bilingual.epub`.

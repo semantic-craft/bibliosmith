@@ -77,6 +77,14 @@ pub(crate) const ZOTERO_ATTACH_ACCEPTED_EXIT_CODES: [i32; 7] = [0, 1, 2, 3, 4, 5
 /// from. It joins the list once that deliverable has a kind of its own.
 pub(crate) const ZOTERO_ATTACHABLE_ARTIFACT_KINDS: [&str; 3] =
     ["reading_epub", "reading_bilingual_epub", "reading_html"];
+pub(crate) const EPUB_EXTRACT_COMMAND_LABEL: &str = "EPUB chapter extraction";
+/// Name suffixes marking a sidecar of supporting files for the Markdown beside
+/// it: MinerU's per-part tree (`<stem>.mineru`) and the images the PaddleOCR
+/// wrapper and the EPUB extractor pull out of a book (`<stem>_assets`). Both are
+/// named from the Markdown's stem by the worker that writes them, both are
+/// skipped when artifacts are collected, and both travel into the translation
+/// project so the chapter rewrite can address them.
+pub(crate) const MARKDOWN_SIDECAR_SUFFIXES: [&str; 2] = [".mineru", "_assets"];
 pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_SCHEMA: &str =
     "zotero-worker-attachment-evidence-v1";
 pub(crate) const ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION: &str = "zotero-worker-extraction-v1";

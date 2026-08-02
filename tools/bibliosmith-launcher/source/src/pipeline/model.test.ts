@@ -837,6 +837,16 @@ describe("route vocabulary", () => {
     expect(routeKindLabel("blocked_no_attachment", copy)).toBe(copy.routeNoAttachment);
   });
 
+  // The EPUB route is labelled and toned like any other: without an entry it
+  // would reach a Chinese UI as the raw wire string "epub source".
+  it("labels and tones the EPUB extraction route", () => {
+    const zh = pipelineCopy("zh");
+    expect(routeKindLabel("epub_source", zh)).toBe(zh.routeEpubSource);
+    expect(routeKindLabel("epub_source", zh)).not.toBe("epub source");
+    // "ok", not "info": an EPUB needs no OCR credential to be runnable.
+    expect(routeTone("epub_source")).toBe("ok");
+  });
+
   it("tones a route by what it means for the user", () => {
     expect(routeTone("direct_text")).toBe("ok");
     expect(routeTone("translation_ready")).toBe("ok");
