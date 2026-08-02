@@ -1798,6 +1798,41 @@ fn temp_root(name: &str) -> PathBuf {
 // status. Tests whose subject is the terminal outcome itself -- the webhook
 // contract, cleanup evidence -- complete every stage so the store derives the
 // same terminal status it derives in production.
+// Conversion now always continues into the handoff, including in tests whose
+// fixtures were only ever built for the conversion half. A failing handoff
+// enters the automatic-retry path, and that path really sleeps between
+// attempts, so this stub always succeeds and never touches the disk. Tests
+// about the handoff itself use LocalProjectHandoffRunner or the fake/failing
+// runners explicitly.
+struct QuietTranslationHandoffRunner;
+
+impl TranslationHandoffRunner for QuietTranslationHandoffRunner {
+    fn handoff(
+        &self,
+        _job: &BookPipelineJob,
+        _artifact_path: Option<&str>,
+        _repo_root: &Path,
+    ) -> Result<TranslationHandoffOutput, String> {
+        Ok(TranslationHandoffOutput {
+            log_summary: vec!["Quiet translation handoff ready".into()],
+            artifacts: Vec::new(),
+        })
+    }
+
+    fn handoff_attachment(
+        &self,
+        _job: &BookPipelineJob,
+        _child: &BookPipelineChildJob,
+        _artifact_path: &str,
+        _repo_root: &Path,
+    ) -> Result<TranslationHandoffOutput, String> {
+        Ok(TranslationHandoffOutput {
+            log_summary: vec!["Quiet translation handoff ready".into()],
+            artifacts: Vec::new(),
+        })
+    }
+}
+
 fn complete_every_stage(store: &dyn BookPipelineStateStore, job_id: &str) {
     complete_stages_where(store, job_id, |_| true)
 }
@@ -1862,7 +1897,7 @@ fn run_conversion(
     run_job_with_handoff(
         store,
         runner,
-        &FakeTranslationHandoffRunner,
+        &QuietTranslationHandoffRunner,
         job_id,
         Some(&handoff_root),
     )
@@ -6404,18 +6439,16 @@ fn zotero_collection_runs_direct_ocr_and_mineru_items_independently() {
             .open_target
             .as_ref()
             .map(|target| target.action_label.as_str()),
-        Some("Inspect partial results")
+        // Mid-plan rather than terminally partial: the collection still has its
+        // translation stages ahead of it, so the workspace is what to open.
+        Some("Open workspace")
     );
-    let selected = completed.open_target.as_ref().unwrap();
-    let target = completed
+    // The workspace is what opens by default now, so the manifest is checked
+    // for reachability rather than for being the selected target.
+    assert!(completed
         .navigation_targets
         .iter()
-        .find(|target| target.target_id == selected.target_id)
-        .unwrap();
-    assert_eq!(
-        target.artifact_id.as_deref(),
-        Some(manifest.artifact_id.as_str())
-    );
+        .any(|target| target.artifact_id.as_deref() == Some(manifest.artifact_id.as_str())));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -8065,11 +8098,7 @@ fn cleanup_ready_job(root: &Path, store: &MemoryStateStore) -> BookPipelineJob {
         ..BookPipelineArtifact::default()
     }];
     let child = &mut stored.children[0];
-    child.stages.push(BookPipelineStage {
-        stage_id: "validate_reading".into(),
-        status: STATUS_COMPLETED.into(),
-        ..BookPipelineStage::default()
-    });
+    set_stage_status(child, "validate_reading", STATUS_COMPLETED, None);
     child.artifacts = vec![
         required_stage_artifact("reading_epub", &epub, "build_reading").unwrap(),
         required_stage_artifact("reading_markdown", &markdown, "build_reading").unwrap(),
