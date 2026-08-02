@@ -32,7 +32,7 @@ Use `scripts/zotero_llm_worker.py` as the shared Zotero engine.
 - Zotero tags are opt-in only. Never add workflow, provenance, subject, or status tags unless the user explicitly supplies each name with `--zotero-tag`.
 - Store OCR provenance in the Markdown attachment note and the State DB/sidecar, not in Zotero tags.
 - Source PDF names and Markdown attachment names should follow `作者_年份_题名.pdf` and `作者_年份_题名.md`.
-- Standalone local PDFs can be converted to HTML with `scripts/pdf_to_html_paddleocr.py`.
+- Standalone local PDFs can be converted with `scripts/pdf_to_html_paddleocr.py`, which writes `<book>/<book>.md` beside `<book>/<book>.html`.
 - `paddle.py` and `scripts/paddleocr_vl_cli.py` are single-file Baidu PaddleOCR-VL clients.
 - `mineru.py` is a single-file MinerU Precision Extract API client for scanned books and academic papers.
 

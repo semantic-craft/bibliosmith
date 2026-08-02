@@ -1,0 +1,34 @@
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12"]
+build-backend = "uv_build"
+
+[project]
+name = "layout-pdf"
+version = "0.1.0"
+description = "Layout-preserving bilingual PDF track (BabelDOC adapter)"
+requires-python = ">=3.11"
+dependencies = []
+
+# BabelDOC pulls onnxruntime, opencv, scipy, scikit-image and friends -- around
+# eighty wheels. Behind an extra they are locked in uv.lock but never installed
+# by `uv sync --all-packages`, so the shared workspace venv every other suite
+# runs in stays light. The launcher asks for them explicitly at run time with
+# `uv run --package layout-pdf --extra babeldoc`, which installs from uv's cache.
+[project.optional-dependencies]
+babeldoc = [
+    "babeldoc>=0.6.4,<0.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+layout-pdf = "layout_pdf.cli:main"
+
+[tool.pytest.ini_options]
+# Same reason as packages/translation-engine: put the src/ layout on sys.path so
+# the tests import the working tree rather than whatever happens to be installed.
+testpaths = ["tests"]
+pythonpath = ["src"]

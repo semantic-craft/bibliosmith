@@ -7,6 +7,7 @@ Standalone PDF -> HTML converter using Baidu AI Studio PaddleOCR-VL-1.6.
 - Polls for completion, downloads JSONL results
 - Extracts markdown text + images
 - Downloads images locally, renders markdown to standalone HTML
+- Writes the assembled markdown next to the HTML as <book>/<book>.md
 
 Usage:
     /opt/homebrew/bin/python3.11 scripts/pdf_to_html_paddleocr.py \
@@ -31,6 +32,7 @@ import shutil
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -453,6 +455,45 @@ def safe_filename(text: str, max_len: int = 80) -> str:
         text = text[:max_len]
     return text or "img"
 
+
+def directory_key(name: str) -> str:
+    """The identity a name has in the filesystem's directory namespace.
+
+    APFS and NTFS fold case and unicode normalization, so "Deep_Learning" and
+    "deep_learning" are one directory on the platforms this ships on. Comparing
+    the raw strings would call them distinct and hand both books the same path.
+    """
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def assign_output_names(pdf_files: list[Path]) -> dict[Path, str]:
+    """Give every PDF its own output directory name.
+
+    safe_filename() is many-to-one — "Deep Learning.pdf" and "Deep_Learning.pdf"
+    both normalize to "Deep_Learning" — and every per-book path (output dir,
+    assets, .html, _state.json, chunk dir) derives from that one name. Two
+    colliding books would therefore share a resume state and a chunk directory,
+    and the second one silently assembles the first one's OCR results instead of
+    its own. The first source in sorted order keeps the plain name; later
+    collisions get a suffix derived from their own stem, so a book's directory
+    stays the same across runs.
+    """
+    assigned: dict[Path, str] = {}
+    taken: set[str] = set()
+    for path in pdf_files:
+        base = safe_filename(path.stem, max_len=120)
+        name = base
+        if directory_key(name) in taken:
+            digest = hashlib.sha256(path.stem.encode("utf-8")).hexdigest()
+            width = 6
+            name = f"{base}_{digest[:width]}"
+            while directory_key(name) in taken and width < len(digest):
+                width += 2
+                name = f"{base}_{digest[:width]}"
+        taken.add(directory_key(name))
+        assigned[path] = name
+    return assigned
+
 # ---------------------------------------------------------------------------
 # Markdown -> HTML
 # ---------------------------------------------------------------------------
@@ -503,24 +544,47 @@ def process_book(
     config: Config,
     temp_root: Path,
     operation_progress: OperationProgress,
+    output_name: str | None = None,
 ) -> Path:
-    """Convert a single PDF to standalone HTML. Returns path to HTML file."""
+    """Convert a single PDF to markdown plus standalone HTML. Returns path to HTML file.
+
+    ``output_name`` is the directory name to write under. main() passes the
+    collision-free name from assign_output_names(); it falls back to the plain
+    derivation when a single book is converted on its own.
+    """
     book_name = pdf_path.stem
-    safe_name = safe_filename(book_name, max_len=120)
+    safe_name = output_name or safe_filename(book_name, max_len=120)
     book_output_dir = output_dir / safe_name
     assets_dir = book_output_dir / f"{safe_name}_assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     html_path = book_output_dir / f"{safe_name}.html"
+    md_path = book_output_dir / f"{safe_name}.md"
     state_path = book_output_dir / "_state.json"
 
-    # Load existing state
+    # Load existing state, but only if it was written for this same PDF. Chunks
+    # are named by page range alone, so resuming from another book's state would
+    # assemble that book's OCR results under this book's title without erroring.
+    # State written before this field existed carries no owner and is trusted, so
+    # a book converted by an older build still resumes instead of paying to redo.
     state: dict[str, Any] = {"chunks_done": [], "pages_total": 0, "pages_done": 0}
     if state_path.exists():
         try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
+            existing = json.loads(state_path.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            existing = None
+        if isinstance(existing, dict):
+            owner = existing.get("source_name")
+            if owner is None or owner == pdf_path.name:
+                state = existing
+            else:
+                logging.warning(
+                    "[%s] %s holds state for %r; starting this book from scratch",
+                    book_name,
+                    state_path,
+                    owner,
+                )
+    state["source_name"] = pdf_path.name
 
     page_count = pdf_page_count(pdf_path)
     state["pages_total"] = page_count
@@ -652,11 +716,15 @@ def process_book(
             md_sections.append(f"\n<div class=\"page-break\">— Page {page_no} —</div>\n\n{text}")
 
     full_md = f"# {book_name}\n\n" + "\n\n".join(md_sections)
+    # The translation handoff reads this file, so it has to land on disk
+    md_path.write_text(full_md, encoding="utf-8")
     body_html = md_to_html(full_md)
     html = build_html(title=book_name, body_html=body_html)
     html_path.write_text(html, encoding="utf-8")
 
+    logging.info("[%s] Markdown saved: %s", book_name, md_path)
     logging.info("[%s] HTML saved: %s", book_name, html_path)
+    state["markdown_path"] = str(md_path)
     state["html_path"] = str(html_path)
     state["assets_dir"] = str(assets_dir)
     state["image_count"] = len(image_map)
@@ -692,6 +760,10 @@ def main() -> int:
         logging.error("No PDF files found in %s", input_dir)
         return 1
 
+    # Assigned over the unfiltered folder so --book/--limit-books cannot move a
+    # book to a different output directory than a full run would give it.
+    output_names = assign_output_names(pdf_files)
+
     if args.book:
         pdf_files = [p for p in pdf_files if args.book in p.name]
         if not pdf_files:
@@ -704,6 +776,12 @@ def main() -> int:
     logging.info("Books to process: %s", len(pdf_files))
     for p in pdf_files:
         logging.info("  - %s (%s pages)", p.name, pdf_page_count(p))
+        if output_names[p] != safe_filename(p.stem, max_len=120):
+            logging.warning(
+                "[%s] name collides with another PDF in this folder; writing to %s",
+                p.name,
+                output_names[p],
+            )
 
     temp_root = output_dir / ".temp"
     temp_root.mkdir(parents=True, exist_ok=True)
@@ -721,7 +799,13 @@ def main() -> int:
         with ThreadPoolExecutor(max_workers=config.workers) as executor:
             futures = {
                 executor.submit(
-                    process_book, p, output_dir, config, temp_root, operation_progress
+                    process_book,
+                    p,
+                    output_dir,
+                    config,
+                    temp_root,
+                    operation_progress,
+                    output_names[p],
                 ): p
                 for p in pdf_files
             }
@@ -737,7 +821,7 @@ def main() -> int:
         for p in pdf_files:
             try:
                 html_path = process_book(
-                    p, output_dir, config, temp_root, operation_progress
+                    p, output_dir, config, temp_root, operation_progress, output_names[p]
                 )
                 logging.info("DONE: %s -> %s", p.name, html_path)
             except Exception as exc:

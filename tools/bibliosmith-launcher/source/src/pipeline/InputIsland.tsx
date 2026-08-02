@@ -4,6 +4,7 @@ import type { BookPipelineRouteItem, BookPipelineSource, ModelSlotView } from ".
 import { isTauriRuntime } from "../api";
 import type { PipelineCopy } from "./copy";
 import {
+  layoutTrackAvailable,
   providerCredentialMissing,
   routeKindLabel,
   routeTone,
@@ -200,6 +201,68 @@ function RoutePreflight({
   );
 }
 
+/**
+ * The reflow ⇄ layout-preserving choice, shown only when the preflight found a
+ * single text PDF. Every other input has exactly one track it can take, so the
+ * island picks it silently rather than offering a disabled control.
+ *
+ * A radio group, not a toggle: the two tracks produce different books by
+ * different means, and the trade-off (gates and resumability against keeping the
+ * original page) is worth spelling out where the choice is made.
+ */
+function TrackChoice({
+  copy,
+  draft,
+  onDraftChange,
+}: {
+  copy: PipelineCopy;
+  draft: PipelineDraft;
+  onDraftChange: (patch: Partial<PipelineDraft>) => void;
+}) {
+  const layoutPicked = draft.mode === "layout_preserving";
+  const options = [
+    {
+      mode: "convert_then_translate" as const,
+      picked: !layoutPicked,
+      label: copy.trackReflow,
+      hint: copy.trackReflowHint,
+    },
+    {
+      mode: "layout_preserving" as const,
+      picked: layoutPicked,
+      label: copy.trackLayout,
+      hint: copy.trackLayoutHint,
+    },
+  ];
+  return (
+    <div className="pl-island-track" role="radiogroup" aria-label={copy.trackChoiceLabel}>
+      <span className="pl-k">{copy.trackChoiceLabel}</span>
+      <div className="pl-track-options">
+        {options.map((option) => (
+          <button
+            key={option.mode}
+            className={`pl-track-option${option.picked ? " picked" : ""}`}
+            type="button"
+            role="radio"
+            aria-checked={option.picked}
+            // Named explicitly: the option's own text is a title plus a
+            // paragraph of trade-off, and screen readers should announce the
+            // track, not read the whole card as the control's name.
+            aria-label={option.label}
+            aria-describedby={`pl-track-hint-${option.mode}`}
+            onClick={() => onDraftChange({ mode: option.mode })}
+          >
+            <span className="pl-track-name">{option.label}</span>
+            <span className="pl-track-hint" id={`pl-track-hint-${option.mode}`}>
+              {option.hint}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function InputIsland(props: InputIslandProps) {
   const {
     copy,
@@ -273,6 +336,7 @@ export function InputIsland(props: InputIslandProps) {
 
   const routes = executionRoutes(preview);
   const runnable = routes.filter((item) => item.canRun);
+  const layoutAvailable = layoutTrackAvailable(preview);
   const credentialMissing = providerCredentialMissing(draft, props.modelSlots);
   const launchDisabled =
     launching ||
@@ -357,6 +421,18 @@ export function InputIsland(props: InputIslandProps) {
           routeOverrides={routeOverrides}
           onRouteOverrideChange={onRouteOverrideChange}
         />
+      )}
+
+      {sourceChosen && layoutAvailable && (
+        <TrackChoice copy={copy} draft={draft} onDraftChange={onDraftChange} />
+      )}
+
+      {/* The user picked the layout track and then changed the book or forced
+          an OCR route. The draft still says so, but `effectivePipelineMode`
+          queues the reflow track, so say that here rather than letting the
+          choice silently evaporate between the click and the shelf. */}
+      {sourceChosen && !layoutAvailable && draft.mode === "layout_preserving" && (
+        <p className="pl-island-note">{copy.trackLayoutOnlyForTextPdf}</p>
       )}
 
       <div className="pl-island-foot">
