@@ -14,7 +14,6 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
-from types import SimpleNamespace
 from unittest import mock
 
 
@@ -42,37 +41,22 @@ def test_page_anchor_is_an_html_comment() -> None:
     assert paddle.page_anchor(42) == "<!-- page: 42 -->"
 
 
-def test_anchors_render_as_the_visible_separator() -> None:
-    rendered = paddle.page_anchors_to_html("a\n\n<!-- page: 7 -->\n\nb")
-
-    assert '<div class="page-break">— Page 7 —</div>' in rendered
-    assert "<!-- page: 7 -->" not in rendered
-
-
-def test_every_anchor_in_a_document_is_converted() -> None:
-    body = "\n\n".join(f"<!-- page: {n} -->\n\ntext {n}" for n in (1, 2, 3))
-
-    rendered = paddle.page_anchors_to_html(body)
-
-    assert rendered.count('class="page-break"') == 3
-    assert "<!-- page:" not in rendered
-
-
-def test_a_comment_that_is_not_a_page_anchor_is_left_alone() -> None:
-    body = "<!-- keep me -->\n\n<!-- page: 1 -->"
-
-    rendered = paddle.page_anchors_to_html(body)
-
-    assert "<!-- keep me -->" in rendered
-    assert '<div class="page-break">— Page 1 —</div>' in rendered
+def test_page_separator_is_the_visible_html_form() -> None:
+    assert paddle.page_separator(7) == '<div class="page-break">— Page 7 —</div>'
 
 
 # ---------------------------------------------------------------------------
 # End-to-end through process_book
 # ---------------------------------------------------------------------------
+# Page 2 quotes a page anchor, the way a book about this pipeline would. A
+# substitution pass over the assembled document would rewrite it; assembling the
+# Markdown and the HTML separately cannot.
+PAGE_BODIES = ["Body of page 1", "Body of page 2\n\n<!-- page: 999 -->"]
+
+
 class FakeOCRClient:
     def __init__(self, config) -> None:  # type: ignore[no-untyped-def]
-        self.jsonl = ""
+        pass
 
     def submit_job(self, chunk_path: Path, batch_id: str) -> str:
         return "job"
@@ -86,12 +70,12 @@ class FakeOCRClient:
                 {
                     "result": {
                         "layoutParsingResults": [
-                            {"markdown": {"text": f"Body of page {n}", "images": {}}}
+                            {"markdown": {"text": body, "images": {}}}
                         ]
                     }
                 }
             )
-            for n in (1, 2)
+            for body in PAGE_BODIES
         )
 
 
@@ -121,24 +105,16 @@ def run_process_book(tmp_path: Path):  # type: ignore[no-untyped-def]
         workers=1,
     )
 
-    # Capture the assembled Markdown exactly as the handoff would receive it.
-    assembled: dict[str, str] = {}
-    real_to_html = paddle.page_anchors_to_html
-
-    def spy(md_text: str) -> str:
-        assembled["full_md"] = md_text
-        return real_to_html(md_text)
-
     with (
         mock.patch.object(paddle, "pdf_page_count", return_value=2),
         mock.patch.object(paddle, "make_chunk_specs", side_effect=fake_chunk_specs),
         mock.patch.object(paddle, "BaiduOCRClient", side_effect=FakeOCRClient),
-        mock.patch.object(paddle, "page_anchors_to_html", side_effect=spy),
     ):
         html_path = paddle.process_book(
             pdf_path, output_dir, config, temp_root, mock.Mock()
         )
-    return html_path, assembled["full_md"]
+    # The .md on disk is exactly what the translation handoff copies.
+    return html_path, html_path.with_suffix(".md").read_text(encoding="utf-8")
 
 
 def test_assembled_markdown_carries_anchors_not_html_separators(tmp_path: Path) -> None:
@@ -160,4 +136,15 @@ def test_rendered_html_keeps_the_visible_separator(tmp_path: Path) -> None:
     assert '<div class="page-break">— Page 2 —</div>' in html
     # The stylesheet rule that makes it a dashed rule is still shipped.
     assert ".page-break {" in html
-    assert "<!-- page:" not in html
+
+
+def test_an_anchor_that_came_from_the_book_is_not_turned_into_a_separator(
+    tmp_path: Path,
+) -> None:
+    html_path, full_md = run_process_book(tmp_path)
+
+    # It survives verbatim in the Markdown the handoff receives...
+    assert "<!-- page: 999 -->" in full_md
+    # ...and never becomes a page break the book never had.
+    html = html_path.read_text(encoding="utf-8")
+    assert "— Page 999 —" not in html

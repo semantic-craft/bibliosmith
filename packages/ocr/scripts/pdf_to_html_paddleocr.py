@@ -490,9 +490,6 @@ def build_html(title: str, body_html: str, css: str | None = None) -> str:
 </html>"""
 
 
-PAGE_ANCHOR_PATTERN = re.compile(r"^<!-- page: (\d+) -->$", re.MULTILINE)
-
-
 def page_anchor(page_no: int) -> str:
     """Mark where a source page began.
 
@@ -504,12 +501,9 @@ def page_anchor(page_no: int) -> str:
     return f"<!-- page: {page_no} -->"
 
 
-def page_anchors_to_html(md_text: str) -> str:
-    """Turn the page anchors into the separators the standalone HTML shows."""
-    return PAGE_ANCHOR_PATTERN.sub(
-        lambda match: f'<div class="page-break">— Page {match.group(1)} —</div>',
-        md_text,
-    )
+def page_separator(page_no: int) -> str:
+    """The visible separator the standalone HTML shows for the same page."""
+    return f'<div class="page-break">— Page {page_no} —</div>'
 
 
 def md_to_html(md_text: str) -> str:
@@ -638,6 +632,7 @@ def process_book(
 
     # Build markdown sections
     md_sections: list[str] = []
+    html_sections: list[str] = []
     image_map: dict[str, str] = {}  # original_url -> local_relative_path
 
     for page_no, res in all_results:
@@ -673,12 +668,16 @@ def process_book(
                     text = text.replace(img_url, str(image_map[img_url]))
 
         if text:
+            # Two assemblies rather than one plus a substitution pass: rewriting
+            # anchors afterwards would also rewrite an identical line that came
+            # out of the book itself, which a technical book can easily contain.
             md_sections.append(f"\n{page_anchor(page_no)}\n\n{text}")
+            html_sections.append(f"\n{page_separator(page_no)}\n\n{text}")
 
     full_md = f"# {book_name}\n\n" + "\n\n".join(md_sections)
     # The translation handoff reads this file, so it has to land on disk
     md_path.write_text(full_md, encoding="utf-8")
-    body_html = md_to_html(page_anchors_to_html(full_md))
+    body_html = md_to_html(f"# {book_name}\n\n" + "\n\n".join(html_sections))
     html = build_html(title=book_name, body_html=body_html)
     html_path.write_text(html, encoding="utf-8")
 
