@@ -35,6 +35,7 @@ Use `scripts/zotero_llm_worker.py` as the shared Zotero engine.
 - Standalone local PDFs can be converted with `scripts/pdf_to_html_paddleocr.py`, which writes `<book>/<book>.md` beside `<book>/<book>.html`.
 - `paddle.py` and `scripts/paddleocr_vl_cli.py` are single-file Baidu PaddleOCR-VL clients.
 - `mineru.py` is a single-file MinerU Precision Extract API client for scanned books and academic papers.
+- `pdf_text.py` converts a born-digital PDF to Markdown without OCR: pdf-inspector for headings/tables/links, PyMuPDF whenever pdf-inspector fails, comes back illegible, or drops text. Its per-page OCR flags are never a routing input — PyMuPDF's character count decides whether a text layer exists.
 
 ## Safety Rules
 
