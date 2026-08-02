@@ -20,6 +20,7 @@ import {
   phaseSummaryCaption,
   phaseName,
   phaseStatusCaption,
+  visiblePhaseIndexes,
   sourceChangedRequiresRebuild,
   translationFailureSummary,
   unitAdvanceAction,
@@ -152,12 +153,15 @@ const PHASE_MARKS: Record<PhaseState, (index: number) => string> = {
 
 function PhaseStrip({ unit, copy }: { unit: BookUnit; copy: PipelineCopy }) {
   const states = phaseStates(unit);
+  // Only the phases this job has. The layout-preserving track is one pass, so
+  // it draws a single segment rather than three with two of them struck out.
+  const visible = visiblePhaseIndexes(unit);
   return (
     <>
-      <div className="pl-phases">
-        {states.map((state, index) => (
-          <div key={index} className={`pl-phase ${state}`}>
-            <div className="pl-phase-dot">{PHASE_MARKS[state](index)}</div>
+      <div className={`pl-phases${visible.length === 1 ? " single" : ""}`}>
+        {visible.map((index) => (
+          <div key={index} className={`pl-phase ${states[index]}`}>
+            <div className="pl-phase-dot">{PHASE_MARKS[states[index]](index)}</div>
             <div className="pl-phase-name">{phaseName(index, copy)}</div>
             <div className="pl-phase-status">{phaseStatusCaption(unit, index, copy)}</div>
           </div>

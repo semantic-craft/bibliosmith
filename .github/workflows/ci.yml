@@ -59,6 +59,15 @@ jobs:
       - name: OCR
         run: uv run --package ocr pytest packages/ocr/tests
 
+      # Deliberately without --extra babeldoc: that extra is around eighty
+      # wheels (onnxruntime, opencv, scipy) and the suite is written against a
+      # stub translate step, so installing it here would buy nothing. What CI
+      # covers is the CLI contract with book_pipeline.rs -- the endpoint
+      # environment, the progress sidecar, the warning markers, and the rule
+      # that only the finished PDF lands in the job output directory.
+      - name: Layout PDF
+        run: uv run --package layout-pdf pytest packages/layout-pdf/tests
+
       # The distribution is named zotero-cli-agent; the directory is zotero-cli.
       # This package declares pytest under [project.optional-dependencies], which
       # uv does not install by default, so --extra dev is what puts pytest in the

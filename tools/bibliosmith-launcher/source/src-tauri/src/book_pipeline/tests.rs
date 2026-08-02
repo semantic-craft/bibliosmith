@@ -641,6 +641,44 @@ impl RunnerCommandExecutor for LocalPdfFixtureExecutor {
     }
 }
 
+// Shaped like the real wrapper output, page-break div included, so the handoff
+// is checked against what pdf_to_html_paddleocr.py actually assembles.
+const PADDLE_WRAPPER_MARKDOWN: &str =
+    "# Sample Book\n\n\n<div class=\"page-break\">— Page 1 —</div>\n\nChapter One\n";
+
+/// Mirrors the on-disk layout of `packages/ocr/scripts/pdf_to_html_paddleocr.py`.
+struct PaddleWrapperLayoutExecutor;
+
+impl RunnerCommandExecutor for PaddleWrapperLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.kind, RunnerCommandKind::Process);
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        let assets_dir = book_dir.join("Sample_Book_assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(book_dir.join("Sample_Book.md"), PADDLE_WRAPPER_MARKDOWN).unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        fs::write(
+            book_dir.join("_state.json"),
+            "{\"markdown_path\":\"Sample_Book.md\"}\n",
+        )
+        .unwrap();
+        fs::write(assets_dir.join("img_1.png"), "png bytes").unwrap();
+        let chunks = command
+            .output_dir
+            .join(".temp")
+            .join("Sample_Book")
+            .join("chunks");
+        fs::create_dir_all(&chunks).unwrap();
+        fs::write(chunks.join("pages-0001-0002.jsonl"), "{\"page\":1}\n").unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Paddle wrapper completed".into()],
+        })
+    }
+}
+
 /// Writes the wrapper's real scratch layout: the book beside a `.temp` tree
 /// holding the resumable chunk JSONL, both under the job's output directory.
 struct PaddleScratchLayoutExecutor;
@@ -680,7 +718,7 @@ fn wrapper_chunk_scratch_is_not_registered_as_an_artifact() {
     let job = queue_job(
         &store,
         local_pdf_source(&input),
-        "conversion_only".into(),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
@@ -695,7 +733,6 @@ fn wrapper_chunk_scratch_is_not_registered_as_an_artifact() {
     )
     .unwrap();
 
-    assert_eq!(completed.status, STATUS_COMPLETED);
     assert!(
         completed
             .artifacts
@@ -1889,6 +1926,20 @@ fn fake_source(behavior: Option<&str>) -> BookPipelineSource {
     }
 }
 
+/// A valid intent, so that a queue refusal can only have come from the mode.
+fn fake_translation_intent() -> BookPipelineTranslationIntent {
+    BookPipelineTranslationIntent {
+        translation_mode: TRANSLATION_MODE_FAST.into(),
+        profile_id: "fake-provider-profile".into(),
+        config_id: "fake-provider-config".into(),
+        skill_ids: Vec::new(),
+        second_pass_enabled: false,
+        text_cleanup: false,
+        digest_mode: false,
+        output_formats: default_output_formats(),
+    }
+}
+
 fn local_pdf_source(input: &Path) -> BookPipelineSource {
     BookPipelineSource {
         kind: "local_pdf_folder".into(),
@@ -3035,6 +3086,137 @@ fn legacy_jobs_migrate_to_versioned_parent_child_stage_state() {
         .as_deref()
         .unwrap()
         .contains("interrupted"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn retired_conversion_only_mode_is_refused_at_the_queue() {
+    let root = temp_root("retired-mode-enqueue");
+    let store = BookPipelineStore::for_test(&root);
+
+    let error = queue_job_with_translation_intent(
+        &store,
+        fake_source(None),
+        MODE_CONVERSION_ONLY.into(),
+        fake_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("retired") && error.contains(MODE_CONVERT_THEN_TRANSLATE),
+        "the refusal must say the mode is retired and name the replacement, got {error}"
+    );
+    assert!(
+        store.load().unwrap().jobs.is_empty(),
+        "a refused enqueue must not leave a job behind"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unknown_mode_is_refused_instead_of_inheriting_a_truncated_pipeline() {
+    let root = temp_root("unknown-mode-enqueue");
+    let store = BookPipelineStore::for_test(&root);
+
+    let error = queue_job_with_translation_intent(
+        &store,
+        fake_source(None),
+        "convert_then_translat".into(),
+        fake_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("convert_then_translat") && error.contains(MODE_TRANSLATE_ONLY),
+        "the refusal must quote the rejected mode and list the valid ones, got {error}"
+    );
+    assert!(store.load().unwrap().jobs.is_empty());
+
+    // The retirement's point: a mode that is merely unrecognised must no longer
+    // fall through to the conversion-only shape and stop short of translation.
+    assert!(
+        should_handoff_after_run("convert_then_translat"),
+        "only the named retired mode may skip the translation handoff"
+    );
+    assert!(
+        ordered_child_stage_ids("convert_then_translat", false).contains(&"handoff"),
+        "an unrecognised mode must not be given the truncated stage list"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn stored_conversion_only_jobs_still_open_and_keep_their_three_stage_shape() {
+    let root = temp_root("retired-mode-stored-state");
+    let store = BookPipelineStore::for_test(&root);
+    fs::create_dir_all(store.state_path.parent().unwrap()).unwrap();
+    // A checkpoint written before the mode was retired. Retiring it closed the
+    // queue, not the library: this file still has to open.
+    let legacy = serde_json::json!({
+        "jobs": [{
+            "id": "stored-conversion-only",
+            "mode": MODE_CONVERSION_ONLY,
+            "source": {
+                "kind": "zotero_attachment",
+                "title": "Fabricated source",
+                "path": "zotero://attachment/FAKEPDF",
+                "selector": "FAKEPDF",
+                "runnerBehavior": null,
+                "adapterCommand": null,
+                "fakeZoteroItems": null
+            },
+            "route": [{
+                "id": "FAKEPDF",
+                "title": "Fabricated source",
+                "sourceKind": "zotero_attachment",
+                "sourceRef": "zotero://attachment/FAKEPDF",
+                "routeKind": "direct_text",
+                "canRun": true,
+                "blockedReason": null,
+                "summary": "Fabricated route"
+            }],
+            "status": STATUS_ROUTED,
+            "currentStep": "Legacy conversion-only state",
+            "lastError": null,
+            "logSummary": ["preserved log"],
+            "artifacts": [],
+            "collectionItems": [],
+            "outputDir": "/tmp/fabricated-output",
+            "attempts": 1,
+            "createdAt": "2026-07-10T09:00:00+08:00",
+            "updatedAt": "2026-07-10T09:05:00+08:00"
+        }]
+    });
+    fs::write(
+        &store.state_path,
+        serde_json::to_string_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let state = store.load().unwrap();
+
+    let stored = &state.jobs[0];
+    assert_eq!(
+        stored.mode, MODE_CONVERSION_ONLY,
+        "the stored mode must be preserved, not rewritten to a live one"
+    );
+    assert_eq!(
+        stored.children[0]
+            .stages
+            .iter()
+            .map(|stage| stage.stage_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["route", "extract", "index"],
+        "migration must not graft translation stages onto a finished conversion-only job"
+    );
+    assert!(!should_handoff_after_run(&stored.mode));
+
+    // Reload proves the migrated file it just wrote is itself still loadable.
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded.jobs[0].mode, MODE_CONVERSION_ONLY);
+    assert_eq!(reloaded.jobs[0].children[0].stages.len(), 3);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6105,6 +6287,73 @@ fn local_pdf_runner_contract_records_wrapper_artifacts() {
 }
 
 #[test]
+fn local_pdf_paddle_layout_hands_the_wrapper_markdown_to_translation() {
+    let root = temp_root("local-pdf-paddle-handoff");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("Sample Book.pdf"), "%PDF fixture").unwrap();
+    let repo_root = root.join("repo");
+    fs::create_dir_all(repo_root.join("tools")).unwrap();
+    fs::write(repo_root.join("AGENTS.md"), "fixture").unwrap();
+    fs::write(
+        repo_root.join("tools").join("create_local_book_project.py"),
+        "fixture",
+    )
+    .unwrap();
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    assert!(job
+        .route
+        .iter()
+        .any(|item| item.route_kind == "remote_paddleocr"));
+
+    let completed = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            PaddleWrapperLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo_root),
+    )
+    .unwrap();
+
+    assert_eq!(completed.status, STATUS_READY);
+    assert_eq!(completed.current_step, "Translation handoff ready");
+    assert!(completed.last_error.is_none());
+    let markdown = completed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "markdown")
+        .expect("the wrapper Markdown is registered as a markdown artifact");
+    assert!(
+        markdown.path.ends_with("Sample_Book.md"),
+        "{}",
+        markdown.path
+    );
+    let project_root = PathBuf::from(
+        completed
+            .children
+            .iter()
+            .find_map(|child| child.local_project_root.as_deref())
+            .expect("registered local project root"),
+    );
+    assert_eq!(
+        fs::read_to_string(project_root.join("source").join("source.md")).unwrap(),
+        PADDLE_WRAPPER_MARKDOWN
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn local_pdf_runner_contract_records_wrapper_failure() {
     let root = temp_root("local-pdf-wrapper-failure");
     let input = root.join("input");
@@ -8392,6 +8641,92 @@ fn mineru_handoff_preserves_assets_and_split_keeps_links_resolvable() {
             .canonicalize()
             .unwrap(),
         copied_asset.canonicalize().unwrap()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+const PADDLE_ASSET_MARKDOWN: &str =
+    "# Sample Book\n\nChapter One\n\n![Figure](Sample_Book_assets/figure.png)\n";
+
+/// Writes the layout `packages/ocr/scripts/pdf_to_html_paddleocr.py` produces:
+/// the cleaned Markdown beside its `<stem>_assets` directory, with the image
+/// references inside the Markdown pointing at that directory relatively.
+struct PaddleAssetsLayoutExecutor;
+
+impl RunnerCommandExecutor for PaddleAssetsLayoutExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        assert_eq!(command.label, "local PDF conversion wrapper");
+        let book_dir = command.output_dir.join("Sample_Book");
+        let assets_dir = book_dir.join("Sample_Book_assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(book_dir.join("Sample_Book.md"), PADDLE_ASSET_MARKDOWN).unwrap();
+        fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
+        fs::write(assets_dir.join("figure.png"), b"png-fixture").unwrap();
+        Ok(RunnerCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            log_summary: vec!["Paddle wrapper completed".into()],
+        })
+    }
+}
+
+#[test]
+fn paddle_handoff_copies_the_assets_directory_and_keeps_links_resolvable() {
+    let root = temp_root("paddle-handoff-assets");
+    let input = root.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("Sample Book.pdf"), "%PDF fixture").unwrap();
+    let repo = handoff_repo_fixture(&root);
+    let wrapper_root = fake_wrapper_root(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        local_pdf_source(&input),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+
+    let handed_off = run_job_with_handoff(
+        &store,
+        &CommandPipelineRunner::with_book_ocr_conversion_root(
+            PaddleAssetsLayoutExecutor,
+            wrapper_root,
+        ),
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&repo),
+    )
+    .unwrap();
+
+    assert_eq!(handed_off.status, STATUS_READY);
+    let project_root = child_project_root(&handed_off);
+
+    // The directory keeps its name, because the Markdown references it by that
+    // exact relative path.
+    let copied_asset = project_root.join("source/Sample_Book_assets/figure.png");
+    assert_eq!(
+        fs::read(&copied_asset).unwrap(),
+        b"png-fixture",
+        "the assets directory must travel with the Markdown"
+    );
+
+    // The decisive check: the link inside the handed-off source resolves.
+    let source_md = project_root.join("source/source.md");
+    let referenced = source_md
+        .parent()
+        .unwrap()
+        .join("Sample_Book_assets/figure.png");
+    assert_eq!(
+        referenced.canonicalize().unwrap(),
+        copied_asset.canonicalize().unwrap()
+    );
+
+    let manifest =
+        fs::read_to_string(project_root.join("metadata").join("source_manifest.json")).unwrap();
+    assert!(
+        manifest.contains("source/Sample_Book_assets"),
+        "the manifest must record where the resources landed: {manifest}"
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -13547,4 +13882,655 @@ fn a_conversion_scan_ignores_the_ocr_sample_directory() {
     );
 
     let _ = fs::remove_dir_all(root);
+}
+
+// ---- Layout-preserving PDF track (BabelDOC) --------------------------------
+
+fn layout_route(route_kind: &str, source_ref: &str) -> BookPipelineRouteItem {
+    BookPipelineRouteItem {
+        id: "ATTACH1".into(),
+        title: "Fixture attachment".into(),
+        source_kind: "zotero_attachment".into(),
+        source_ref: source_ref.into(),
+        route_kind: route_kind.into(),
+        can_run: true,
+        blocked_reason: None,
+        summary: "fixture route".into(),
+        route_override: None,
+    }
+}
+
+fn layout_job(route: Vec<BookPipelineRouteItem>) -> BookPipelineJob {
+    let mut job: BookPipelineJob = serde_json::from_value(serde_json::json!({
+        "id": "job-layout",
+        "mode": MODE_LAYOUT_PRESERVING,
+        "source": { "kind": "zotero_attachment", "title": "Fixture attachment" },
+        "route": [],
+        "status": "routed",
+        "currentStep": "Route preview recorded",
+        "lastError": null,
+        "logSummary": [],
+        "artifacts": [],
+        "outputDir": null,
+        "attempts": 0,
+        "createdAt": "2026-08-01T00:00:00Z",
+        "updatedAt": "2026-08-01T00:00:00Z"
+    }))
+    .unwrap();
+    job.route = route;
+    job
+}
+
+fn layout_package_root(root: &Path) -> PathBuf {
+    let manifest = root.join("packages").join("layout-pdf");
+    fs::create_dir_all(&manifest).unwrap();
+    fs::write(
+        manifest.join("pyproject.toml"),
+        "[project]\nname = \"layout-pdf\"\n",
+    )
+    .unwrap();
+    root.to_path_buf()
+}
+
+#[test]
+fn the_layout_track_stops_after_extract() {
+    // Two stages is the whole point: no split, no approval gates, no EPUB build.
+    assert_eq!(
+        ordered_child_stage_ids(MODE_LAYOUT_PRESERVING, false),
+        vec!["route", "extract"]
+    );
+    // A legacy translation flag must not graft the reflow stages back on; this
+    // mode postdates every state file such a flag can describe.
+    assert_eq!(
+        ordered_child_stage_ids(MODE_LAYOUT_PRESERVING, true),
+        vec!["route", "extract"]
+    );
+}
+
+#[test]
+fn the_layout_track_gets_no_item_index_stage() {
+    // `ensure_item_index_stage` keys off the source kind, and a layout job's
+    // source is a Zotero attachment like any other. Without the mode guard it
+    // would append a third stage that has no Markdown to index and never runs.
+    let mut child = BookPipelineChildJob {
+        source: fake_direct_zotero_source(),
+        stages: ordered_child_stage_ids(MODE_LAYOUT_PRESERVING, false)
+            .into_iter()
+            .map(|stage_id| BookPipelineStage {
+                stage_id: stage_id.into(),
+                status: STATUS_PENDING.into(),
+                ..BookPipelineStage::default()
+            })
+            .collect(),
+        ..BookPipelineChildJob::default()
+    };
+
+    ensure_item_index_stage(&mut child, MODE_LAYOUT_PRESERVING);
+
+    assert_eq!(
+        child
+            .stages
+            .iter()
+            .map(|stage| stage.stage_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["route", "extract"]
+    );
+}
+
+#[test]
+fn the_reflow_track_still_gets_its_item_index_stage() {
+    // The guard above must be scoped to the layout mode, not a blanket skip.
+    let mut child = BookPipelineChildJob {
+        source: fake_direct_zotero_source(),
+        stages: vec![
+            BookPipelineStage {
+                stage_id: "route".into(),
+                status: STATUS_COMPLETED.into(),
+                ..BookPipelineStage::default()
+            },
+            BookPipelineStage {
+                stage_id: "extract".into(),
+                status: STATUS_PENDING.into(),
+                ..BookPipelineStage::default()
+            },
+        ],
+        ..BookPipelineChildJob::default()
+    };
+
+    ensure_item_index_stage(&mut child, MODE_CONVERT_THEN_TRANSLATE);
+
+    assert!(child.stages.iter().any(|stage| stage.stage_id == "index"));
+}
+
+#[test]
+fn the_layout_track_never_hands_off_to_translation() {
+    assert!(!should_handoff_after_run(MODE_LAYOUT_PRESERVING));
+}
+
+#[test]
+fn the_layout_command_runs_the_babeldoc_wrapper_from_the_workspace() {
+    let root = temp_root("layout-command");
+    let repo_root = layout_package_root(&root);
+    let source_pdf = root.join("Weber 1922.pdf");
+    fs::write(&source_pdf, b"%PDF-1.7\n").unwrap();
+    let output = root.join("output");
+    let job = layout_job(vec![layout_route(
+        "direct_text",
+        &display_path(&source_pdf),
+    )]);
+
+    let command = build_layout_pdf_command_for_root(&job, &output, &repo_root).unwrap();
+
+    assert_eq!(command.label, LAYOUT_PDF_COMMAND_LABEL);
+    assert_eq!(command.program, PathBuf::from("uv"));
+    assert_eq!(
+        command.args,
+        vec![
+            "run".to_string(),
+            "--package".to_string(),
+            "layout-pdf".to_string(),
+            // Without the extra the subprocess starts and then dies on an
+            // ImportError, because babeldoc is deliberately not in the shared venv.
+            "--extra".to_string(),
+            "babeldoc".to_string(),
+            "layout-pdf".to_string(),
+            "--input".to_string(),
+            display_path(&source_pdf),
+            "--output-dir".to_string(),
+            display_path(&output),
+        ]
+    );
+    assert_eq!(command.cwd, Some(repo_root));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_layout_command_strips_the_worker_fingerprint_from_the_source_path() {
+    // Every real Zotero route carries `#source_md5=...` on its source_ref. Taken
+    // literally that is a path that does not exist and does not end in .pdf, so
+    // this fails for every real book while hand-built fixtures pass.
+    let root = temp_root("layout-fingerprint");
+    let repo_root = layout_package_root(&root);
+    let source_pdf = root.join("Weber 1922.pdf");
+    fs::write(&source_pdf, b"%PDF-1.7\n").unwrap();
+    let source_ref = format!(
+        "{}#source_md5=0123456789abcdef0123456789abcdef",
+        display_path(&source_pdf)
+    );
+    let job = layout_job(vec![layout_route("direct_text", &source_ref)]);
+
+    let command =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap();
+
+    let input = command
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--input")
+        .map(|pair| pair[1].clone())
+        .unwrap();
+    assert_eq!(input, display_path(&source_pdf));
+    assert!(!input.contains("source_md5"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_hash_in_the_filename_survives_fingerprint_stripping() {
+    // `#` is legal in a filename. Splitting on a bare `#` -- or on the first
+    // occurrence of the marker -- would truncate `draft#2.pdf` to `draft` and
+    // report the book as missing.
+    let root = temp_root("layout-hash-name");
+    let repo_root = layout_package_root(&root);
+    let source_pdf = root.join("draft#2.pdf");
+    fs::write(&source_pdf, b"%PDF-1.7\n").unwrap();
+    let source_ref = format!(
+        "{}#source_md5=0123456789abcdef0123456789abcdef",
+        display_path(&source_pdf)
+    );
+    let job = layout_job(vec![layout_route("direct_text", &source_ref)]);
+
+    let command =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap();
+
+    assert!(command
+        .args
+        .windows(2)
+        .any(|pair| pair[0] == "--input" && pair[1] == display_path(&source_pdf)));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_layout_track_refuses_a_scanned_book() {
+    let root = temp_root("layout-scanned");
+    let repo_root = layout_package_root(&root);
+    let source_pdf = root.join("scan.pdf");
+    fs::write(&source_pdf, b"%PDF-1.7\n").unwrap();
+    let job = layout_job(vec![layout_route(
+        "remote_paddleocr",
+        &display_path(&source_pdf),
+    )]);
+
+    let error =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap_err();
+
+    assert!(
+        error.contains("only available for text PDFs"),
+        "unexpected error: {error}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_layout_track_refuses_more_than_one_book_at_a_time() {
+    let root = temp_root("layout-multi");
+    let repo_root = layout_package_root(&root);
+    let first = root.join("first.pdf");
+    let second = root.join("second.pdf");
+    fs::write(&first, b"%PDF-1.7\n").unwrap();
+    fs::write(&second, b"%PDF-1.7\n").unwrap();
+    let job = layout_job(vec![
+        layout_route("direct_text", &display_path(&first)),
+        layout_route("direct_text", &display_path(&second)),
+    ]);
+
+    let error =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap_err();
+
+    assert!(
+        error.contains("one book at a time"),
+        "unexpected error: {error}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_layout_track_refuses_a_source_that_is_not_a_pdf() {
+    let root = temp_root("layout-not-pdf");
+    let repo_root = layout_package_root(&root);
+    let source = root.join("book.epub");
+    fs::write(&source, b"PK\x03\x04").unwrap();
+    let job = layout_job(vec![layout_route("direct_text", &display_path(&source))]);
+
+    let error =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap_err();
+
+    assert!(
+        error.contains("only accepts PDFs"),
+        "unexpected error: {error}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_layout_track_reports_a_missing_source_before_spawning_anything() {
+    let root = temp_root("layout-missing");
+    let repo_root = layout_package_root(&root);
+    let job = layout_job(vec![layout_route(
+        "direct_text",
+        &display_path(&root.join("absent.pdf")),
+    )]);
+
+    let error =
+        build_layout_pdf_command_for_root(&job, &root.join("output"), &repo_root).unwrap_err();
+
+    assert!(
+        error.contains("Source PDF not found"),
+        "unexpected error: {error}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_layout_mode_takes_precedence_over_the_source_kind() {
+    // The dispatch in build_runner_command_with_root has to check the mode
+    // first, or a Zotero attachment routes to the OCR worker as usual and the
+    // track silently never runs.
+    let root = temp_root("layout-dispatch");
+    let source_pdf = root.join("book.pdf");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&source_pdf, b"%PDF-1.7\n").unwrap();
+    let job = layout_job(vec![layout_route(
+        "direct_text",
+        &display_path(&source_pdf),
+    )]);
+
+    // The OCR root argument is what a reflow job would use; a layout job must
+    // ignore it entirely. Only the label is asserted: resolving the layout
+    // package needs the real repo root, which this test does not have.
+    let dispatched = build_runner_command_with_root(&job, &root.join("output"), Some(&root));
+    match dispatched {
+        Ok(command) => assert_eq!(command.label, LAYOUT_PDF_COMMAND_LABEL),
+        Err(error) => assert!(
+            error.contains("Layout-preserving PDF package not found"),
+            "dispatched to the OCR worker instead of the layout track: {error}"
+        ),
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_pdf_is_registered_as_an_artifact() {
+    let root = temp_root("layout-artifact");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("Weber 1922.zh-CN.bilingual.pdf"), b"%PDF-1.7\n").unwrap();
+
+    let artifacts = scan_artifacts(&root).unwrap();
+
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].kind, "pdf");
+    assert_eq!(artifact_default_stage("pdf"), "extract");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_ocr_workers_page_chunks_are_not_registered_as_artifacts() {
+    // zotero_llm_worker.py splits a long book into page ranges under
+    // .state/chunks before uploading them. Those splits are PDFs, so teaching
+    // artifact_kind about PDFs would otherwise register dozens of them per book
+    // as deliverables -- while .state/staging, where the finished Markdown
+    // lives, has to keep being scanned.
+    let root = temp_root("layout-chunks");
+    let chunks = root
+        .join(".state")
+        .join("chunks")
+        .join("ATTACH1")
+        .join("md5");
+    let staging = root.join(".state").join("staging").join("ATTACH1");
+    fs::create_dir_all(&chunks).unwrap();
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(chunks.join("pages-0001-0050.pdf"), b"%PDF-1.7\n").unwrap();
+    fs::write(chunks.join("pages-0051-0100.pdf"), b"%PDF-1.7\n").unwrap();
+    fs::write(staging.join("book.md"), "# Book\n").unwrap();
+
+    let artifacts = scan_artifacts(&root).unwrap();
+
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["markdown"],
+        "registered a working file as a deliverable: {artifacts:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_directory_named_chunks_outside_the_worker_state_tree_is_still_scanned() {
+    // The skip is anchored on .state/chunks, not on the name alone: a book whose
+    // own folder happens to be called "chunks" must not vanish.
+    let root = temp_root("layout-chunks-elsewhere");
+    let chunks = root.join("chunks");
+    fs::create_dir_all(&chunks).unwrap();
+    fs::write(chunks.join("book.zh-CN.bilingual.pdf"), b"%PDF-1.7\n").unwrap();
+
+    let artifacts = scan_artifacts(&root).unwrap();
+
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].kind, "pdf");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn babeldoc_warning_counts_reach_the_job_log() {
+    let root = temp_root("layout-warnings");
+    fs::create_dir_all(&root).unwrap();
+    let stdout = "BOOK_PIPELINE_MARKER warning=large_page count=3\n\
+                  BOOK_PIPELINE_MARKER warning=other count=1\n";
+
+    let markers = parse_allowlisted_worker_markers(stdout, &[root.as_path()]);
+
+    assert_eq!(
+        markers,
+        vec![
+            "worker marker: warning=large_page count=3".to_string(),
+            "worker marker: warning=other count=1".to_string(),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_unknown_warning_kind_is_dropped_rather_than_carried_through() {
+    // The marker parser is the boundary that keeps free text -- BabelDOC warns
+    // with interpolated page numbers and sometimes file paths -- out of a job
+    // log. A kind not in LAYOUT_PDF_WARNING_KINDS must not become one.
+    let root = temp_root("layout-warning-unknown");
+    fs::create_dir_all(&root).unwrap();
+    let stdout = "BOOK_PIPELINE_MARKER warning=/library/storage/ABCD1234/secret.pdf count=1\n";
+
+    let markers = parse_allowlisted_worker_markers(stdout, &[root.as_path()]);
+
+    assert_eq!(markers, vec!["worker marker: count=1".to_string()]);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_layout_track_gets_a_translation_sized_timeout() {
+    // A 400-page monograph is one LLM call per paragraph plus a first-run model
+    // download; the default two hours would stop a healthy run mid-book.
+    let command = RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: LAYOUT_PDF_COMMAND_LABEL.into(),
+        program: PathBuf::from("uv"),
+        args: Vec::new(),
+        env: Vec::new(),
+        cwd: None,
+        output_dir: PathBuf::from("/tmp"),
+        attempts: 0,
+        accepted_exit_codes: vec![0],
+    };
+
+    assert_eq!(
+        runner_command_timeout(&command),
+        Duration::from_secs(12 * 60 * 60)
+    );
+}
+
+/// Stands in for the BabelDOC subprocess: writes the one file the real wrapper
+/// writes, so the lifecycle can be exercised without a provider or a Keychain.
+struct LayoutPdfFixtureRunner;
+
+impl PipelineRunner for LayoutPdfFixtureRunner {
+    fn run(&self, _job: &BookPipelineJob, output_dir: &Path) -> Result<RunnerOutput, String> {
+        fs::create_dir_all(output_dir).unwrap();
+        fs::write(
+            output_dir.join("Weber 1922.zh-CN.bilingual.pdf"),
+            b"%PDF-1.7 bilingual\n",
+        )
+        .unwrap();
+        Ok(RunnerOutput {
+            log_summary: vec![format!("{LAYOUT_PDF_COMMAND_LABEL} completed")],
+            artifacts: scan_artifacts(output_dir)?,
+            collection_items: Vec::new(),
+            output_dir: Some(output_dir.to_path_buf()),
+            current_step: None,
+        })
+    }
+}
+
+#[test]
+fn a_layout_job_completes_at_extract_with_the_bilingual_pdf_registered() {
+    let root = temp_root("layout-lifecycle");
+    fs::create_dir_all(&root).unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        fake_direct_zotero_source(),
+        MODE_LAYOUT_PRESERVING.into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            ..BookPipelinePreviewConfig::default()
+        },
+    )
+    .unwrap();
+
+    // Queued shape: two stages, and no translation handoff row on the route.
+    let child = &job.children[0];
+    assert_eq!(
+        child
+            .stages
+            .iter()
+            .map(|stage| stage.stage_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["route", "extract"]
+    );
+    assert!(
+        !job.route
+            .iter()
+            .any(|item| item.route_kind == "translation_handoff"),
+        "the layout track must not queue a translation handoff: {:?}",
+        job.route
+    );
+
+    let completed = run_job(&store, &LayoutPdfFixtureRunner, &job.id).unwrap();
+
+    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert_eq!(
+        completed
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pdf"]
+    );
+    // No gate is ever raised: the whole point of this track is one pass.
+    assert!(
+        completed
+            .children
+            .iter()
+            .flat_map(|child| child.stages.iter())
+            .all(|stage| stage.status != STATUS_WAITING_FOR_APPROVAL),
+        "the layout track must not raise an approval gate: {:?}",
+        completed.children
+    );
+    assert!(
+        completed.approval_references.is_empty(),
+        "unexpected approval references: {:?}",
+        completed.approval_references
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_layout_job_never_takes_the_reflow_source_shortcuts() {
+    // `zotero_filter` -- the island's Zotero title search -- is a batch source,
+    // and CommandPipelineRunner::run short circuits batch sources to the OCR
+    // worker before it ever builds a command. Without the mode check in that
+    // predicate, a layout job queued from a title search runs an OCR conversion
+    // and the whole track is silently skipped.
+    let mut job = layout_job(vec![layout_route("direct_text", "/books/book.pdf")]);
+
+    for source_kind in ["zotero_filter", "zotero_collection", "markdown_source"] {
+        job.source.kind = source_kind.into();
+
+        job.mode = MODE_LAYOUT_PRESERVING.into();
+        assert!(
+            !takes_reflow_source_shortcut(&job),
+            "a layout job with a {source_kind} source was shortcut past the layout track"
+        );
+
+        // The same predicate must keep saying yes for the reflow track, or this
+        // guard has quietly disabled the shortcuts for everyone.
+        job.mode = MODE_CONVERT_THEN_TRANSLATE.into();
+        assert!(
+            takes_reflow_source_shortcut(&job),
+            "the reflow track lost its {source_kind} shortcut"
+        );
+    }
+}
+
+#[test]
+fn a_finished_layout_job_opens_the_bilingual_pdf_itself() {
+    // The layout track builds no reading project, so without its own navigation
+    // target a finished book falls back to "Open workspace" and leaves the user
+    // to pick the PDF out of the job output directory themselves.
+    let root = temp_root("layout-open-target");
+    fs::create_dir_all(&root).unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        fake_direct_zotero_source(),
+        MODE_LAYOUT_PRESERVING.into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            ..BookPipelinePreviewConfig::default()
+        },
+    )
+    .unwrap();
+
+    let completed = run_job(&store, &LayoutPdfFixtureRunner, &job.id).unwrap();
+
+    assert_eq!(completed.status, STATUS_COMPLETED);
+    let open_target = completed
+        .open_target
+        .as_ref()
+        .expect("a finished layout job must offer something to open");
+    assert_eq!(open_target.kind, "bilingual_pdf");
+    assert_eq!(open_target.action_label, "Open bilingual PDF");
+    let target = completed
+        .navigation_targets
+        .iter()
+        .find(|target| target.target_id == open_target.target_id)
+        .expect("the selected target must be registered");
+    assert!(
+        target.path.ends_with(".pdf"),
+        "expected the bilingual PDF, got {}",
+        target.path
+    );
+}
+
+#[test]
+fn a_reflow_job_keeps_its_own_open_target() {
+    // The arm added for the layout track sits ahead of the reading-output one,
+    // so it has to be scoped by mode or every finished book claims to be a PDF.
+    let root = temp_root("layout-open-target-reflow");
+    fs::create_dir_all(&root).unwrap();
+    let store = BookPipelineStore::for_test(&root);
+    let job = queue_job(
+        &store,
+        fake_direct_zotero_source(),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig {
+            has_paddleocr_credentials: true,
+            ..BookPipelinePreviewConfig::default()
+        },
+    )
+    .unwrap();
+
+    // Same runner, so the same PDF lands in the job output directory. Only the
+    // mode differs, and that alone must keep the target off this job.
+    let ran = run_job(&store, &LayoutPdfFixtureRunner, &job.id).unwrap();
+
+    assert!(
+        !ran.navigation_targets
+            .iter()
+            .any(|target| target.kind == "bilingual_pdf"),
+        "the reflow track must not claim a bilingual PDF target: {:?}",
+        ran.navigation_targets
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_layout_track_is_enqueueable() {
+    // #96 closed the queue boundary to unknown modes. A new track that is not on
+    // that list is refused before it ever builds a command, so the whole feature
+    // is dead on arrival -- and the only symptom is a queue-time error message.
+    assert!(validate_enqueue_mode(MODE_LAYOUT_PRESERVING).is_ok());
+    assert!(ENQUEUEABLE_MODES.contains(&MODE_LAYOUT_PRESERVING));
 }

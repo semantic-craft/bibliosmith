@@ -206,6 +206,36 @@
 .pl-island-preflight { max-height: 240px; overflow: auto; border-radius: var(--radius); background: var(--sub); }
 .pl-island-foot { display: flex; align-items: center; gap: 8px; }
 
+/* The two book tracks, offered only for a single text PDF. */
+.pl-island-track { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pl-track-options { display: flex; gap: 8px; }
+.pl-track-option {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--sub);
+  text-align: left;
+}
+.pl-track-option:hover { border-color: var(--pl-jade); }
+.pl-track-option.picked { border-color: transparent; background: var(--pl-jade-soft); }
+.pl-track-name { display: block; color: var(--muted); font-size: 12.5px; }
+.pl-track-option.picked .pl-track-name { color: var(--pl-jade); font-weight: 550; }
+/* The trade-off is the point of the control, so it is always readable rather
+   than hidden behind the title attribute. Clamped so a long hint cannot push
+   the launch button off a short window. */
+.pl-track-hint {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
 /* ---------- hero (empty shelf) ---------- */
 
 .pl-hero {
@@ -414,6 +444,11 @@
 /* ---------- three-phase strip ---------- */
 
 .pl-phases { display: flex; margin-bottom: 16px; }
+/* The layout-preserving track is one pass, so its strip has a single segment.
+   Left-aligned rather than stretched: one circle centred across the full width
+   reads as a three-step strip that failed to render the other two. */
+.pl-phases.single { justify-content: flex-start; }
+.pl-phases.single .pl-phase { flex: 0 0 auto; min-width: 140px; }
 .pl-phase { position: relative; flex: 1; padding: 0 4px; text-align: center; }
 .pl-phase::before {
   content: "";
