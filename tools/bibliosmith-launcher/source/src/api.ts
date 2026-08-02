@@ -276,13 +276,19 @@ function previewBookPipelineJob(source: BookPipelineSource, mode: string, config
     // Mirrors ordered_child_stage_ids in book_pipeline.rs, including the
     // item-scoped "index" stage the backend only runs for Zotero attachments.
     const wantsItemIndex = isBookPipelineZoteroSource(source);
-    // The short arm is the retired conversion-only shape, which only jobs stored
-    // before the retirement still carry -- reached here through the same
-    // exclusion the backend uses, so an unfamiliar mode gets the translation
-    // shape rather than one that silently stops after extraction.
-    const stageIds = shouldHandoffAfterRun(mode)
-      ? ["route", "extract", "index", "handoff", "split", "prepare", "approve_translation", "translate", "expert_qa", "approve_promotion", "promote", "build_reading", "validate_reading", "build_digest"]
-      : ["route", "extract", "index"];
+    // Answered ahead of the handoff question, as ordered_child_stage_ids answers
+    // it: the layout track's single pass is the whole run, and it is the one mode
+    // ensure_item_index_stage refuses to give an "index" stage to. The last arm
+    // is the retired conversion-only shape, which only jobs stored before the
+    // retirement still carry -- reached through the same exclusion the backend
+    // uses, so an unfamiliar mode gets the translation shape rather than one that
+    // silently stops after extraction.
+    const stageIds =
+      mode === "layout_preserving"
+        ? ["route", "extract"]
+        : shouldHandoffAfterRun(mode)
+          ? ["route", "extract", "index", "handoff", "split", "prepare", "approve_translation", "translate", "expert_qa", "approve_promotion", "promote", "build_reading", "validate_reading", "build_digest"]
+          : ["route", "extract", "index"];
     const stages = stageIds.map((stageId) => ({
       stageId,
       status: skipped ? "skipped" : stageId === "route" ? (runnable ? "completed" : "blocked") : stageId === "extract" ? (runnable ? "ready" : "pending") : stageId === "index" ? (wantsItemIndex ? "pending" : "skipped") : stageId === "build_digest" ? "skipped" : "pending",

@@ -43,6 +43,17 @@ describe("queueBookPipelineJob in the browser preview", () => {
     }
   });
 
+  it("gives the layout track the two stages that are its whole run", async () => {
+    // ordered_child_stage_ids answers layout_preserving before it asks about the
+    // handoff, and answers with two. The mirror used to let it fall through to
+    // the arm that keeps pre-retirement conversion_only jobs readable, which put
+    // an "index" stage in the preview that the backend never creates -- and
+    // ensure_item_index_stage refuses to create it for exactly this mode.
+    const job = await queueBookPipelineJob(source, "layout_preserving", intent);
+
+    expect(job.children[0].stages.map((stage) => stage.stageId)).toEqual(["route", "extract"]);
+  });
+
   it("gives a queued translating job the full stage list, never the retired three", async () => {
     const job = await queueBookPipelineJob(source, "convert_then_translate", intent);
     const stageIds = job.children[0].stages.map((stage) => stage.stageId);
