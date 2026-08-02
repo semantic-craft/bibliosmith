@@ -84,6 +84,15 @@ def refuse_to_parse(*_args, **_kwargs):
     raise ValueError("PDF parsing error: couldn't parse input: invalid file trailer")
 
 
+#: Two chapters that open a page and one section that does not, with enough
+#: text on each page to beat what PyMuPDF reads off the stand-in PDF.
+LEVELLED_STUB = stub_pages(
+    "# 1 The First Chapter\n\nThe opening paragraph of the first chapter runs here.",
+    "The argument continues at some length.\n\n# 2. A Section\n\nMore of the argument.",
+    "# 2 The Second Chapter\n\nThe opening paragraph of the second chapter runs here.",
+)
+
+
 class HybridChainTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -110,6 +119,32 @@ class HybridChainTests(unittest.TestCase):
         self.assertIn("PageTwoMarker", result.markdown)
         self.assertNotIn("PageOneMarker", result.markdown)
         self.assertNotIn("PageThreeMarker", result.markdown)
+
+    def test_a_whole_document_has_its_heading_levels_normalised(self) -> None:
+        pdf = write_pdf(self.tmp / "book.pdf", ["one", "two", "three"])
+
+        with mock.patch.object(
+            pdf_text.pdf_inspector, "extract_pages_markdown", return_value=LEVELLED_STUB
+        ):
+            result = pdf_text.extract_markdown(pdf)
+
+        self.assertIn("\n## 2. A Section", result.markdown)
+
+    def test_a_page_range_of_the_same_document_is_not_normalised(self) -> None:
+        """The same three pages, asked for as a range rather than as the book.
+
+        Which headings are chapters is read off the whole document, so a caller
+        that asked for part of it is handed the levels pdf-inspector gave.
+        """
+        pdf = write_pdf(self.tmp / "book.pdf", ["one", "two", "three", "four"])
+
+        with mock.patch.object(
+            pdf_text.pdf_inspector, "extract_pages_markdown", return_value=LEVELLED_STUB
+        ):
+            result = pdf_text.extract_markdown(pdf, pages=[1, 2, 3])
+
+        self.assertIn("\n# 2. A Section", result.markdown)
+        self.assertNotIn("## 2. A Section", result.markdown)
 
     def test_pdf_without_a_text_layer_falls_back_to_pymupdf(self) -> None:
         pdf = write_pdf(self.tmp / "blank.pdf", ["", ""])
@@ -549,6 +584,10 @@ class HeadingLevelTests(unittest.TestCase):
     sections and 3 of them the second halves of titles that wrapped.
     """
 
+    def normalize(self, pages):  # type: ignore[no-untyped-def]
+        """Every case here is a whole book; the page range has its own test."""
+        return pdf_text._normalize_heading_levels(pages, whole_document=True)
+
     def levels(self, pages):  # type: ignore[no-untyped-def]
         found: dict[str, int] = {}
         for _, markdown in pages:
@@ -559,14 +598,14 @@ class HeadingLevelTests(unittest.TestCase):
         return found
 
     def test_a_section_below_a_chapter_is_demoted(self) -> None:
-        levels = self.levels(pdf_text._normalize_heading_levels(levelled_book()))
+        levels = self.levels(self.normalize(levelled_book()))
 
         self.assertEqual(levels["2. Preliminaries"], 2)
         self.assertEqual(levels["3.2 Hans Kelsen"], 2)
 
     def test_an_unnumbered_section_is_demoted_too(self) -> None:
         """One companion volume numbers none of its sections."""
-        levels = self.levels(pdf_text._normalize_heading_levels(levelled_book()))
+        levels = self.levels(self.normalize(levelled_book()))
 
         self.assertEqual(levels["The Received View"], 2)
         self.assertEqual(levels["Further Reading"], 2)
@@ -578,12 +617,12 @@ class HeadingLevelTests(unittest.TestCase):
         marks a chapter — until a section happens to start one anyway, and
         only the number it carries still says what it is.
         """
-        levels = self.levels(pdf_text._normalize_heading_levels(levelled_book()))
+        levels = self.levels(self.normalize(levelled_book()))
 
         self.assertEqual(levels["4. A Section Printed at the Top of a Page"], 2)
 
     def test_the_chapters_stay_where_they_are(self) -> None:
-        levels = self.levels(pdf_text._normalize_heading_levels(levelled_book()))
+        levels = self.levels(self.normalize(levelled_book()))
 
         for title in ("1 The Artifact Thesis", "2 A Second Chapter", "3 A Third Chapter"):
             self.assertEqual(levels[title], 1, title)
@@ -597,7 +636,7 @@ class HeadingLevelTests(unittest.TestCase):
         """
         correct = levelled_book(flat=False)
 
-        self.assertEqual(pdf_text._normalize_heading_levels(correct), correct)
+        self.assertEqual(self.normalize(correct), correct)
 
     def test_a_book_that_numbers_its_chapters_keeps_them(self) -> None:
         """`1.` is a chapter here, not a section, and nothing else is competing.
@@ -612,7 +651,7 @@ class HeadingLevelTests(unittest.TestCase):
             (3, "# 3. Results\n\nWhat came of it."),
         ]
 
-        levels = self.levels(pdf_text._normalize_heading_levels(pages))
+        levels = self.levels(self.normalize(pages))
 
         self.assertEqual(levels["A Note on Sources"], 2)
         for title in ("1. Introduction", "2. Method", "3. Results"):
@@ -630,7 +669,62 @@ class HeadingLevelTests(unittest.TestCase):
             (2, "More body text.\n\n# 3. Another Section"),
         ]
 
-        self.assertEqual(pdf_text._normalize_heading_levels(pages), pages)
+        self.assertEqual(self.normalize(pages), pages)
+
+    def test_one_heading_at_the_top_of_a_page_does_not_make_the_rest_sections(self) -> None:
+        """A paper's sections are peers; one of them opening a page is luck.
+
+        Read literally, the page break here says this document has a single
+        chapter with every other heading nested under it. One chapter is the
+        same cut as no chapter, so the level is left as the peers it is.
+        """
+        pages = [
+            (1, "Body text opens the page.\n\n# Method\n\nHow it was done."),
+            (2, "More body.\n\n# Results\n\nWhat came of it."),
+            (3, "# Discussion\n\nWhat it means."),
+            (4, "More body.\n\n# Conclusion\n\nWhat follows."),
+        ]
+
+        self.assertEqual(self.normalize(pages), pages)
+
+    def test_a_heading_printed_before_the_first_chapter_is_left_alone(self) -> None:
+        """A section belongs to a chapter, so it cannot come before all of them.
+
+        This is also the shape a `pages=` range produces when it opens in the
+        middle of a chapter, and the reason a heading before the first chapter
+        is not read as a section of one.
+        """
+        pages = [
+            (1, "Body text opens the page.\n\n# Foreword\n\nWhat the book owes."),
+            (2, "# 1 The First Chapter\n\nThe opening paragraph."),
+            (3, "The argument continues.\n\n# 2. A Section\n\nMore of it."),
+            (4, "# 2 The Second Chapter\n\nThe second opening paragraph."),
+        ]
+
+        levels = self.levels(self.normalize(pages))
+
+        self.assertEqual(levels["Foreword"], 1)
+        self.assertEqual(levels["2. A Section"], 2)
+
+    def test_a_page_range_is_not_levelled(self) -> None:
+        """Which headings are chapters is a fact about the whole book.
+
+        Levelling a window onto it would make the depth a heading came out at
+        depend on the range the caller asked for.
+        """
+        pages = levelled_book()
+
+        self.assertEqual(
+            pdf_text._normalize_heading_levels(pages, whole_document=False), pages
+        )
+
+    def test_a_page_range_still_has_its_wrapped_titles_rejoined(self) -> None:
+        """Both printed lines are inside the range, so both are visible."""
+        pages = [(7, "# 9 Law Is an Institution, an Artifact,\n\n# and a Practice\n\nBody.")]
+
+        levelled = pdf_text._normalize_heading_levels(pages, whole_document=False)
+
+        self.assertIn("9 Law Is an Institution, an Artifact, and a Practice", self.levels(levelled))
 
     def test_a_folio_above_a_chapter_title_does_not_hide_it(self) -> None:
         """Some pages print the folio on its own line above the title."""
@@ -640,7 +734,7 @@ class HeadingLevelTests(unittest.TestCase):
             (3, "43\n\n# 2 The Second Chapter\n\nThe second opening paragraph."),
         ]
 
-        levels = self.levels(pdf_text._normalize_heading_levels(pages))
+        levels = self.levels(self.normalize(pages))
 
         self.assertEqual(levels["2 The Second Chapter"], 1)
         self.assertEqual(levels["2. A Section"], 2)
@@ -651,9 +745,50 @@ class HeadingLevelTests(unittest.TestCase):
             (2, "Body.\n\n# 2. A Section\n\nMore body."),
         ]
 
-        levels = self.levels(pdf_text._normalize_heading_levels(pages))
+        levels = self.levels(self.normalize(pages))
 
         self.assertEqual(levels["1.1.1 A Sub-Sub-Section"], 3)
+
+    def test_a_demoted_section_takes_its_own_subsections_down_with_it(self) -> None:
+        """The half-right outline font sizing produces all the time.
+
+        `2. Preliminaries` is a section printed at the chapter level while its
+        own `Hans Kelsen` came out correctly deeper. Move the parent alone and
+        the two end up peers, which is a worse outline than the one this pass
+        was handed.
+        """
+        pages = [
+            (1, "# 1 A Chapter\n\nBody.\n\n# 2. Preliminaries\n\nGround to clear."),
+            (2, "## Hans Kelsen\n\nHis version.\n\n### The Basic Norm\n\nMore."),
+            (3, "# 2 A Second Chapter\n\nBody.\n\n## A Section Of Its Own\n\nMore."),
+        ]
+
+        levels = self.levels(self.normalize(pages))
+
+        self.assertEqual(levels["2. Preliminaries"], 2)
+        self.assertEqual(levels["Hans Kelsen"], 3)
+        self.assertEqual(levels["The Basic Norm"], 4)
+        # The second chapter stays put, so nothing under it moves either.
+        self.assertEqual(levels["2 A Second Chapter"], 1)
+        self.assertEqual(levels["A Section Of Its Own"], 2)
+
+    def test_a_subsection_already_at_the_bottom_stays_there(self) -> None:
+        """Six hashes is as deep as Markdown goes; a seventh is body text.
+
+        Flattening the last two levels of one branch costs an outline entry its
+        depth. Writing `#######` would cost it its place in the outline
+        altogether, and would take the line out of `_heading()`'s reach.
+        """
+        pages = [
+            (1, "# 1 A Chapter\n\nBody.\n\n# 2. Preliminaries\n\nGround to clear."),
+            (2, "##### Deep\n\nBody.\n\n###### Deeper\n\nMore body."),
+            (3, "# 2 A Second Chapter\n\nBody."),
+        ]
+
+        levels = self.levels(self.normalize(pages))
+
+        self.assertEqual(levels["Deep"], 6)
+        self.assertEqual(levels["Deeper"], 6)
 
 
 class WrappedHeadingTests(unittest.TestCase):
@@ -693,10 +828,38 @@ class WrappedHeadingTests(unittest.TestCase):
             ["THE ROUTLEDGE COMPANION TO PHILOSOPHY OF LAW"],
         )
 
-    def test_a_title_whose_second_half_cannot_open_one_is_rejoined(self) -> None:
+    def test_a_title_broken_before_a_lower_case_of_is_rejoined(self) -> None:
+        """No title of its own begins with a lower-case word."""
+        self.assertEqual(
+            self.merge("# 1 Problems and Promises", "# of Comparative Law"),
+            ["1 Problems and Promises of Comparative Law"],
+        )
+
+    def test_a_chapter_title_beginning_with_of_is_left_as_two(self) -> None:
+        """`Of Laws in General` is a chapter, and this library prints part
+        dividers at the level of the chapters under them.
+
+        Read the word alone and the two structural boundaries become one, with
+        the chapter's text swallowed by whatever came before the divider. The
+        case the word is set in is what says which of the two this is.
+        """
+        self.assertEqual(
+            self.merge("# PART I", "# Of Laws in General"),
+            ["PART I", "Of Laws in General"],
+        )
+
+    def test_a_capitalised_continuation_is_left_as_two_even_when_it_wrapped(self) -> None:
+        """The price of the rule above, paid in the cheap direction.
+
+        `THEORIES ABOUT THE NATURE` / `OF LAW` really is one title over two
+        lines, and a book that sets its headings in capitals prints the same
+        `OF` either way, so nothing in it distinguishes this from the divider
+        above. A missed merge leaves the tail as a subsection of the chapter it
+        belongs to; a wrong one destroys a chapter.
+        """
         self.assertEqual(
             self.merge("# THEORIES ABOUT THE NATURE", "# OF LAW"),
-            ["THEORIES ABOUT THE NATURE OF LAW"],
+            ["THEORIES ABOUT THE NATURE", "OF LAW"],
         )
 
     def test_a_divider_above_a_chapter_title_is_left_as_two(self) -> None:
@@ -857,6 +1020,56 @@ class RealCorpusTests(unittest.TestCase):
             "5 On the Artifactual— and Natural— Character of Legal Institutions", titles
         )
         self.assertNotIn("Character of Legal Institutions", titles)
+
+    def heading_levels(self, pattern: str) -> dict[str, int]:
+        result = self.extract(pattern)
+        return {
+            heading[1].replace("\xa0", " "): heading[0]
+            for heading in (
+                pdf_text._heading(line) for line in result.markdown.splitlines()
+            )
+            if heading is not None
+        }
+
+    def test_a_book_whose_chapters_do_not_open_a_page_keeps_them(self) -> None:
+        """A print-out with no page breaks between its chapters.
+
+        Exactly one heading in these 254 pages falls at the top of one, so
+        reading the page break as chapter evidence turns eight headings that
+        say `Chapter N:` in so many words into sections of a ninth. Two
+        chapters have to survive the test before any heading goes down.
+        """
+        titles = self.chapter_level_headings(
+            "Tombal_2022_Imposing Data Sharing Among Private Actors*.pdf"
+        )
+
+        for chapter in range(2, 10):
+            self.assertTrue(
+                any(title.startswith(f"Chapter {chapter}:") for title in titles),
+                f"Chapter {chapter} is no longer a chapter",
+            )
+
+    def test_a_demoted_section_keeps_its_own_subsections_under_it(self) -> None:
+        """A German legal outline, half of it levelled correctly to begin with.
+
+        `Einleitung` and `B. Know-how-Ausspähung durch „Reverse Engineering“`
+        are sections printed at the chapter level, and pdf-inspector already
+        put `A. Problemstellung` and `II. Beweggründe` a level below them.
+        Moving the parents alone flattened each pair into peers.
+        """
+        levels = self.heading_levels(
+            "Kochmann_2009_Schutz des know-how gegen ausspähende produktanalysen.pdf"
+        )
+        for section, subsection in (
+            ("Einleitung", "A. Problemstellung"),
+            (
+                "B. Know-how-Ausspähung durch „Reverse Engineering“",
+                "II. Beweggründe für „Reverse Engineering“",
+            ),
+        ):
+            self.assertIn(section, levels)
+            self.assertIn(subsection, levels)
+            self.assertLess(levels[section], levels[subsection], subsection)
 
     def test_a_companion_volume_that_numbers_no_section_is_levelled_too(self) -> None:
         """43 chapters. Its sections carry no number to demote them by, so the
