@@ -12054,7 +12054,9 @@ fn attach_artifact_to_zotero_with_executor(
     allowed_roots: &[PathBuf],
     executor: &dyn RunnerCommandExecutor,
 ) -> Result<BookPipelineJob, String> {
-    let mut state = store.load()?;
+    // Read only: everything below is a guard, and the write happens against a
+    // freshly loaded state once the upload is done.
+    let state = store.load()?;
     let job_index = find_job_index(&state, job_id)?;
     let job = &state.jobs[job_index];
     let artifact = find_job_artifact(job, artifact_id)
@@ -12102,24 +12104,69 @@ fn attach_artifact_to_zotero_with_executor(
         .map_err(|error| redact_runner_message(&format!("Zotero attach failed: {error}")))?;
     let evidence = read_zotero_attach_evidence(&command_result, &parent_item_key, &path)?;
 
-    let job = &mut state.jobs[job_index];
-    let artifact = find_job_artifact_mut(job, artifact_id)
-        .ok_or_else(|| "This artifact is not registered on this job.".to_string())?;
-    let artifact_kind = artifact.kind.clone();
-    artifact.zotero_key = Some(evidence.attachment_key.clone());
-    job.current_step = "Attached the finished book to Zotero".into();
-    job.log_summary
-        .extend(redact_log_lines(&command_result.log_summary));
-    job.log_summary.push(format!(
-        "Attached {artifact_kind} to Zotero item {parent_item_key} as attachment {}",
-        evidence.attachment_key
-    ));
-    job.log_summary = trim_log_summary(&job.log_summary);
-    job.updated_at = now_label();
-    derive_job(job);
-    let result = job.clone();
-    store.save(&state)?;
-    Ok(result)
+    // The attachment now exists in the library, so from here on losing the key
+    // is worse than any error this can return: the next click would see no key,
+    // pass the duplicate guard, and upload the same book again. The state read
+    // above is stale by however long the upload took -- long enough for another
+    // stage to have bumped the revision -- so record against a freshly loaded
+    // state rather than the one the guards ran on, and retry the write if
+    // something lands in between.
+    record_zotero_attachment_key(
+        store,
+        job_id,
+        artifact_id,
+        &parent_item_key,
+        &evidence.attachment_key,
+        &command_result.log_summary,
+    )
+}
+
+/// How many times to re-read and re-apply the key when a concurrent write wins
+/// the revision race. Each attempt is a state read plus a write, so a couple of
+/// retries covers the realistic contention without spinning.
+const ZOTERO_ATTACH_RECORD_ATTEMPTS: u32 = 3;
+
+fn record_zotero_attachment_key(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    artifact_id: &str,
+    parent_item_key: &str,
+    attachment_key: &str,
+    command_log_summary: &[String],
+) -> Result<BookPipelineJob, String> {
+    let mut last_error = String::new();
+    for _ in 0..ZOTERO_ATTACH_RECORD_ATTEMPTS {
+        let mut state = store.load()?;
+        let job_index = find_job_index(&state, job_id)?;
+        let job = &mut state.jobs[job_index];
+        let artifact = find_job_artifact_mut(job, artifact_id).ok_or_else(|| {
+            format!(
+                "Attached to Zotero as {attachment_key}, but the artifact is no longer registered on this job, so the key could not be recorded. Delete that attachment before attaching again."
+            )
+        })?;
+        let artifact_kind = artifact.kind.clone();
+        artifact.zotero_key = Some(attachment_key.to_string());
+        job.current_step = "Attached the finished book to Zotero".into();
+        job.log_summary
+            .extend(redact_log_lines(command_log_summary));
+        job.log_summary.push(format!(
+            "Attached {artifact_kind} to Zotero item {parent_item_key} as attachment {attachment_key}"
+        ));
+        job.log_summary = trim_log_summary(&job.log_summary);
+        job.updated_at = now_label();
+        derive_job(job);
+        let result = job.clone();
+        match store.save(&state) {
+            Ok(()) => return Ok(result),
+            Err(error) => last_error = error,
+        }
+    }
+    // Out of retries with the upload already done. Naming the key is the point:
+    // it is the only way the person can tell that the book did reach Zotero and
+    // clean up before trying again.
+    Err(format!(
+        "Attached to Zotero as {attachment_key}, but recording it on the book failed after {ZOTERO_ATTACH_RECORD_ATTEMPTS} attempts: {last_error}. Delete that attachment before attaching again."
+    ))
 }
 
 /// `zsearch` writes its typed failures to stdout as an envelope rather than to

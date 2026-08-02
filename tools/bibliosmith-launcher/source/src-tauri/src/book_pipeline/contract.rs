@@ -70,13 +70,22 @@ pub(crate) const ZOTERO_ATTACH_ACCEPTED_EXIT_CODES: [i32; 7] = [0, 1, 2, 3, 4, 5
 /// reports are working state, and the Markdown the conversion worker already
 /// uploaded has its own attachment.
 ///
-/// The layout-preserving track's bilingual PDF is missing for a reason: it is
-/// registered by extension as the generic `pdf` kind, which any PDF sitting
-/// under a job output root also gets -- a source PDF among them. Listing `pdf`
-/// here would offer to attach a book's own source back onto the item it came
-/// from. It joins the list once that deliverable has a kind of its own.
-pub(crate) const ZOTERO_ATTACHABLE_ARTIFACT_KINDS: [&str; 3] =
-    ["reading_epub", "reading_bilingual_epub", "reading_html"];
+/// Both formats the redesign also names as deliverables are absent, and for the
+/// same underlying reason -- neither is a single file this command could stand
+/// behind:
+///
+/// - `reading_html` is registered one artifact **per chapter**
+///   (`run_build_reading_stage`), so attaching it would upload one XHTML file
+///   and record its key as though the HTML book had gone up. An HTML-only book
+///   needs a packaged deliverable before it can be attached at all.
+/// - The layout-preserving track's bilingual PDF is registered by extension as
+///   the generic `pdf` kind, which any PDF under a job output root also gets --
+///   a source PDF among them. Listing `pdf` would offer to attach a book's own
+///   source back onto the item it came from.
+///
+/// Each joins the list once it has a whole-book artifact of its own.
+pub(crate) const ZOTERO_ATTACHABLE_ARTIFACT_KINDS: [&str; 2] =
+    ["reading_epub", "reading_bilingual_epub"];
 pub(crate) const EPUB_EXTRACT_COMMAND_LABEL: &str = "EPUB chapter extraction";
 /// Name suffixes marking a sidecar of supporting files for the Markdown beside
 /// it: MinerU's per-part tree (`<stem>.mineru`) and the images the PaddleOCR

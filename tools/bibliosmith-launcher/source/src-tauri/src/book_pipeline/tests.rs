@@ -15369,29 +15369,113 @@ fn only_finished_books_can_be_attached() {
         .into_iter()
         .find(|job| job.id == job_id)
         .unwrap();
-    // Working state, not a deliverable: the chapter sources the translation ran
-    // over have no business in someone's library.
-    let chapter = job.children[0]
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "chapter_final")
-        .expect("a promoted chapter")
-        .artifact_id
-        .clone();
+    let artifact_of = |kind: &str| {
+        job.children[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == kind)
+            .unwrap_or_else(|| panic!("a {kind} artifact"))
+            .artifact_id
+            .clone()
+    };
+    let refused = [
+        // Working state, not a deliverable: the chapter sources the translation
+        // ran over have no business in someone's library.
+        artifact_of("chapter_final"),
+        // Registered one per chapter, so uploading "the HTML" would put a
+        // single XHTML file in the library and record its key as though the
+        // whole book had gone up.
+        artifact_of("reading_html"),
+    ];
     let executor = ZoteroAttachFixtureExecutor::default();
 
-    let err = attach_artifact_to_zotero_with_executor(
+    for artifact_id in refused {
+        let err = attach_artifact_to_zotero_with_executor(
+            &store,
+            &job_id,
+            &artifact_id,
+            false,
+            &attach_roots(&repo),
+            &executor,
+        )
+        .unwrap_err();
+        assert!(err.contains("not a finished book"), "{err}");
+    }
+    assert!(executor.commands().is_empty(), "the guard still uploaded");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Answers like the normal fixture, but lets a second writer bump the state
+/// revision first -- the shape of an upload that takes long enough for another
+/// stage to save while it is in flight.
+struct ZoteroAttachRacingExecutor {
+    root: PathBuf,
+    inner: ZoteroAttachFixtureExecutor,
+}
+
+impl RunnerCommandExecutor for ZoteroAttachRacingExecutor {
+    fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+        let writer = BookPipelineStore::for_test_with_owner(&self.root, "concurrent-writer");
+        let mut state = writer.load().unwrap();
+        state.jobs[0].log_summary.push("a concurrent write".into());
+        writer.save(&state).unwrap();
+        self.inner.execute(command)
+    }
+}
+
+#[test]
+fn a_concurrent_write_during_the_upload_does_not_lose_the_attachment_key() {
+    let root = temp_root("zotero-attach-revision-race");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let (job_id, artifact_id) =
+        attachable_reading_job(&store, &repo, &ReadingPipelineFixtureExecutor::passing());
+
+    let attached = attach_artifact_to_zotero_with_executor(
         &store,
         &job_id,
-        &chapter,
+        &artifact_id,
         false,
         &attach_roots(&repo),
-        &executor,
+        &ZoteroAttachRacingExecutor {
+            root: root.clone(),
+            inner: ZoteroAttachFixtureExecutor::default(),
+        },
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(err.contains("not a finished book"), "{err}");
-    assert!(executor.commands().is_empty(), "the guard still uploaded");
+    // The upload already happened. Failing the save here would leave the book in
+    // the library with nothing recording it, and the next click would pass the
+    // duplicate guard and upload it a second time.
+    let stored = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    for job in [&attached, &stored] {
+        assert_eq!(
+            job.children[0]
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_id == artifact_id)
+                .unwrap()
+                .zotero_key
+                .as_deref(),
+            Some("ATTACH01")
+        );
+    }
+    // Recorded onto the newer state rather than over it.
+    assert!(
+        stored
+            .log_summary
+            .iter()
+            .any(|line| line == "a concurrent write"),
+        "the concurrent write was clobbered: {:?}",
+        stored.log_summary
+    );
 
     let _ = fs::remove_dir_all(root);
 }
