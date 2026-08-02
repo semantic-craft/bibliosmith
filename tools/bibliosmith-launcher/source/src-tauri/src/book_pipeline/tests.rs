@@ -8850,6 +8850,110 @@ fn handoff_ready_child_job(
 }
 
 #[test]
+fn translate_only_staging_carries_a_paddle_assets_directory() {
+    let root = temp_root("staging-assets");
+    let repo = handoff_repo_fixture(&root);
+    // A Paddle-produced book, picked straight out of the wrapper's output.
+    let book_dir = root.join("Deep_Learning");
+    let assets = book_dir.join("Deep_Learning_assets");
+    fs::create_dir_all(&assets).unwrap();
+    fs::write(assets.join("figure.png"), b"png-fixture").unwrap();
+    let source_path = book_dir.join("Deep_Learning.md");
+    let store = BookPipelineStore::for_test(&root);
+    handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\n![Figure](Deep_Learning_assets/figure.png)\n",
+    );
+
+    let handed_off = store.load().unwrap().jobs[0].clone();
+    let project_root = child_project_root(&handed_off);
+    let copied_asset = project_root.join("source/Deep_Learning_assets/figure.png");
+    assert_eq!(
+        fs::read(&copied_asset).unwrap(),
+        b"png-fixture",
+        "the assets directory never reached the project"
+    );
+
+    // The decisive check: the link the user wrote still resolves, and the text
+    // itself was not rewritten to make that true.
+    let source_md = project_root.join("source/source.md");
+    assert!(fs::read_to_string(&source_md)
+        .unwrap()
+        .contains("![Figure](Deep_Learning_assets/figure.png)"));
+    assert_eq!(
+        source_md
+            .parent()
+            .unwrap()
+            .join("Deep_Learning_assets/figure.png")
+            .canonicalize()
+            .unwrap(),
+        copied_asset.canonicalize().unwrap()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_markdown_with_no_relative_references_stages_nothing_extra() {
+    let root = temp_root("staging-no-assets");
+    let repo = handoff_repo_fixture(&root);
+    let book_dir = root.join("Plain");
+    fs::create_dir_all(&book_dir).unwrap();
+    let source_path = book_dir.join("Plain.md");
+    let store = BookPipelineStore::for_test(&root);
+    handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nSee [the site](https://example.invalid/x) and [a note](#later).\n",
+    );
+
+    let handed_off = store.load().unwrap().jobs[0].clone();
+    let project_root = child_project_root(&handed_off);
+    let entries = fs::read_dir(project_root.join("source"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .count();
+    assert_eq!(entries, 0, "a URL or fragment is not a resource directory");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn references_pointing_at_two_directories_stage_neither() {
+    let root = temp_root("staging-ambiguous");
+    let repo = handoff_repo_fixture(&root);
+    let book_dir = root.join("Two");
+    for name in ["first_assets", "second_assets"] {
+        fs::create_dir_all(book_dir.join(name)).unwrap();
+        fs::write(book_dir.join(name).join("f.png"), b"png").unwrap();
+    }
+    let source_path = book_dir.join("Two.md");
+    let store = BookPipelineStore::for_test(&root);
+    handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\n![a](first_assets/f.png)\n\n![b](second_assets/f.png)\n",
+    );
+
+    let handed_off = store.load().unwrap().jobs[0].clone();
+    // Ambiguous rather than half-copied. Staging one of them would put a
+    // directory beside the Markdown while the other stayed missing, and the
+    // handoff would then ship a project whose figures silently dangle.
+    let staged = PathBuf::from(handed_off.output_dir.as_deref().unwrap());
+    for name in ["first_assets", "second_assets"] {
+        assert!(!staged.join(name).exists(), "staged {name}");
+    }
+    let project_root = child_project_root(&handed_off);
+    for name in ["first_assets", "second_assets"] {
+        assert!(!project_root.join("source").join(name).exists(), "{name}");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn mineru_handoff_preserves_assets_and_split_keeps_links_resolvable() {
     let root = temp_root("mineru-handoff-assets");
     let repo = handoff_repo_fixture(&root);

@@ -7304,7 +7304,18 @@ fn run_markdown_source_job(
     })?;
     let mineru_source = source_path.with_extension("mineru");
     if mineru_source.is_dir() {
+        // `.mineru` may be renamed to follow the staged file: nothing refers to
+        // it by name.
         copy_directory_tree(&mineru_source, &copied.with_extension("mineru"))?;
+    } else if let Some(resources) = markdown_resource_directory(&source_path) {
+        // An assets directory may not. Its name is written into the Markdown's
+        // own image links, so it is staged under the name those links use and
+        // the copied text is left exactly as the user wrote it.
+        let directory_name = resources
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "Markdown resource directory has an invalid name.".to_string())?;
+        copy_directory_tree(&resources, &output_dir.join(directory_name))?;
     }
     let artifacts = scan_artifacts(output_dir)?;
     Ok(RunnerOutput {
@@ -9404,14 +9415,86 @@ fn create_translation_handoff_project_with_title(
 /// and rewrites every image reference in the Markdown to the relative path
 /// `<stem>_assets/<file>`, so that directory has to travel with the file or the
 /// handed-off project has a figure link pointing at nothing.
+///
+/// The `<stem>_assets` convention only holds where the Markdown still has its
+/// original name. Translate-only staging copies the file to `source.md` and
+/// leaves its links pointing at the directory they were written for, so the
+/// last resort is to read the Markdown and take the directory it actually
+/// references. Reading it is deliberate: rewriting the links to match a
+/// convention would edit the book's own prose.
 fn markdown_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
     let mineru = markdown_path.with_extension("mineru");
     if mineru.is_dir() {
         return Some(mineru);
     }
-    let stem = markdown_path.file_stem().and_then(|name| name.to_str())?;
-    let assets = markdown_path.with_file_name(format!("{stem}_assets"));
-    assets.is_dir().then_some(assets)
+    if let Some(stem) = markdown_path.file_stem().and_then(|name| name.to_str()) {
+        let assets = markdown_path.with_file_name(format!("{stem}_assets"));
+        if assets.is_dir() {
+            return Some(assets);
+        }
+    }
+    referenced_resource_directory(markdown_path)
+}
+
+/// The one sibling directory every relative reference in `markdown_path` points
+/// into. `None` unless the references agree on exactly one existing directory,
+/// so an ambiguous document is left alone rather than half-copied.
+fn referenced_resource_directory(markdown_path: &Path) -> Option<PathBuf> {
+    let parent = markdown_path.parent()?;
+    let text = fs::read_to_string(markdown_path).ok()?;
+    let mut directories = BTreeSet::new();
+    for reference in markdown_relative_references(&text) {
+        // Only a direct child of the Markdown's own directory counts: anything
+        // deeper or outside is not a resource directory this copy can carry.
+        let mut components = Path::new(&reference).components();
+        let Some(std::path::Component::Normal(first)) = components.next() else {
+            return None;
+        };
+        if components.next().is_none() {
+            continue;
+        }
+        let candidate = parent.join(first);
+        if !candidate.is_dir() {
+            return None;
+        }
+        directories.insert(candidate);
+    }
+    match directories.len() {
+        1 => directories.into_iter().next(),
+        _ => None,
+    }
+}
+
+/// Relative link targets in `text`: the `(...)` of a Markdown link or image.
+/// Absolute paths, URLs and fragments are skipped — none of them name a
+/// directory that travels with the file.
+fn markdown_relative_references(text: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    let mut index = 0;
+    while let Some(open) = text[index..].find("](") {
+        let start = index + open + 2;
+        let Some(close) = text[start..].find(')') else {
+            break;
+        };
+        let end = start + close;
+        index = end + 1;
+        let target = text[start..end]
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if target.is_empty()
+            || target.starts_with('#')
+            || target.starts_with('/')
+            || target.contains("://")
+            || target.starts_with("mailto:")
+            || Path::new(target).is_absolute()
+        {
+            continue;
+        }
+        references.push(target.to_string());
+    }
+    references
 }
 
 fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
