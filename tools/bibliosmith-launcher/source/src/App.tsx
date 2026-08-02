@@ -55,6 +55,8 @@ import launcherVersionManifest from "../launcher-version.json";
 import {
   PipelineWorkbench,
   defaultPipelineDraft,
+  effectivePipelineMode,
+  isTrackOnlyDraftPatch,
   pipelineCopy,
   type PipelineBusy,
   type PipelineDraft,
@@ -283,7 +285,11 @@ export default function App() {
         pipelineDraft.translationMode === "expert"
           ? { translationMode: "expert" as const, profileId: "expert-agent", configId: "default", skillIds: ["expert-translation-quality"], secondPassEnabled: false, textCleanup: false, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
           : { translationMode: "fast" as const, profileId: pipelineDraft.providerProfileId, configId: pipelineDraft.providerConfigId, skillIds: [], secondPassEnabled: pipelineDraft.secondPassEnabled, textCleanup: pipelineDraft.textCleanup, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats };
-      const queued = await queueBookPipelineJob(source, pipelineDraft.mode, translationIntent, pipelineConfig);
+      // Not `pipelineDraft.mode` directly: the layout-preserving track is only
+      // eligible for a single text PDF, and the draft can still be carrying that
+      // choice from a book the user has since swapped away from.
+      const mode = effectivePipelineMode(pipelineDraft.mode, pipelinePreview);
+      const queued = await queueBookPipelineJob(source, mode, translationIntent, pipelineConfig);
       setPipelineState((current) => upsertPipelineJob(current, queued));
       setPipelinePreview(queued.route);
       if (!queued.route.some((item) => item.canRun)) {
@@ -309,7 +315,10 @@ export default function App() {
     // providerConfigId selects the billing slot within a brand and is read at
     // the fast-route branch above; leaving it out of the deps kept the memoized
     // callback on the slot that was selected when the profile last changed.
-  }, [addActivity, buildPipelineSource, pipelineConfig, pipelineDraft.digestMode, pipelineDraft.mode, pipelineDraft.outputFormats, pipelineDraft.providerConfigId, pipelineDraft.providerProfileId, pipelineDraft.secondPassEnabled, pipelineDraft.textCleanup, pipelineDraft.translationMode, showFloatingToast]);
+    // pipelinePreview is here for the same reason: the effective mode is decided
+    // from the current preflight, and a stale one would queue the layout track
+    // for a book whose route no longer allows it.
+  }, [addActivity, buildPipelineSource, pipelineConfig, pipelineDraft.digestMode, pipelineDraft.mode, pipelineDraft.outputFormats, pipelineDraft.providerConfigId, pipelineDraft.providerProfileId, pipelineDraft.secondPassEnabled, pipelineDraft.textCleanup, pipelineDraft.translationMode, pipelinePreview, showFloatingToast]);
 
   const retryPipeline = useCallback(async (jobId: string) => {
     setPipelineBusy("retry");
@@ -854,7 +863,12 @@ export default function App() {
               busy={pipelineBusy}
               onDraftChange={(patch) => {
                 setPipelineDraft((draft) => ({ ...draft, ...patch }));
-                setPipelinePreview([]);
+                // A draft change invalidates the routes the backend returned,
+                // with one exception: the track choice does not feed the
+                // preflight at all. Clearing on it emptied the route table and
+                // took the choice itself away with it, because the auto-preview
+                // effect is keyed on the source identity and never re-fired.
+                if (!isTrackOnlyDraftPatch(patch)) setPipelinePreview([]);
               }}
               onPreview={() => void previewPipeline()}
               onQueueRun={queueAndRunPipeline}

@@ -14,6 +14,26 @@ pub(crate) const STATUS_HANDOFF_RUNNING: &str = "handoff_running";
 pub(crate) const STATUS_TRANSLATION_READY: &str = "translation_ready";
 pub(crate) const MODE_CONVERT_THEN_TRANSLATE: &str = "convert_then_translate";
 pub(crate) const MODE_TRANSLATE_ONLY: &str = "translate_only";
+/// The second book track: BabelDOC translates the PDF in place and writes a
+/// bilingual PDF that keeps the original layout. Only `direct_text` routes are
+/// eligible, and the run is a single pass -- no split, no approval gates, no
+/// EPUB build -- so it carries its own short stage list rather than falling
+/// through to the translation one.
+pub(crate) const MODE_LAYOUT_PRESERVING: &str = "layout_preserving";
+pub(crate) const LAYOUT_PDF_COMMAND_LABEL: &str = "layout-preserving bilingual PDF";
+/// How the active model slot reaches the BabelDOC wrapper. Mirrors the constants
+/// at the top of `layout_pdf/cli.py`.
+pub(crate) const LAYOUT_PDF_BASE_URL_ENV: &str = "LAYOUT_PDF_BASE_URL";
+pub(crate) const LAYOUT_PDF_API_KEY_ENV: &str = "LAYOUT_PDF_API_KEY";
+pub(crate) const LAYOUT_PDF_MODEL_ENV: &str = "LAYOUT_PDF_MODEL";
+/// Warning kinds `packages/layout-pdf` may report. Mirrors the constants in
+/// `layout_pdf/warnings.py`; a kind missing here is parsed and then dropped.
+pub(crate) const LAYOUT_PDF_WARNING_KINDS: [&str; 2] = ["large_page", "other"];
+/// Stated on every layout-track run because BabelDOC has no runtime warning for
+/// it: its author and reference parsing is weak, so entries there can come back
+/// merged into one paragraph.
+pub(crate) const LAYOUT_PDF_REFERENCE_LIMITATION: &str =
+    "BabelDOC known limitation: author and reference sections may come back with their paragraphs merged.";
 /// Retired: conversion always continues into translation now, so nothing may be
 /// enqueued with this mode. It stays spelled out because jobs stored before the
 /// retirement still carry it, and reading them must not fall through to a
@@ -21,7 +41,11 @@ pub(crate) const MODE_TRANSLATE_ONLY: &str = "translate_only";
 pub(crate) const MODE_CONVERSION_ONLY: &str = "conversion_only";
 /// The modes a caller may enqueue. Anything else is refused at the queue
 /// boundary rather than silently given a shape.
-pub(crate) const ENQUEUEABLE_MODES: [&str; 2] = [MODE_CONVERT_THEN_TRANSLATE, MODE_TRANSLATE_ONLY];
+pub(crate) const ENQUEUEABLE_MODES: [&str; 3] = [
+    MODE_CONVERT_THEN_TRANSLATE,
+    MODE_TRANSLATE_ONLY,
+    MODE_LAYOUT_PRESERVING,
+];
 pub(crate) const TRANSLATION_MODE_FAST: &str = "fast";
 pub(crate) const TRANSLATION_MODE_EXPERT: &str = "expert";
 pub(crate) const STATE_SCHEMA_VERSION: &str = "book-pipeline-state-v5";
