@@ -50,6 +50,12 @@ books/*/[0-9]*_*/**
 
 # Book-specific screenshot/debug captures must stay under the matching book project.
 /bibliosmith-*.png
+
+# Repository-root run artifacts, currently the PDF→Markdown conversion
+# benchmark. Those reports are measurements of the local Zotero library, so
+# they carry real book titles and absolute home paths and must never be
+# committed. See tools/pdf_benchmark/README.md.
+/output/
 # >>> dev-link (Matt Pocock skills — machine-local symlinks, do not commit) >>>
 /.agents/skills/ask-matt
 /.agents/skills/code-review
