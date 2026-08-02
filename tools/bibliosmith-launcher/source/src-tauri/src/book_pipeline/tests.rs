@@ -10655,6 +10655,72 @@ fn a_retryable_stage_failure_is_retried_to_the_budget_then_gives_up() {
     let _ = fs::remove_dir_all(root);
 }
 
+// The backoff a retry schedules is real seconds, and the automatic loop takes
+// the wait itself rather than handing control back. Nothing stops a fixture
+// from walking that loop -- the test above walks it three times -- so the wait
+// has to be inert under test or every such fixture buys its whole ladder in
+// wall clock. That failure reads as "the suite got slow", which is why it is
+// pinned here instead of being left to whoever notices the minutes.
+#[test]
+fn the_automatic_retry_ladder_is_walked_without_sleeping_through_it() {
+    use std::time::Instant;
+
+    let _ = take_skipped_retry_waits();
+    let root = temp_root("stage-retry-no-sleep");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let executor = ReadingPipelineFixtureExecutor::failing_epubcheck();
+    let (job_id, waiting) = fake_job_waiting_for_expert_qa(&store, &repo, &executor);
+    satisfy_qa_handoff(&waiting);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    approve_ready_promotion_for_test(&store, &job_id);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let _ = take_skipped_retry_waits();
+
+    let started = Instant::now();
+    let failed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let elapsed = started.elapsed();
+
+    // Asserted first: without it the timing below passes for the wrong reason,
+    // by never reaching a retry at all.
+    let waits = take_skipped_retry_waits();
+    assert_eq!(
+        waits,
+        DEFAULT_STAGE_RETRY_BACKOFF_SECONDS.to_vec(),
+        "the fixture has to spend the real backoff ladder for this test to mean anything"
+    );
+    let ladder: u32 = waits.iter().sum();
+    assert!(
+        ladder >= 5,
+        "a ladder this short would not be worth guarding"
+    );
+    assert_eq!(
+        child_stage_status(&failed, "validate_reading"),
+        STATUS_FAILED
+    );
+
+    assert!(
+        elapsed < Duration::from_secs(ladder.into()),
+        "walking a {ladder}s backoff ladder took {elapsed:?}: the automatic retry slept for real"
+    );
+
+    // The countdown is still the production one -- only the sleeping is skipped.
+    let persisted = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    assert!(persisted
+        .log_summary
+        .iter()
+        .any(|line| line.contains("Automatic validate_reading retry scheduled in 2s")));
+
+    let _ = fs::remove_dir_all(root);
+}
+
 // Expert QA blocks on a judgement call, not on a flaky process. Retrying it
 // automatically would burn the budget on something no retry can fix.
 #[test]

@@ -4866,6 +4866,41 @@ fn schedule_stage_retry(child: &mut BookPipelineChildJob, stage_id: &str) -> Opt
     Some(seconds)
 }
 
+// Seconds `wait_before_stage_retry` was asked for and did not sleep. Kept per
+// thread rather than in a global: the test binary runs tests in parallel, and
+// the retry recursion stays on whichever thread entered `advance_job_stage`,
+// so a thread-local reads back exactly one test's waits.
+#[cfg(test)]
+thread_local! {
+    static SKIPPED_RETRY_WAITS: std::cell::RefCell<Vec<u32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The pause between an automatic retry being scheduled and being taken.
+///
+/// Production sleeps for real: the countdown and the remaining budget are
+/// persisted before this is called, so the wait is one a poll can watch rather
+/// than a silent stall. Tests record the request and return. A fixture that
+/// fails into the retry budget otherwise spends the whole backoff ladder in
+/// wall clock for every stage that fails -- once a change puts the suite on
+/// that path it slows by orders of magnitude, and "the tests got slow" points
+/// nowhere near this line. Only the sleeping is skipped; the scheduled seconds
+/// still go into `next_retry_at`, `current_step` and the log summary, so the
+/// countdown the tests assert on stays the one production waits out.
+fn wait_before_stage_retry(seconds: u32) {
+    #[cfg(not(test))]
+    thread::sleep(Duration::from_secs(seconds.into()));
+    #[cfg(test)]
+    SKIPPED_RETRY_WAITS.with(|waits| waits.borrow_mut().push(seconds));
+}
+
+/// Drains this thread's record, so a test reads its own waits and leaves the
+/// slot empty for whatever the harness schedules onto the thread next.
+#[cfg(test)]
+fn take_skipped_retry_waits() -> Vec<u32> {
+    SKIPPED_RETRY_WAITS.with(|waits| waits.take())
+}
+
 fn mark_route_blocked(job: &mut BookPipelineJob, error: &str) {
     for child in &mut job.children {
         if child.status == STATUS_READY || child.status == STATUS_PENDING {
@@ -16453,7 +16488,7 @@ fn advance_job_stage(
     if let Some(seconds) = retry_after_seconds {
         // The failure, the countdown and the remaining budget are all persisted
         // above, so this wait is observable rather than a silent stall.
-        thread::sleep(Duration::from_secs(seconds.into()));
+        wait_before_stage_retry(seconds);
         return advance_job_stage(
             store,
             job_id,

@@ -85,8 +85,29 @@ function routeIsRunnableForSource(source: BookPipelineSource, route: BookPipelin
   return route.some((item) => item.canRun);
 }
 
+// Mirrors should_handoff_after_run in book_pipeline.rs, exclusions and all.
+// Listing the two translating modes instead read as the same answer but gave a
+// mode this mirror has not heard of the retired conversion-only shape, which is
+// the one shape the backend now refuses to hand out. The two modes that stop
+// after extraction are the retired conversion_only, which never translated, and
+// layout_preserving, whose single pass already is the translation.
 function shouldHandoffAfterRun(mode: string) {
-  return mode === "convert_then_translate" || mode === "translate_only";
+  return mode !== "conversion_only" && mode !== "layout_preserving";
+}
+
+// Mirrors ENQUEUEABLE_MODES in book_pipeline/contract.rs.
+const ENQUEUEABLE_MODES = ["convert_then_translate", "translate_only", "layout_preserving"];
+
+// Mirrors validate_enqueue_mode in book_pipeline.rs, wording included. The
+// preview is where the wizard's modes get exercised while the UI is built, so a
+// mode the real backend refuses has to come back refused here rather than as a
+// job that only fails once the work is inside the packaged app.
+function enqueueModeRejection(mode: string) {
+  if (ENQUEUEABLE_MODES.includes(mode)) return null;
+  if (mode === "conversion_only") {
+    return "Book Pipeline mode conversion_only was retired: conversion now always continues into translation. Enqueue convert_then_translate instead. Jobs queued before the retirement keep running and stay readable.";
+  }
+  return `Unknown Book Pipeline mode ${mode}. Valid modes: ${ENQUEUEABLE_MODES.join(", ")}.`;
 }
 
 function withTranslationHandoff(source: BookPipelineSource, mode: string, route: BookPipelineRouteItem[]) {
@@ -255,9 +276,19 @@ function previewBookPipelineJob(source: BookPipelineSource, mode: string, config
     // Mirrors ordered_child_stage_ids in book_pipeline.rs, including the
     // item-scoped "index" stage the backend only runs for Zotero attachments.
     const wantsItemIndex = isBookPipelineZoteroSource(source);
-    const stageIds = shouldHandoffAfterRun(mode)
-      ? ["route", "extract", "index", "handoff", "split", "prepare", "approve_translation", "translate", "expert_qa", "approve_promotion", "promote", "build_reading", "validate_reading", "build_digest"]
-      : ["route", "extract", "index"];
+    // Answered ahead of the handoff question, as ordered_child_stage_ids answers
+    // it: the layout track's single pass is the whole run, and it is the one mode
+    // ensure_item_index_stage refuses to give an "index" stage to. The last arm
+    // is the retired conversion-only shape, which only jobs stored before the
+    // retirement still carry -- reached through the same exclusion the backend
+    // uses, so an unfamiliar mode gets the translation shape rather than one that
+    // silently stops after extraction.
+    const stageIds =
+      mode === "layout_preserving"
+        ? ["route", "extract"]
+        : shouldHandoffAfterRun(mode)
+          ? ["route", "extract", "index", "handoff", "split", "prepare", "approve_translation", "translate", "expert_qa", "approve_promotion", "promote", "build_reading", "validate_reading", "build_digest"]
+          : ["route", "extract", "index"];
     const stages = stageIds.map((stageId) => ({
       stageId,
       status: skipped ? "skipped" : stageId === "route" ? (runnable ? "completed" : "blocked") : stageId === "extract" ? (runnable ? "ready" : "pending") : stageId === "index" ? (wantsItemIndex ? "pending" : "skipped") : stageId === "build_digest" ? "skipped" : "pending",
@@ -1023,6 +1054,8 @@ export function queueBookPipelineJob(
   config?: BookPipelinePreviewConfig | null,
 ) {
   if (!isTauriRuntime()) {
+    const rejection = enqueueModeRejection(mode);
+    if (rejection) return Promise.reject(new Error(rejection));
     const job = previewBookPipelineJob(source, mode, config);
     job.translationMode = translationIntent.translationMode;
     job.translationProfileId = translationIntent.profileId;
