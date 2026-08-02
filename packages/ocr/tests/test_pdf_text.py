@@ -282,6 +282,25 @@ def book(*, head: bool = True, foot: bool = True) -> list[tuple[int, str]]:
     return [(i + 1, book_page(i + 1, body, head=head, foot=foot)) for i, body in enumerate(bodies)]
 
 
+TITLE = "Law as a Malleable Artifact"
+
+
+def self_headed_chapter(*, title_hashes: str = "#") -> list[tuple[int, str]]:
+    """A chapter whose title is printed again as the running head of every recto.
+
+    The shape `2018_Law as an Artifact.pdf` prints on pages 46 to 60: the title
+    opens the chapter set large and unnumbered by the folio, and the same words
+    head each recto after it, set smaller and carrying the page number. Both
+    reduce to `law as a malleable artifact`, so counting cannot tell them apart.
+    """
+    pages = [(1, f"{title_hashes} 2 {TITLE}\n\nThe chapter opens on its own title page.")]
+    for page in range(2, 10):
+        body = f"The argument runs on over page {page}."
+        head = f"## {TITLE} {page + 29}\n\n" if page % 2 else ""
+        pages.append((page, f"{head}{body}"))
+    return pages
+
+
 class RunningHeadTests(unittest.TestCase):
     """pdf-inspector sizes headings by font, so a running head becomes one.
 
@@ -386,6 +405,56 @@ class RunningHeadTests(unittest.TestCase):
         for chapter in range(1, 5):
             self.assertIn(f"# Chapter {chapter}", markdown)
 
+    def test_a_chapter_title_that_is_also_its_own_running_head_survives(self) -> None:
+        """The one case position and density both get wrong.
+
+        A chapter title is at the edge of the page that opens the chapter, and
+        it is printed on every page of the run its own head spans, so both
+        earlier tests read it as furniture. Five of the twelve chapters of
+        `2018_Law as an Artifact.pdf` lost their names this way. Size is what
+        is left: the book sets the title larger than the head.
+        """
+        markdown, heads = self.strip(self_headed_chapter())
+
+        self.assertIn(f"# 2 {TITLE}", markdown)
+        self.assertNotIn(f"## {TITLE}", markdown)
+        self.assertIn("law as a malleable artifact", heads)
+
+    def test_only_the_outsized_printing_is_spared_not_the_first_one(self) -> None:
+        """Sparing whichever printing comes first would leave a stray head.
+
+        Most running heads have no outsized printing at all — 381 of the 497
+        runs over a 74-book sample — and on those, `first one wins` keeps a
+        piece of furniture and rescues nothing. So the title has to earn its
+        place by being set larger, not by coming first.
+        """
+        markdown, _ = self.strip(self_headed_chapter(title_hashes="##"))
+
+        self.assertNotIn(TITLE, markdown)
+
+    def test_a_head_the_parser_sized_unevenly_keeps_none_of_its_printings(self) -> None:
+        """`## Foreword vii` on four pages and body text on four others.
+
+        One real book prints its foreword head that way. The larger half is
+        not a title, just the half pdf-inspector happened to size — reading it
+        as one would put four pieces of furniture back into the book, so a
+        size has to be used exactly once before it counts.
+        """
+        folios = ["vii", "viii", "ix", "x", "xi", "xii", "xiii", "xiv"]
+        pages = [
+            (
+                page,
+                f"{'## Foreword' if page % 2 else '*Foreword*'} {folio}\n\n"
+                f"The foreword continues over page {page}.",
+            )
+            for page, folio in enumerate(folios, start=1)
+        ]
+
+        markdown, heads = self.strip(pages)
+
+        self.assertNotIn("Foreword", markdown)
+        self.assertIn("foreword", heads)
+
 
 class RunningHeadChainTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -479,6 +548,29 @@ class RealCorpusTests(unittest.TestCase):
         self.assertEqual(result.engine, pdf_text.ENGINE_PYMUPDF)
         self.assertIn("invalid file trailer", result.fallback_reason)
         self.assertGreater(result.chars, 10_000)
+
+    def test_chapters_named_after_their_own_running_head_keep_their_titles(self) -> None:
+        """Five of this book's twelve chapters lost their names to head removal.
+
+        The seven that survived did so by accident — a running head shortened
+        from the title, or a title pdf-inspector broke over two lines — which
+        is why the fixture above cannot stand in for this: the shapes that
+        matter here are the ones a hand-written book never produces.
+        """
+        result = self.extract("2018_Law as an Artifact.pdf")
+        titles = " ".join(result.markdown.split())
+
+        for chapter in (
+            "# 2 Law as a Malleable Artifact",
+            "# 3 Law, Fiction, and Reality",
+            "# 4 Law, Morality, Art, the Works",
+            "# 8 Obligations from Artifacts",
+            "# 11 A Strange Kind of Artifact",
+        ):
+            self.assertIn(chapter, titles)
+        # The furniture those titles share a form with still goes.
+        self.assertNotIn("## Law as a Malleable Artifact 31", titles)
+        self.assertNotIn("## Law, Fiction, and Reality 45", titles)
 
     def test_over_flagged_book_is_still_extracted_in_full(self) -> None:
         """pdf-inspector wants OCR on 304 of its 346 pages; every page has text."""
