@@ -262,6 +262,14 @@ _MIN_SPAN_DENSITY = 0.5
 #: What survives stripping the page number off, so a stripped head still reads
 #: as a head rather than as the empty string.
 _MIN_STEM_CHARS = 3
+#: What a line that is no heading at all counts as when the sizes one form is
+#: printed at are compared. Deeper than any real level, because a form set in
+#: body type is furniture whatever else the book does with it.
+_NOT_A_HEADING = 7
+
+#: An ATX heading, for reading the level off the hashes. A row of hashes with
+#: no space after it is not one, so `#hashtag` stays body text.
+_HEADING_HASHES = re.compile(r"^(#{1,6})(?:\s|$)")
 
 
 def _normalize_head(line: str) -> str:
@@ -303,6 +311,34 @@ def _span_density(on_pages: set[int]) -> float:
     return len(on_pages) / (max(on_pages) - min(on_pages) + 1)
 
 
+def _printed_level(line: str) -> int:
+    """How large a line is set, as the heading level pdf-inspector gave it."""
+    match = _HEADING_HASHES.match(line)
+    return len(match.group(1)) if match else _NOT_A_HEADING
+
+
+def _title_level(printed_at: list[int]) -> int | None:
+    """The size that marks one printing of a form as the chapter's own title.
+
+    A chapter title that is also printed as that chapter's running head reduces
+    to the same form as its furniture, so counting alone cannot tell them
+    apart: `Law as a Malleable Artifact` opens chapter 2 on page 46 and heads
+    the seven rectos after it. What tells them apart is that the book sets the
+    title larger — `# 2 Law as a Malleable Artifact` against
+    `## Law as a Malleable Artifact 31` — and pdf-inspector, which sizes
+    headings by font, preserves the difference as a heading level.
+
+    Only a size that is used *once* counts. A head the parser sized unevenly —
+    `## Foreword vii` on five pages and italic body text on six — has no
+    outsized printing, just an inconsistent one, and reading its larger half as
+    a title would put five pieces of furniture back into the book.
+    """
+    shallowest = min(printed_at)
+    if printed_at.count(shallowest) != 1:
+        return None
+    return shallowest if any(level > shallowest for level in printed_at) else None
+
+
 def _strip_running_heads(
     pages: list[tuple[int, str]],
 ) -> tuple[list[tuple[int, str]], tuple[str, ...]]:
@@ -327,18 +363,25 @@ def _strip_running_heads(
     and that same normalisation makes `Chapter 1` and `Chapter 2` identical.
     Density is what separates those: furniture is printed on every page of its
     run, while chapter titles are scattered the length of the book.
+
+    None of that separates a chapter title from its *own* running head, which
+    is the same words in the same place on the page that opens the chapter. So
+    one printing of a head is spared: the one the book set larger than all the
+    rest. See `_title_level()`.
     """
     if len(pages) < _MIN_PAGES:
         return pages, ()
 
     edges = [_edge_lines(markdown) for _, markdown in pages]
     seen: dict[str, set[int]] = defaultdict(set)
+    printed_at: dict[str, list[int]] = defaultdict(list)
     for (page_no, _), page_edges in zip(pages, edges, strict=True):
         for _, line in page_edges:
             if len(line) <= _MAX_HEAD_CHARS:
                 key = _normalize_head(line)
                 if key:
                     seen[key].add(page_no)
+                    printed_at[key].append(_printed_level(line))
 
     heads = {
         key
@@ -347,14 +390,17 @@ def _strip_running_heads(
     }
     if not heads:
         return pages, ()
+    titles = {key: _title_level(printed_at[key]) for key in heads}
 
     trimmed: list[tuple[int, str]] = []
     for (page_no, markdown), page_edges in zip(pages, edges, strict=True):
-        drop = {
-            index
-            for index, line in page_edges
-            if len(line) <= _MAX_HEAD_CHARS and _normalize_head(line) in heads
-        }
+        drop: set[int] = set()
+        for index, line in page_edges:
+            if len(line) > _MAX_HEAD_CHARS:
+                continue
+            key = _normalize_head(line)
+            if key in heads and _printed_level(line) != titles[key]:
+                drop.add(index)
         if not drop:
             trimmed.append((page_no, markdown))
             continue
