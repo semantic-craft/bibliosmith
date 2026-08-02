@@ -105,9 +105,11 @@ class EpubBuilderCodeBlockTests(unittest.TestCase):
         self.assertIn("<pre><code>```\ninner\n```</code></pre>", chapter)
 
     def test_an_unclosed_fence_runs_to_the_end_without_failing_the_build(self) -> None:
+        # The chapter's final newline is inside the block, and stays there: the
+        # conversion escapes and nothing else.
         chapter, _ = build_book("# 第一章\n\n```\nno closing fence\n")
 
-        self.assertIn("<pre><code>no closing fence</code></pre>", chapter)
+        self.assertIn("<pre><code>no closing fence\n</code></pre>", chapter)
 
     def test_inline_code_outside_a_fence_still_works(self) -> None:
         chapter, _ = build_book("# 第一章\n\n段落里的 `inline()` 调用。\n")
@@ -127,6 +129,60 @@ class EpubBuilderCodeBlockTests(unittest.TestCase):
 
         self.assertIn("pre{", stylesheet)
         self.assertIn("white-space:pre-wrap", stylesheet)
+
+
+class EpubBuilderCodeBlockReviewTests(unittest.TestCase):
+    """Findings the automated review raised on PR #122."""
+
+    def test_a_heading_inside_a_fence_does_not_name_the_chapter(self) -> None:
+        # The body was already fence-aware, but the title came from a second
+        # regex pass over the raw Markdown, so the sample's `# ` line became the
+        # <title> and the navigation entry — a table of contents named after
+        # code that is not a heading.
+        chapter, _ = build_book(
+            "```\n# code heading\n```\n\n# 真正的标题\n\n正文。\n"
+        )
+
+        self.assertIn("<title>真正的标题</title>", chapter)
+        self.assertNotIn("<title># code heading</title>", chapter)
+
+    def test_the_navigation_entry_uses_the_rendered_heading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            book_root = Path(temporary_directory) / "book"
+            scripts = book_root / "scripts"
+            final = book_root / "chapters" / "final"
+            metadata = book_root / "metadata"
+            scripts.mkdir(parents=True)
+            final.mkdir(parents=True)
+            metadata.mkdir(parents=True)
+            shutil.copy(SOURCE_SCRIPTS / "build_epub.js", scripts / "build_epub.js")
+            shutil.copy(SOURCE_SCRIPTS / "run_python.js", scripts / "run_python.js")
+            (final / "chapter_001.md").write_text(
+                "```\n# code heading\n```\n\n# 真正的标题\n\n正文。\n", encoding="utf-8"
+            )
+            metadata.joinpath("source_manifest.json").write_text(
+                json.dumps({"source_file_name": "N.epub", "target_language": "zh-Hans"}),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                ["node", str(scripts / "build_epub.js")],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+            with ZipFile(book_root / "output" / "reading" / "book.epub") as archive:
+                nav = archive.read("EPUB/nav.xhtml").decode("utf-8")
+
+            self.assertIn("真正的标题", nav)
+            self.assertNotIn("# code heading", nav)
+
+    def test_trailing_whitespace_and_blank_lines_inside_a_block_survive(self) -> None:
+        # An escape-only conversion has no business trimming the sample.
+        chapter, _ = build_book("# 第一章\n\n```\nrow with space   \n\n\n```\n")
+
+        self.assertIn("<pre><code>row with space   \n\n</code></pre>", chapter)
 
 
 if __name__ == "__main__":

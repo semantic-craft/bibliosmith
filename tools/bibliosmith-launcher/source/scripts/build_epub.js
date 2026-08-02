@@ -116,12 +116,13 @@ function stripFenceIndent(line, indent) {
  * Render a fenced block as `<pre><code>`.
  *
  * The content is only escaped, never passed through `inline`: inside a code
- * block a backtick is a backtick. `white-space:pre-wrap` in book.css is what
- * makes long lines wrap — an e-reader page cannot scroll sideways, so an
- * unwrapped line would simply be cut off.
+ * block a backtick is a backtick. Nothing else is touched either — trailing
+ * spaces and blank lines before the closing fence are part of the sample, and
+ * an "escape-only" conversion that quietly trimmed them would not round-trip.
+ * `white-space:pre-wrap` in book.css is what makes long lines wrap — an
+ * e-reader page cannot scroll sideways, so an unwrapped line would be cut off.
  */
 function codeBlockHtml(bodyLines, info) {
-  while (bodyLines.length && !bodyLines[bodyLines.length - 1].trim()) bodyLines.pop();
   const language = /^[A-Za-z0-9_+#-]+/.exec(info);
   const attribute = language ? ` class="language-${escapeHtml(language[0].toLowerCase())}"` : '';
   return `<pre><code${attribute}>${escapeHtml(bodyLines.join('\n'))}</code></pre>`;
@@ -171,8 +172,16 @@ function resolveBookPath(fromFile, ref) {
   return resolved;
 }
 
+/**
+ * Render one Markdown file, returning both its body and its first real heading.
+ *
+ * The title comes from here rather than from a second regex pass over the raw
+ * file: a fenced sample containing `# code heading` is not a heading, and a
+ * separate scan would name the chapter — and the navigation entry — after it.
+ */
 function markdownToBody(file, imageMap) {
   const out = [];
+  let title = null;
   let para = [];
   const flush = () => {
     if (para.length) {
@@ -196,7 +205,9 @@ function markdownToBody(file, imageMap) {
       let end = i + 1;
       // An unclosed fence runs to the end of the document, as CommonMark says.
       while (end < lines.length && !isFenceCloser(lines[end].trimEnd(), fence.marker)) {
-        body.push(stripFenceIndent(lines[end].replace(/\s+$/, ''), fence.indent));
+        // Only the opener's permitted indentation comes off; the rest of the
+        // line is content, trailing spaces included.
+        body.push(stripFenceIndent(lines[end], fence.indent));
         end += 1;
       }
       out.push(codeBlockHtml(body, fence.info));
@@ -232,6 +243,7 @@ function markdownToBody(file, imageMap) {
     if (heading) {
       flush();
       const level = Math.min(heading[1].length, 3);
+      if (title === null && heading[1].length === 1) title = heading[2].trim();
       out.push(`<h${level}>${inline(heading[2].trim())}</h${level}>`);
       continue;
     }
@@ -244,7 +256,7 @@ function markdownToBody(file, imageMap) {
     para.push(line.trim());
   }
   flush();
-  return out.join('\n');
+  return { body: out.join('\n'), title };
 }
 
 function xhtml(title, body, language) {
@@ -365,8 +377,8 @@ function main() {
   allDocs.forEach((file, index) => {
     const idref = `doc${index + 1}`;
     const href = `${slug(file)}.xhtml`;
-    const firstHeading = (readText(file).match(/^#\s+(.+)$/m) || [null, path.basename(file, '.md')])[1];
-    const body = markdownToBody(file, imageMap);
+    const { body, title } = markdownToBody(file, imageMap);
+    const firstHeading = title ?? path.basename(file, '.md');
     writeText(path.join(workDir, 'EPUB', href), xhtml(firstHeading, body, language));
     manifestItems.push(`<item id="${idref}" href="${href}" media-type="application/xhtml+xml" />`);
     spine.push(`<itemref idref="${idref}" />`);
