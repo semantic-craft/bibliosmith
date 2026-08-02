@@ -33,6 +33,7 @@ HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.DOTALL)
 # being read as a fence.
 FENCE_OPEN = re.compile(r"^([ \t]{0,3})(`{3,}|~{3,})[ \t]*(.*)$")
 FENCE_CLOSE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$")
+COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 def read_text(path: Path) -> str:
@@ -54,6 +55,22 @@ def is_fence_closer(line: str, marker: str) -> bool:
     return bool(match) and match.group(1)[0] == marker[0] and len(match.group(1)) >= len(marker)
 
 
+def is_comment_only(block: str) -> bool:
+    """Whether a block is nothing but HTML comments.
+
+    The PaddleOCR assembler writes a ``<!-- page: N -->`` anchor between pages
+    so a reviewer can map a translated passage back to a page of the original,
+    and picked a comment precisely so the marker would stay out of the prose.
+    Nothing here reads it, and `inline_text` escapes every block it is handed,
+    so an anchor left in place reaches the reader as the literal text
+    ``<!-- page: N -->``.
+
+    Only a block that is *entirely* comments goes; a comment sitting in a real
+    paragraph is that paragraph's content and stays with it.
+    """
+    return bool(block.strip()) and not COMMENT.sub("", block).strip()
+
+
 def split_paragraphs(text: str) -> list[str]:
     """Split a chapter into blocks on blank lines, keeping a fence whole.
 
@@ -64,6 +81,14 @@ def split_paragraphs(text: str) -> list[str]:
     If the two sides then disagreed, the whole chapter would drop to
     chapter-level fallback and lose paragraph pairing everywhere, not just at
     the code.
+
+    Comment-only blocks are dropped here, in the one splitter both sides of
+    `render_chapter` go through, rather than in `render_block`: because the
+    pairing is positional, a block dropped from the source alone would pair
+    every later source paragraph with the wrong translation. Doing it here the
+    two sides cannot disagree — and a page anchor the translator kept on one
+    side but not the other now cancels out instead of costing the chapter its
+    paragraph pairing.
     """
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     # Trim blank lines from both ends without touching the first content line's
@@ -83,7 +108,9 @@ def split_paragraphs(text: str) -> list[str]:
     def flush() -> None:
         block = "\n".join(paragraph).strip()
         paragraph.clear()
-        if block:
+        # Fences are appended below without passing through here, so a code
+        # sample that happens to be one comment is still a block of its own.
+        if block and not is_comment_only(block):
             blocks.append(block)
 
     index = 0

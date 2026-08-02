@@ -230,3 +230,97 @@ def test_blank_lines_before_the_closing_fence_are_part_of_the_code() -> None:
 
 def test_leading_blank_lines_still_do_not_become_a_block() -> None:
     assert BUILDER.split_paragraphs("\n\n  \n\nonly paragraph\n\n") == ["only paragraph"]
+
+
+# --- Page anchors (issue #108) ----------------------------------------------
+# The PaddleOCR assembler writes `<!-- page: N -->` between pages and calls it
+# invisible, but every block here goes through `inline_text`, which escapes it.
+# Each anchor therefore reached the reader as a paragraph of literal
+# `<!-- page: N -->`, once per page, in every book converted that way.
+
+ANCHORED_SOURCE = "# Chapter\n\n<!-- page: 1 -->\n\nSource one.\n\n<!-- page: 2 -->\n\nSource two.\n"
+ANCHORED_TARGET = "# 第一章\n\n<!-- page: 1 -->\n\n译文一。\n\n<!-- page: 2 -->\n\n译文二。\n"
+
+
+def test_a_standalone_page_anchor_is_not_a_block() -> None:
+    assert BUILDER.split_paragraphs(ANCHORED_SOURCE) == [
+        "# Chapter",
+        "Source one.",
+        "Source two.",
+    ]
+
+
+def test_page_anchors_never_reach_the_reader(tmp_path: Path) -> None:
+    write_fixture(tmp_path, ANCHORED_SOURCE, ANCHORED_TARGET)
+
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/chapter_001.xhtml")
+
+    # Neither as the escaped text the reader used to see, nor as a real comment
+    # smuggled through unescaped: the anchor is gone from the book entirely.
+    assert "page:" not in chapter
+    assert "&lt;!--" not in chapter
+    assert "<!--" not in chapter.split("<body>", 1)[1]
+    # The prose either side of the dropped anchors is untouched and still paired.
+    assert "Source one." in chapter and "译文一。" in chapter
+
+
+def test_dropping_an_anchor_keeps_the_two_sides_in_step(
+    tmp_path: Path, capsys
+) -> None:
+    # The case a fix applied to one side alone would corrupt. The translator
+    # dropped the anchors, so the source carries two blocks the target does not:
+    # filtering only where the source is rendered would leave five blocks facing
+    # three and cost the chapter its pairing, and filtering after pairing would
+    # have married `Source one.` to `译文二。`.
+    write_fixture(
+        tmp_path, ANCHORED_SOURCE, "# 第一章\n\n译文一。\n\n译文二。\n"
+    )
+
+    epub_path = BUILDER.build_book(tmp_path)
+    chapter = epub_member(epub_path, "EPUB/chapter_001.xhtml")
+    body = chapter.split("<body>", 1)[1]
+
+    assert (
+        "alignment=paragraph source_paragraphs=3 target_paragraphs=3"
+        in capsys.readouterr().out
+    )
+    assert chapter.count('class="bitext-unit"') == 3
+    # Each source paragraph still sits with its own translation, in order.
+    assert body.index("Source one.") < body.index("译文一。")
+    assert body.index("译文一。") < body.index("Source two.")
+    assert body.index("Source two.") < body.index("译文二。")
+
+
+def test_a_comment_inside_a_paragraph_is_still_that_paragraph(tmp_path: Path) -> None:
+    # The over-eager mutation of the fix: strip comments from a block rather
+    # than drop blocks that are only comments, and this sentence loses its
+    # middle -- or the whole paragraph goes, because what is left still parses.
+    write_fixture(
+        tmp_path,
+        "# Chapter\n\nA sentence <!-- an aside --> carrying a comment.\n",
+        "# 第一章\n\n一句带注释的话。\n",
+    )
+
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/chapter_001.xhtml")
+
+    assert "A sentence &lt;!-- an aside --&gt; carrying a comment." in chapter
+
+
+def test_a_fenced_comment_is_a_code_sample_not_an_anchor() -> None:
+    # A book about this pipeline quotes the anchor in a listing. Fences skip the
+    # comment filter, so the sample survives with its delimiters intact.
+    blocks = BUILDER.split_paragraphs("```html\n<!-- page: 42 -->\n```\n")
+
+    assert len(blocks) == 1
+    assert BUILDER.fenced_code(blocks[0]) == "<!-- page: 42 -->"
+
+
+def test_a_multi_line_or_repeated_comment_block_also_goes() -> None:
+    assert BUILDER.is_comment_only("<!-- page: 1 -->\n<!-- page: 2 -->")
+    assert BUILDER.is_comment_only("<!--\n  page: 1\n-->")
+    assert not BUILDER.is_comment_only("<!-- page: 1 --> and then prose")
+    assert not BUILDER.is_comment_only("prose <!-- page: 1 -->")
+    assert not BUILDER.is_comment_only("<!-- an unterminated comment")
+    # The false positive a `startswith("<!--") and endswith("-->")` test would
+    # produce: a real sentence between two comments, silently deleted.
+    assert not BUILDER.is_comment_only("<!-- page: 1 --> a real sentence <!-- x -->")
