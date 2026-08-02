@@ -65,8 +65,16 @@ def split_paragraphs(text: str) -> list[str]:
     chapter-level fallback and lose paragraph pairing everywhere, not just at
     the code.
     """
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # Trim blank lines from both ends without touching the first content line's
+    # own indentation: a chapter opening with a fence indented one to three
+    # spaces would otherwise have that indent measured as zero, leaving it on
+    # every line of the rendered code.
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
         return []
 
     blocks: list[str] = []
@@ -78,7 +86,6 @@ def split_paragraphs(text: str) -> list[str]:
         if block:
             blocks.append(block)
 
-    lines = normalized.split("\n")
     index = 0
     while index < len(lines):
         fence = fence_opener(lines[index])
@@ -102,7 +109,12 @@ def split_paragraphs(text: str) -> list[str]:
 
 
 def fenced_code(block: str) -> str | None:
-    """The code inside a fenced block, or None if this block is not one."""
+    """The code inside a fenced block, or None if this block is not one.
+
+    Only the delimiters and the opener's permitted indentation come off. Blank
+    lines before the closing fence are part of the sample, so a listing that
+    deliberately ends with vertical space keeps it.
+    """
     lines = block.split("\n")
     fence = fence_opener(lines[0])
     if fence is None:
@@ -111,8 +123,6 @@ def fenced_code(block: str) -> str | None:
     body = lines[1:]
     if body and is_fence_closer(body[-1], marker):
         body = body[:-1]
-    while body and not body[-1].strip():
-        body.pop()
     return "\n".join(strip_fence_indent(line, indent) for line in body)
 
 

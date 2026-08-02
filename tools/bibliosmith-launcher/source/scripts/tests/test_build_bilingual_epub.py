@@ -207,3 +207,26 @@ def test_the_stylesheet_wraps_code_and_drops_the_prose_indent(tmp_path: Path) ->
 
     assert "white-space:pre-wrap" in stylesheet
     assert "pre.bitext-target" in stylesheet
+
+
+# --- Review findings on PR #126 ---------------------------------------------
+
+
+def test_an_indented_opening_fence_has_its_indent_measured_before_trimming() -> None:
+    # The whole-text strip used to eat the opener's indentation before it could
+    # be measured, so the width came out as zero and the matching indent stayed
+    # on every rendered code line.
+    blocks = BUILDER.split_paragraphs("  ```\n  indented body\n  ```\n")
+
+    assert len(blocks) == 1
+    assert BUILDER.fenced_code(blocks[0]) == "indented body"
+
+
+def test_blank_lines_before_the_closing_fence_are_part_of_the_code() -> None:
+    blocks = BUILDER.split_paragraphs("```\nrow\n\n\n```\n")
+
+    assert BUILDER.fenced_code(blocks[0]) == "row\n\n"
+
+
+def test_leading_blank_lines_still_do_not_become_a_block() -> None:
+    assert BUILDER.split_paragraphs("\n\n  \n\nonly paragraph\n\n") == ["only paragraph"]
