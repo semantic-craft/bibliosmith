@@ -83,6 +83,13 @@ pub(crate) const TRANSLATION_SAMPLE_CHARACTER_BUDGET: usize = 800;
 /// routing decision, not conversion output, and the scan that walks the job
 /// output tree would otherwise register it as the book's own artifacts.
 pub(crate) const OCR_SAMPLE_DIR_NAME: &str = "ocr-sample";
+
+/// Where `scripts/pdf_to_html_paddleocr.py` keeps its resumable chunk scratch,
+/// relative to the job output directory. `collect_artifacts` skips it by name:
+/// the chunk JSONL is working state the wrapper re-reads on resume, not a
+/// deliverable, and a user reclaiming the disk would otherwise be left with
+/// artifact rows pointing at files that no longer exist.
+pub(crate) const WRAPPER_SCRATCH_DIR_NAME: &str = ".temp";
 pub(crate) const OCR_SAMPLE_COMPARE_SCHEMA: &str = "ocr-sample-compare-v1";
 pub(crate) const OCR_SAMPLE_COMPARE_REPORT_SCHEMA: &str = "ocr-sample-compare-report-v1";
 pub(crate) const OCR_SAMPLE_COMPARE_COMMAND_LABEL: &str = "OCR sample compare";
