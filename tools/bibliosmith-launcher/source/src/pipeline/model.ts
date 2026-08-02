@@ -79,11 +79,16 @@ export type RouteOverride = "auto" | "direct" | "paddle" | "mineru" | "keep";
 
 export type PipelineDraft = {
   sourceKind: BookPipelineSource["kind"];
-  // The union is the backend contract and keeps its three arms, but the input
-  // island never sets anything other than convert_then_translate: conversion
-  // without translation left the UI with the mode selector, and translate_only
-  // waits on the EPUB input route.
-  mode: "conversion_only" | "convert_then_translate" | "translate_only";
+  // The union is the backend contract, but the input island never sets anything
+  // other than convert_then_translate: conversion without translation left the
+  // UI with the mode selector, translate_only waits on the EPUB input route, and
+  // layout_preserving -- the BabelDOC bilingual-PDF track, which the backend can
+  // already run -- waits on the island's two-way choice for text PDFs (#99).
+  mode:
+    | "conversion_only"
+    | "convert_then_translate"
+    | "translate_only"
+    | "layout_preserving";
   localPdfFolder: string;
   localPdfTitle: string;
   translationMode: "fast" | "expert";
@@ -175,8 +180,16 @@ export function providerDefaultConfig(profileId: string): string {
 // builds the translation intent with the "expert-agent" profile for expert mode
 // and never reaches the translate stage for a conversion-only job, so in both
 // cases the picked slot is inert and an unconfigured one is not a problem.
+// The layout-preserving track is a third such case, for a different reason: it
+// resolves its endpoint from the Settings active slot rather than from this
+// draft, so checking the draft's slot would block a launch over a key the run
+// was never going to use.
 export function providerSelectionApplies(draft: PipelineDraft): boolean {
-  return draft.mode !== "conversion_only" && draft.translationMode === "fast";
+  return (
+    draft.mode !== "conversion_only" &&
+    draft.mode !== "layout_preserving" &&
+    draft.translationMode === "fast"
+  );
 }
 
 // Whether the draft's provider slot has no stored key, which is what makes a job
@@ -196,6 +209,62 @@ export function providerCredentialMissing(
       slot.configId === draft.providerConfigId &&
       slot.configured,
   );
+}
+
+/* ---------- The two book tracks ---------- */
+
+/**
+ * Whether this preflight may take the layout-preserving track.
+ *
+ * Mirrors `layout_pdf_route` in book_pipeline.rs: exactly one runnable item, and
+ * it must have routed as `direct_text`. A scanned book has no text layer for
+ * BabelDOC to work from, and a folder of several PDFs has no single document
+ * whose layout could be preserved. Keeping the rule identical on both ends is
+ * what stops the island from offering a choice the backend then refuses.
+ */
+export function layoutTrackAvailable(preview: BookPipelineRouteItem[]): boolean {
+  const runnable = preview.filter(
+    (item) => item.canRun && item.routeKind !== "translation_handoff",
+  );
+  return runnable.length === 1 && runnable[0].routeKind === "direct_text";
+}
+
+/**
+ * Whether a draft patch only changes the track, and so must not invalidate the
+ * preflight.
+ *
+ * The mode reaches `preview_book_pipeline_route`, but the only thing it changes
+ * there is whether the synthetic `translation_handoff` row is appended -- and
+ * both the route table and `layoutTrackAvailable` filter that row out. So the
+ * preflight a track click would throw away is identical to the one it would get
+ * back, and throwing it away takes the track choice off screen with it.
+ */
+export function isTrackOnlyDraftPatch(patch: Partial<PipelineDraft>): boolean {
+  const keys = Object.keys(patch);
+  return keys.length > 0 && keys.every((key) => key === "mode");
+}
+
+/**
+ * The mode to queue with, given what the user picked and what the preflight
+ * actually supports.
+ *
+ * Derived rather than stored, so picking the layout track for one book and then
+ * swapping to a scanned one cannot queue an ineligible job: the draft may still
+ * say `layout_preserving`, but the answer here follows the current preflight. An
+ * effect that reset the draft instead would have to re-fire on every identity
+ * change, which is the bug class the island's `sourceIdentity` comment is about.
+ */
+// Takes the mode rather than the whole draft on purpose: its caller is a
+// `useCallback` whose dependencies are deliberately field-level, so that a
+// keystroke elsewhere in the draft does not rebuild it. Asking for the draft
+// object would force `pipelineDraft` into that array and undo that.
+export function effectivePipelineMode(
+  mode: PipelineDraft["mode"],
+  preview: BookPipelineRouteItem[],
+): PipelineDraft["mode"] {
+  return mode === "layout_preserving" && layoutTrackAvailable(preview)
+    ? "layout_preserving"
+    : "convert_then_translate";
 }
 
 // Slot keys the catalog reports a stored key for, for labelling the picker.
@@ -299,6 +368,24 @@ export function phaseStates(unit: BookUnit): PhaseState[] {
 /** Index of the step the caption should talk about; -1 when everything is closed. */
 export function activePhaseIndex(states: PhaseState[]): number {
   return states.findIndex((state) => state === "gate" || state === "error" || state === "current");
+}
+
+/**
+ * The phases this job actually contains, so the strip can draw one segment for
+ * the layout-preserving track instead of three, two of them permanently reading
+ * "not part of this job".
+ *
+ * Derived from the stage list rather than from `job.mode`: the stage list is
+ * what the strip renders, so the two cannot drift. A reflow job carries all
+ * three phases from the moment it is queued -- `ordered_child_stage_ids` seeds
+ * every stage as pending -- so nothing about it changes here.
+ */
+export function visiblePhaseIndexes(unit: BookUnit): number[] {
+  const states = phaseStates(unit);
+  const present = states.flatMap((state, index) => (state === "none" ? [] : [index]));
+  // A unit with no recognised stages at all would otherwise render an empty
+  // strip; showing the full set says "nothing has happened yet", which is true.
+  return present.length ? present : states.map((_, index) => index);
 }
 
 export function phaseName(index: number, copy: PipelineCopy): string {

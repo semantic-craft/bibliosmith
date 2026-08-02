@@ -232,6 +232,97 @@ pub fn credential_env(
     Some((slot.key_env.clone(), secret))
 }
 
+/// An OpenAI-wire endpoint, resolved for a consumer that speaks the protocol
+/// directly rather than through the translation engine. BabelDOC is the only one
+/// today: it takes `--openai-base-url/--openai-api-key/--openai-model` and has no
+/// notion of the engine's provider registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiCompatibleEndpoint {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+/// The engine pools several keys per slot and rotates them; a single subprocess
+/// wants one. Splitting the same way `normalize_api_keys` does keeps a pooled
+/// slot usable here instead of sending the whole comma-separated blob as a key.
+fn first_api_key(secret: &str) -> Option<&str> {
+    secret
+        .split(['\n', '\r', ','])
+        .map(str::trim)
+        .find(|key| !key.is_empty())
+}
+
+/// Resolve the active slot into an OpenAI-wire endpoint, or say why it cannot be.
+///
+/// Pure: both the Keychain read and the workspace lookup are supplied, so the
+/// provider rules are unit-testable without a real store. `openai-responses`
+/// slots are accepted -- Qwen and Volcengine publish OpenAI-compatible base URLs
+/// and the engine merely prefers the Responses API for them -- while a native
+/// Gemini endpoint is a different wire protocol and is refused by name.
+pub fn openai_compatible_endpoint(
+    slots: &[RegistrySlot],
+    active: Option<&ActiveModel>,
+    read_secret: impl Fn(&str) -> Option<String>,
+    read_workspace_id: impl Fn() -> Option<String>,
+) -> Result<OpenAiCompatibleEndpoint, String> {
+    let active = active.ok_or_else(|| {
+        "No translation model is selected. Choose one in Settings first.".to_string()
+    })?;
+    let slot = find_slot(slots, &active.profile_id, &active.config_id).ok_or_else(|| {
+        format!(
+            "The selected model {}/{} is not in the provider registry.",
+            active.profile_id, active.config_id
+        )
+    })?;
+    if !matches!(
+        slot.provider_type.as_str(),
+        "openai-compatible" | "openai-responses"
+    ) {
+        return Err(format!(
+            "{}/{} speaks {}, which is not an OpenAI-compatible endpoint. The layout-preserving track needs one; pick another model in Settings.",
+            active.profile_id, active.config_id, slot.provider_type
+        ));
+    }
+    let resolved = qwen_slot_with_workspace(slot, read_workspace_id().as_deref())?;
+    let secret = read_secret(&account(&active.profile_id, &active.config_id)).ok_or_else(|| {
+        format!(
+            "No API key is stored for {}/{}. Add one in Settings first.",
+            active.profile_id, active.config_id
+        )
+    })?;
+    let api_key = first_api_key(&secret)
+        .ok_or_else(|| {
+            format!(
+                "The stored API key for {}/{} is empty.",
+                active.profile_id, active.config_id
+            )
+        })?
+        .to_string();
+    let model = if active.model.trim().is_empty() {
+        resolved.model.clone()
+    } else {
+        active.model.clone()
+    };
+    Ok(OpenAiCompatibleEndpoint {
+        base_url: resolved.base_url,
+        api_key,
+        model,
+    })
+}
+
+/// `openai_compatible_endpoint` against the real Keychain and launcher config.
+pub fn resolve_openai_compatible_endpoint(
+    repo_root: &Path,
+) -> Result<OpenAiCompatibleEndpoint, String> {
+    let slots = load_slots(repo_root)?;
+    let stored = crate::read_active_model();
+    let active = active_model_for_catalog(&slots, stored);
+    openai_compatible_endpoint(&slots, active.as_ref(), keychain_read, || {
+        crate::read_qwen_workspace_id()
+    })
+}
+
 fn keychain_read(acct: &str) -> Option<String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, acct)
         .ok()?
@@ -756,5 +847,191 @@ mod tests {
 
         assert!(normalized.is_none());
         assert!(active_model_migration(Some(&stored), normalized.as_ref()).is_none());
+    }
+
+    // ---- OpenAI-compatible endpoint (layout-preserving PDF track) ----------
+
+    fn endpoint_slots() -> Vec<RegistrySlot> {
+        let mut slots = slots();
+        slots.push(RegistrySlot {
+            profile_id: "deepseek".into(),
+            config_id: "payg".into(),
+            provider_type: "openai-compatible".into(),
+            base_url: "https://api.deepseek.com".into(),
+            base_url_env: None,
+            web_search_env: None,
+            model: "deepseek-v4-flash".into(),
+            key_env: "DEEPSEEK_API_KEYS".into(),
+        });
+        slots.push(RegistrySlot {
+            profile_id: "gemini".into(),
+            config_id: "payg".into(),
+            provider_type: "gemini-native".into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
+            base_url_env: None,
+            web_search_env: None,
+            model: "gemini-2.5-flash".into(),
+            key_env: "GEMINI_API_KEYS".into(),
+        });
+        slots
+    }
+
+    fn active(profile_id: &str, config_id: &str, model: &str) -> ActiveModel {
+        ActiveModel {
+            profile_id: profile_id.into(),
+            config_id: config_id.into(),
+            model: model.into(),
+        }
+    }
+
+    #[test]
+    fn an_openai_compatible_slot_resolves_to_its_endpoint() {
+        let chosen = active("deepseek", "payg", "deepseek-v4-flash");
+        let endpoint = openai_compatible_endpoint(
+            &endpoint_slots(),
+            Some(&chosen),
+            |acct| {
+                assert_eq!(acct, "deepseek/payg");
+                Some("sk-deepseek".into())
+            },
+            || None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            endpoint,
+            OpenAiCompatibleEndpoint {
+                base_url: "https://api.deepseek.com".into(),
+                api_key: "sk-deepseek".into(),
+                model: "deepseek-v4-flash".into(),
+            }
+        );
+    }
+
+    // Qwen and Volcengine publish OpenAI-compatible base URLs; the engine merely
+    // prefers the Responses API for them. Refusing these would leave the track
+    // unusable for the providers this user actually runs on.
+    #[test]
+    fn an_openai_responses_slot_is_accepted_too() {
+        let chosen = active("doubao", "cn-beijing", "doubao-seed-2-1-pro-260628");
+        let endpoint = openai_compatible_endpoint(
+            &endpoint_slots(),
+            Some(&chosen),
+            |_| Some("ark-secret".into()),
+            || None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            endpoint.base_url,
+            "https://ark.cn-beijing.volces.com/api/v3"
+        );
+    }
+
+    #[test]
+    fn a_native_gemini_slot_is_refused_by_name() {
+        let chosen = active("gemini", "payg", "gemini-2.5-flash");
+        let error = openai_compatible_endpoint(
+            &endpoint_slots(),
+            Some(&chosen),
+            |_| Some("gemini-secret".into()),
+            || None,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("gemini-native"), "unexpected error: {error}");
+        assert!(
+            error.contains("OpenAI-compatible"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn the_qwen_workspace_url_overrides_the_registry_base_url() {
+        let chosen = active("qwen", "payg", "qwen3.7-max");
+        let endpoint = openai_compatible_endpoint(
+            &endpoint_slots(),
+            Some(&chosen),
+            |_| Some("qwen-secret".into()),
+            || Some("ws-abc123".into()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            endpoint.base_url,
+            "https://ws-abc123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        );
+    }
+
+    // The engine pools several keys per slot and rotates them. A subprocess
+    // handed the whole comma-separated blob authenticates as nothing.
+    #[test]
+    fn a_pooled_slot_contributes_only_its_first_key() {
+        let chosen = active("deepseek", "payg", "deepseek-v4-flash");
+        let endpoint = openai_compatible_endpoint(
+            &endpoint_slots(),
+            Some(&chosen),
+            |_| Some(" sk-first , sk-second \n sk-third ".into()),
+            || None,
+        )
+        .unwrap();
+
+        assert_eq!(endpoint.api_key, "sk-first");
+    }
+
+    #[test]
+    fn the_model_chosen_in_settings_wins_over_the_registry_default() {
+        let chosen = active("deepseek", "payg", "deepseek-v4-reasoner");
+        let endpoint = openai_compatible_endpoint(
+            &endpoint_slots(),
+            Some(&chosen),
+            |_| Some("sk-deepseek".into()),
+            || None,
+        )
+        .unwrap();
+
+        assert_eq!(endpoint.model, "deepseek-v4-reasoner");
+    }
+
+    #[test]
+    fn an_empty_model_selection_falls_back_to_the_registry_default() {
+        let chosen = active("deepseek", "payg", "   ");
+        let endpoint = openai_compatible_endpoint(
+            &endpoint_slots(),
+            Some(&chosen),
+            |_| Some("sk-deepseek".into()),
+            || None,
+        )
+        .unwrap();
+
+        assert_eq!(endpoint.model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn no_selection_and_no_stored_key_both_say_what_to_do() {
+        let no_selection =
+            openai_compatible_endpoint(&endpoint_slots(), None, |_| None, || None).unwrap_err();
+        assert!(
+            no_selection.contains("Settings"),
+            "unexpected error: {no_selection}"
+        );
+
+        let chosen = active("deepseek", "payg", "deepseek-v4-flash");
+        let no_key =
+            openai_compatible_endpoint(&endpoint_slots(), Some(&chosen), |_| None, || None)
+                .unwrap_err();
+        assert!(
+            no_key.contains("No API key is stored"),
+            "unexpected error: {no_key}"
+        );
+    }
+
+    #[test]
+    fn a_slot_missing_from_the_registry_is_named_rather_than_guessed_at() {
+        let chosen = active("nonesuch", "payg", "whatever");
+        let error = openai_compatible_endpoint(&endpoint_slots(), Some(&chosen), |_| None, || None)
+            .unwrap_err();
+
+        assert!(error.contains("nonesuch/payg"), "unexpected error: {error}");
     }
 }

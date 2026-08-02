@@ -4,7 +4,12 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { InputIsland, droppedFolder, sourceIdentity } from "./InputIsland";
 import { pipelineCopy } from "./copy";
-import { defaultPipelineDraft, type PipelineDraft, type RouteOverride } from "./model";
+import {
+  defaultPipelineDraft,
+  isTrackOnlyDraftPatch,
+  type PipelineDraft,
+  type RouteOverride,
+} from "./model";
 import type { BookPipelineRouteItem, BookPipelineSource, ModelSlotView } from "../types";
 
 const copy = pipelineCopy("en");
@@ -48,6 +53,7 @@ function Harness({
   modelSlots = [],
   zoteroSources = [],
   draft: draftOverride,
+  routes = routesFor,
 }: {
   onPreview?: () => void;
   onQueueRun?: () => Promise<boolean>;
@@ -55,6 +61,7 @@ function Harness({
   modelSlots?: ModelSlotView[];
   zoteroSources?: BookPipelineSource[];
   draft?: Partial<PipelineDraft>;
+  routes?: (draft: PipelineDraft) => BookPipelineRouteItem[];
 }) {
   const [draft, setDraft] = useState<PipelineDraft>({
     ...defaultPipelineDraft,
@@ -77,11 +84,14 @@ function Harness({
       variant="compact"
       onDraftChange={(patch) => {
         setDraft((current) => ({ ...current, ...patch }));
-        setPreview([]);
+        // Mirrors App exactly, including the track-only exemption: a mode patch
+        // must not invalidate the preflight, or the choice takes itself off
+        // screen on the first click.
+        if (!isTrackOnlyDraftPatch(patch)) setPreview([]);
       }}
       onPreview={() => {
         onPreview?.();
-        setPreview(routesFor(draft));
+        setPreview(routes(draft));
       }}
       onQueueRun={onQueueRun ?? (async () => true)}
       onChooseFolder={() => undefined}
@@ -258,5 +268,92 @@ describe("sourceIdentity", () => {
     expect(sourceIdentity({ ...base, localPdfFolder: "/a" })).not.toBe(
       sourceIdentity({ ...base, localPdfFolder: "/b" }),
     );
+  });
+});
+
+/**
+ * The reflow ⇄ layout-preserving choice. The rule it renders is the backend's:
+ * one runnable item, routed `direct_text`. Anything else has exactly one track
+ * it can take, and the island picks it without asking.
+ */
+describe("InputIsland track choice", () => {
+  const oneTextPdf = (): BookPipelineRouteItem[] => [
+    {
+      id: "r1",
+      title: "A Plain PDF",
+      sourceKind: "zotero_attachment",
+      sourceRef: "AAAA1111",
+      routeKind: "direct_text",
+      canRun: true,
+      summary: "",
+    },
+  ];
+  const oneScannedPdf = (): BookPipelineRouteItem[] => [
+    { ...oneTextPdf()[0], routeKind: "remote_paddleocr" },
+  ];
+  const layoutOption = () => screen.queryByRole("radio", { name: /Layout-preserving PDF/ });
+
+  it("offers both tracks for a single text PDF", () => {
+    render(<Harness routes={oneTextPdf} />);
+
+    expect(screen.getByRole("radio", { name: /Reflowed EPUB/ })).toBeTruthy();
+    expect(layoutOption()).toBeTruthy();
+    // The reflow track is the default, so nothing changes for a user who
+    // ignores the control entirely.
+    expect(screen.getByRole("radio", { name: /Reflowed EPUB/ }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("stays hidden for a scanned book", () => {
+    render(<Harness routes={oneScannedPdf} />);
+    expect(layoutOption()).toBeNull();
+  });
+
+  it("stays hidden for a batch of several books", () => {
+    render(<Harness routes={routesFor} draft={{ hasPaddleocrCredentials: true }} />);
+    expect(layoutOption()).toBeNull();
+  });
+
+  it("records the pick on the draft", async () => {
+    const user = userEvent.setup();
+    render(<Harness routes={oneTextPdf} />);
+
+    await user.click(layoutOption()!);
+
+    expect(layoutOption()!.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: /Reflowed EPUB/ }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("says so when the pick stops applying instead of dropping it silently", async () => {
+    const user = userEvent.setup();
+    // A draft already carrying the layout choice, against a book that cannot
+    // take it: App queues the reflow track, so the island has to say that
+    // rather than let the choice evaporate between the click and the shelf.
+    render(<Harness routes={oneScannedPdf} draft={{ mode: "layout_preserving" }} />);
+
+    expect(layoutOption()).toBeNull();
+    expect(screen.getByText(/needs a single text PDF/)).toBeTruthy();
+    await user.click(startButton());
+  });
+
+  it("does not block the launch on the draft's provider slot", () => {
+    // The layout track resolves its endpoint from the Settings active slot, so
+    // an unconfigured draft slot is not a reason to hold the book back.
+    render(
+      <Harness
+        routes={oneTextPdf}
+        draft={{ mode: "layout_preserving" }}
+        modelSlots={[
+          {
+            profileId: "somewhere-else",
+            configId: "default",
+            providerType: "openai-compatible",
+            defaultModel: "m",
+            configured: true,
+          },
+        ]}
+      />,
+    );
+
+    expect(startButton().disabled).toBe(false);
   });
 });
