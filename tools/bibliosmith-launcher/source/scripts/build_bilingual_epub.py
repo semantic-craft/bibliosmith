@@ -26,19 +26,111 @@ from pathlib import Path
 from typing import Any
 
 
-BLANK_LINE = re.compile(r"\n[ \t]*\n+")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.DOTALL)
+# A fenced code block opener: up to three spaces of indent, three or more
+# backticks or tildes, then an optional info string. A backtick fence's info
+# string may not contain a backtick, which keeps an inline ``a `b` c`` span from
+# being read as a fence.
+FENCE_OPEN = re.compile(r"^([ \t]{0,3})(`{3,}|~{3,})[ \t]*(.*)$")
+FENCE_CLOSE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$")
 
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
+def fence_opener(line: str) -> tuple[int, str] | None:
+    match = FENCE_OPEN.match(line)
+    if not match:
+        return None
+    marker = match.group(2)
+    if marker.startswith("`") and "`" in match.group(3):
+        return None
+    return len(match.group(1)), marker
+
+
+def is_fence_closer(line: str, marker: str) -> bool:
+    match = FENCE_CLOSE.match(line)
+    return bool(match) and match.group(1)[0] == marker[0] and len(match.group(1)) >= len(marker)
+
+
 def split_paragraphs(text: str) -> list[str]:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not normalized:
+    """Split a chapter into blocks on blank lines, keeping a fence whole.
+
+    A fenced code block counts as one block however many blank lines it holds.
+    That matters twice over: the block has to reach `render_block` intact to be
+    rendered as code at all, and `render_chapter` pairs source and target
+    *positionally*, so a fence split into pieces would inflate the block count.
+    If the two sides then disagreed, the whole chapter would drop to
+    chapter-level fallback and lose paragraph pairing everywhere, not just at
+    the code.
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # Trim blank lines from both ends without touching the first content line's
+    # own indentation: a chapter opening with a fence indented one to three
+    # spaces would otherwise have that indent measured as zero, leaving it on
+    # every line of the rendered code.
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
         return []
-    return [block.strip() for block in BLANK_LINE.split(normalized) if block.strip()]
+
+    blocks: list[str] = []
+    paragraph: list[str] = []
+
+    def flush() -> None:
+        block = "\n".join(paragraph).strip()
+        paragraph.clear()
+        if block:
+            blocks.append(block)
+
+    index = 0
+    while index < len(lines):
+        fence = fence_opener(lines[index])
+        if fence is not None:
+            flush()
+            _, marker = fence
+            end = index + 1
+            # An unclosed fence runs to the end of the chapter, as CommonMark says.
+            while end < len(lines) and not is_fence_closer(lines[end], marker):
+                end += 1
+            blocks.append("\n".join(lines[index : min(end + 1, len(lines))]))
+            index = end + 1
+            continue
+        if lines[index].strip():
+            paragraph.append(lines[index])
+        else:
+            flush()
+        index += 1
+    flush()
+    return blocks
+
+
+def fenced_code(block: str) -> str | None:
+    """The code inside a fenced block, or None if this block is not one.
+
+    Only the delimiters and the opener's permitted indentation come off. Blank
+    lines before the closing fence are part of the sample, so a listing that
+    deliberately ends with vertical space keeps it.
+    """
+    lines = block.split("\n")
+    fence = fence_opener(lines[0])
+    if fence is None:
+        return None
+    indent, marker = fence
+    body = lines[1:]
+    if body and is_fence_closer(body[-1], marker):
+        body = body[:-1]
+    return "\n".join(strip_fence_indent(line, indent) for line in body)
+
+
+def strip_fence_indent(line: str, indent: int) -> str:
+    cut = 0
+    while cut < indent and cut < len(line) and line[cut] in " \t":
+        cut += 1
+    return line[cut:]
 
 
 def inline_text(block: str) -> str:
@@ -46,11 +138,16 @@ def inline_text(block: str) -> str:
 
 
 def render_block(block: str, css_class: str, language: str) -> str:
-    heading = HEADING.fullmatch(block)
     attributes = (
         f'class="{css_class}" lang="{html.escape(language, quote=True)}" '
         f'xml:lang="{html.escape(language, quote=True)}"'
     )
+    code = fenced_code(block)
+    if code is not None:
+        # Escaped only, never joined into a line: inside a code block the line
+        # breaks and the backticks are the content.
+        return f"<pre {attributes}><code>{html.escape(code)}</code></pre>"
+    heading = HEADING.fullmatch(block)
     if heading:
         level = min(len(heading.group(1)), 3)
         return f"<h{level} {attributes}>{inline_text(heading.group(2))}</h{level}>"
@@ -234,6 +331,11 @@ def build_book(project_root: Path) -> Path:
 .bitext-source-paragraph{font-size:1em;line-height:1.5;margin:0 0 .7em;text-indent:0}
 .bitext-target-paragraph{font-size:1em;line-height:1.72;margin:0 0 .7em;text-indent:2em}
 h1,h2,h3{line-height:1.3;text-indent:0}
+pre{margin:0 0 .35em;padding:.5em .6em;background:#f4f4f4;border:1px solid #e0e0e0;border-radius:3px;font-size:.82em;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;break-inside:avoid}
+pre code{font-family:monospace;font-size:inherit}
+/* The bitext classes carry a first-line indent and a colour for prose; a class
+   selector outranks the bare `pre` above, so the code cases are named here. */
+pre.bitext-source,pre.bitext-target,pre.bitext-source-paragraph,pre.bitext-target-paragraph{text-indent:0;color:inherit}
 ''',
     )
 

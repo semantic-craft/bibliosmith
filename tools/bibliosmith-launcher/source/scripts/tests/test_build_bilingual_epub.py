@@ -100,3 +100,133 @@ def test_builder_falls_back_to_whole_chapter_when_counts_differ(
     assert 'class="bitext-unit bitext-fallback"' in chapter
     assert body.index("Source two.") < body.index("第一章")
     assert body.index("第一章") < body.index("合并译文。")
+
+
+# --- Fenced code blocks (issue #125) ----------------------------------------
+# The builder split on blank lines only, so a fence holding one was torn into
+# two blocks and each half rendered as a paragraph with the ``` delimiters left
+# in the prose. The torn halves also inflated the block count, and this file's
+# pairing is positional: an inflated count on one side drops the whole chapter
+# to chapter-level fallback and loses paragraph pairing everywhere in it.
+
+FENCED_SOURCE = (
+    "# Chapter\n\nBefore the code.\n\n"
+    '```python\ndef a():\n    pass\n\ndef b():\n    return "# not a heading"\n```\n\n'
+    "After the code.\n"
+)
+FENCED_TARGET = (
+    "# 第一章\n\n代码之前。\n\n"
+    '```python\ndef a():\n    pass\n\ndef b():\n    return "# not a heading"\n```\n\n'
+    "代码之后。\n"
+)
+
+
+def test_a_fence_holding_a_blank_line_stays_one_block() -> None:
+    blocks = BUILDER.split_paragraphs(FENCED_SOURCE)
+
+    assert len(blocks) == 4
+    assert blocks[2].startswith("```python")
+    assert blocks[2].endswith("```")
+    assert "def b():" in blocks[2]
+
+
+def test_a_fenced_block_keeps_paragraph_alignment(tmp_path: Path, capsys) -> None:
+    # The decisive check: without the fence-aware split this chapter counted
+    # five blocks a side and, more to the point, any divergence between the two
+    # sides would have cost the whole chapter its paragraph pairing.
+    write_fixture(tmp_path, FENCED_SOURCE, FENCED_TARGET)
+
+    BUILDER.build_book(tmp_path)
+
+    assert (
+        "alignment=paragraph source_paragraphs=4 target_paragraphs=4"
+        in capsys.readouterr().out
+    )
+
+
+def test_a_fenced_block_renders_as_code_on_both_sides(tmp_path: Path) -> None:
+    write_fixture(tmp_path, FENCED_SOURCE, FENCED_TARGET)
+
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/chapter_001.xhtml")
+
+    assert '<pre class="bitext-source" lang="en" xml:lang="en"><code>def a():' in chapter
+    assert '<pre class="bitext-target" lang="zh-Hans" xml:lang="zh-Hans"><code>def a():' in chapter
+    # Line breaks and the blank line inside the block survive.
+    assert "def a():\n    pass\n\ndef b():" in chapter
+    # The delimiters are structure, not prose.
+    assert "```" not in chapter
+
+
+def test_a_comment_after_a_blank_line_in_a_fence_is_not_promoted_to_a_heading(
+    tmp_path: Path,
+) -> None:
+    # The structural half of the bug. Splitting on the blank line left a block
+    # that *began* with `# `, and HEADING.fullmatch is DOTALL — so the comment
+    # became a real <h1> carrying the trailing ``` into the chapter navigation.
+    commented = "# Chapter\n\n```\nsetup()\n\n# a comment line\nteardown()\n```\n"
+    write_fixture(tmp_path, commented, commented)
+
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/chapter_001.xhtml")
+
+    assert "# a comment line" in chapter
+    assert "<h1" not in chapter.split("</h1>", 2)[-1]
+    # Only the real chapter heading, once per language.
+    assert chapter.count("<h1") == 2
+
+
+def test_tilde_and_nested_fences_are_recognised() -> None:
+    tildes = BUILDER.split_paragraphs("~~~\nplain\n\nblock\n~~~\n")
+    assert len(tildes) == 1
+    assert BUILDER.fenced_code(tildes[0]) == "plain\n\nblock"
+
+    nested = BUILDER.split_paragraphs("````\n```\ninner\n```\n````\n")
+    assert len(nested) == 1
+    assert BUILDER.fenced_code(nested[0]) == "```\ninner\n```"
+
+
+def test_an_unclosed_fence_runs_to_the_end_of_the_chapter() -> None:
+    blocks = BUILDER.split_paragraphs("Before.\n\n```\nno closing fence\n\nstill code\n")
+
+    assert len(blocks) == 2
+    assert BUILDER.fenced_code(blocks[1]) == "no closing fence\n\nstill code"
+
+
+def test_an_inline_backtick_span_is_not_a_fence() -> None:
+    blocks = BUILDER.split_paragraphs("``a `b` c`` is an inline span.\n")
+
+    assert len(blocks) == 1
+    assert BUILDER.fenced_code(blocks[0]) is None
+
+
+def test_the_stylesheet_wraps_code_and_drops_the_prose_indent(tmp_path: Path) -> None:
+    # An e-reader page cannot scroll sideways, and the bitext classes carry a
+    # first-line indent that must not apply to code.
+    write_fixture(tmp_path, FENCED_SOURCE, FENCED_TARGET)
+
+    stylesheet = epub_member(BUILDER.build_book(tmp_path), "EPUB/styles/book.css")
+
+    assert "white-space:pre-wrap" in stylesheet
+    assert "pre.bitext-target" in stylesheet
+
+
+# --- Review findings on PR #126 ---------------------------------------------
+
+
+def test_an_indented_opening_fence_has_its_indent_measured_before_trimming() -> None:
+    # The whole-text strip used to eat the opener's indentation before it could
+    # be measured, so the width came out as zero and the matching indent stayed
+    # on every rendered code line.
+    blocks = BUILDER.split_paragraphs("  ```\n  indented body\n  ```\n")
+
+    assert len(blocks) == 1
+    assert BUILDER.fenced_code(blocks[0]) == "indented body"
+
+
+def test_blank_lines_before_the_closing_fence_are_part_of_the_code() -> None:
+    blocks = BUILDER.split_paragraphs("```\nrow\n\n\n```\n")
+
+    assert BUILDER.fenced_code(blocks[0]) == "row\n\n"
+
+
+def test_leading_blank_lines_still_do_not_become_a_block() -> None:
+    assert BUILDER.split_paragraphs("\n\n  \n\nonly paragraph\n\n") == ["only paragraph"]
