@@ -91,7 +91,6 @@ class Config:
     text_page_min_chars: int
     dirty_text_guard: bool
     dirty_text_min_chars: int
-    dirty_text_fullwidth_alnum_ratio: float
     dirty_text_private_use_ratio: float
     force_ocr_item_types: set[str]
     request_timeout: int
@@ -209,7 +208,6 @@ def get_config(*, zotero_tags: Iterable[str] = ()) -> Config:
         text_page_min_chars=env_int("TEXT_EXTRACT_PAGE_MIN_CHARS", 80),
         dirty_text_guard=env_bool("DIRTY_TEXT_LAYER_GUARD", True),
         dirty_text_min_chars=env_int("DIRTY_TEXT_MIN_SAMPLE_CHARS", 1000),
-        dirty_text_fullwidth_alnum_ratio=env_float("DIRTY_TEXT_FULLWIDTH_ALNUM_RATIO", 0.03),
         dirty_text_private_use_ratio=env_float("DIRTY_TEXT_PRIVATE_USE_RATIO", 0.005),
         force_ocr_item_types=force_types,
         request_timeout=env_int("REQUEST_TIMEOUT_SECONDS", 60),
@@ -262,11 +260,6 @@ def sha256_file(path: Path) -> str:
 
 def count_nonspace(text: str) -> int:
     return sum(1 for ch in text if not ch.isspace())
-
-
-def is_fullwidth_alnum(ch: str) -> bool:
-    code = ord(ch)
-    return 0xFF10 <= code <= 0xFF19 or 0xFF21 <= code <= 0xFF3A or 0xFF41 <= code <= 0xFF5A
 
 
 def is_private_use(ch: str) -> bool:
@@ -340,25 +333,27 @@ def extract_text_pages(path: Path, pages: Iterable[int]) -> list[tuple[int, str]
 
 
 def text_layer_quality(text: str, chars: int, config: Config) -> tuple[bool, str]:
+    """Flag a text layer whose glyphs did not survive extraction.
+
+    Private-use characters are the signal: a broken ToUnicode CMap drops digits
+    into U+F73x, and OCR text layers dump punctuation into U+E5xx.
+
+    There used to be a second check on the ratio of fullwidth ASCII. It was
+    measured against the live Zotero corpus in #138 and removed in #140: of the
+    1123 real PDFs, it fired alone on 31 books and every one of them was
+    legitimate GB/T typesetting, not mojibake \u2014 Chinese journals set embedded
+    Latin and whole reference pages fullwidth. It found nothing this check
+    misses, so do not add it back without corpus evidence.
+    """
     if not config.dirty_text_guard or chars < config.dirty_text_min_chars:
         return False, ""
     nonspace = [ch for ch in text if not ch.isspace()]
     if not nonspace:
         return False, ""
-    fullwidth_alnum = sum(1 for ch in nonspace if is_fullwidth_alnum(ch))
-    private_use = sum(1 for ch in nonspace if is_private_use(ch))
-    cjk = sum(1 for ch in nonspace if "\u4e00" <= ch <= "\u9fff")
-    fullwidth_ratio = fullwidth_alnum / len(nonspace)
-    private_ratio = private_use / len(nonspace)
-    cjk_ratio = cjk / len(nonspace)
-    reasons: list[str] = []
-    if cjk_ratio >= 0.35 and fullwidth_ratio >= config.dirty_text_fullwidth_alnum_ratio:
-        reasons.append(
-            f"fullwidth_alnum_ratio={fullwidth_ratio:.3f}>={config.dirty_text_fullwidth_alnum_ratio:.3f}"
-        )
+    private_ratio = sum(1 for ch in nonspace if is_private_use(ch)) / len(nonspace)
     if private_ratio >= config.dirty_text_private_use_ratio:
-        reasons.append(f"private_use_ratio={private_ratio:.3f}>={config.dirty_text_private_use_ratio:.3f}")
-    return bool(reasons), "; ".join(reasons)
+        return True, f"private_use_ratio={private_ratio:.3f}>={config.dirty_text_private_use_ratio:.3f}"
+    return False, ""
 
 
 def sample_text_layer(path: Path, total_pages: int, config: Config) -> TextLayerSample:
