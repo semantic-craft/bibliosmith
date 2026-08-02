@@ -86,6 +86,67 @@ function isRawHtmlLine(line) {
   return /^<\/?(section|p|aside|div|span|blockquote|ol|ul|li|dl|dt|dd|sup|a|em|strong|br)\b[^>]*>/.test(line.trim());
 }
 
+const COMMENT_OPEN = '<!--';
+const COMMENT_CLOSE = '-->';
+
+/**
+ * Whether a paragraph is nothing but HTML comments.
+ *
+ * The PaddleOCR assembler writes a `<!-- page: N -->` anchor between pages so a
+ * reviewer can map a passage back to a page of the original, and picked a
+ * comment precisely so the marker would stay out of the prose. Nothing here
+ * reads it, and `inline` escapes every paragraph it is handed, so an anchor left
+ * in place reaches the reader as the literal text `<!-- page: N -->`.
+ *
+ * Only a paragraph that is *entirely* comments goes; a comment sitting in a real
+ * paragraph is that paragraph's content and stays with it. Testing the whole
+ * paragraph rather than each line is what makes that hold — and it keeps this
+ * builder's reading of a chapter identical to `build_bilingual_epub.py`'s, which
+ * drops the same blocks from the same Markdown.
+ *
+ * A scan rather than a regular expression, because both regex forms are worse
+ * here: `text.replace(/<!--[\s\S]*?-->/g, '')` is a single sanitizing pass that
+ * can leave a `<!--` behind, and the anchored alternative nests a lazy quantifier
+ * inside a `+`, which backtracks exponentially on a long run of comments. This
+ * walks the paragraph once.
+ */
+/**
+ * Whether a line leaves a comment open at its end.
+ *
+ * Scanned pair by pair rather than by a single `indexOf`, because a line may
+ * hold several comments and only the last one's fate decides whether the next
+ * line is still inside a comment.
+ */
+function opensUnclosedComment(line) {
+  let index = 0;
+  for (;;) {
+    const open = line.indexOf(COMMENT_OPEN, index);
+    if (open < 0) return false;
+    const close = line.indexOf(COMMENT_CLOSE, open + COMMENT_OPEN.length);
+    if (close < 0) return true;
+    index = close + COMMENT_CLOSE.length;
+  }
+}
+
+function isCommentOnly(text) {
+  let rest = text.trim();
+  if (!rest) return false;
+  while (rest.startsWith(COMMENT_OPEN)) {
+    // Searching past the opener is what keeps `<!-->` unterminated: from index
+    // zero its own `--` and `>` read as a closer, and the paragraph would
+    // vanish. HTML5 does call that an empty comment, but the bilingual builder
+    // does not drop it either, and leaving an oddity escaped is the safe half
+    // of the trade.
+    const close = rest.indexOf(COMMENT_CLOSE, COMMENT_OPEN.length);
+    // Unterminated: not a comment as far as any parser is concerned, so not
+    // this rule's business to delete.
+    if (close < 0) return false;
+    rest = rest.slice(close + COMMENT_CLOSE.length).trim();
+  }
+  // Whatever is left is real content, and the whole paragraph stays with it.
+  return rest === '';
+}
+
 // A fenced code block opener: up to three spaces of indent, then three or more
 // backticks or tildes, then an optional info string. A backtick fence's info
 // string may not contain a backtick, which is what keeps `a ``b`` c` from being
@@ -184,10 +245,12 @@ function markdownToBody(file, imageMap) {
   let title = null;
   let para = [];
   const flush = () => {
-    if (para.length) {
-      out.push(`<p>${inline(para.join(' ').trim())}</p>`);
-      para = [];
-    }
+    if (!para.length) return;
+    const text = para.join(' ').trim();
+    para = [];
+    // Fences are emitted below without passing through here, so a code sample
+    // that happens to be one comment is still rendered in full.
+    if (!isCommentOnly(text)) out.push(`<p>${inline(text)}</p>`);
   };
 
   const lines = readText(file).split('\n');
@@ -213,6 +276,34 @@ function markdownToBody(file, imageMap) {
       out.push(codeBlockHtml(body, fence.info));
       i = end;
       continue;
+    }
+    // A comment that opens a line and does not close on it runs on, and every
+    // line it spans is part of it: `# x` inside a comment is no more a heading
+    // than it is inside a fence. Without this the rules below saw those lines,
+    // so `<!--\n# hidden\n-->` reached the reader as a visible `<!--`, a real
+    // `<h1>hidden</h1>` and a visible `-->` — and never got as far as
+    // `isCommentOnly`, which is what the bilingual builder drops it by.
+    //
+    // The lines join the paragraph buffer rather than being emitted on their
+    // own, so a run-on comment sitting inside real prose is still that
+    // paragraph's content, exactly as a single-line one is.
+    if (line.trim().startsWith(COMMENT_OPEN) && opensUnclosedComment(line)) {
+      let end = i + 1;
+      while (end < lines.length && !lines[end].includes(COMMENT_CLOSE)) end += 1;
+      // Only a comment that actually closes is taken whole. An unclosed fence
+      // runs to the end of the document because CommonMark says so; nothing
+      // says that of a stray `<!--`, and swallowing the rest of the chapter
+      // would collapse every remaining paragraph into one over a typo. Falling
+      // through leaves it exactly as it was before this rule existed.
+      if (end < lines.length) {
+        for (let scan = i; scan <= end; scan += 1) {
+          // A blank line inside a comment is the comment's, not a paragraph
+          // break; it contributes nothing, so it is not buffered either.
+          if (lines[scan].trim()) para.push(lines[scan].trim());
+        }
+        i = end;
+        continue;
+      }
     }
     if (!line.trim()) {
       flush();
