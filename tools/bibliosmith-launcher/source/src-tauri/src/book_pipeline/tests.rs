@@ -740,7 +740,7 @@ impl RunnerCommandExecutor for PaddleScratchLayoutExecutor {
 }
 
 #[test]
-fn wrapper_chunk_scratch_is_not_registered_as_an_artifact() {
+fn wrapper_chunk_scratch_is_not_registered_and_handoff_stays_in_test_root() {
     let root = temp_root("local-pdf-scratch");
     let input = root.join("input");
     fs::create_dir_all(&input).unwrap();
@@ -754,6 +754,9 @@ fn wrapper_chunk_scratch_is_not_registered_as_an_artifact() {
         BookPipelinePreviewConfig::default(),
     )
     .unwrap();
+    let test_repo_root = store
+        .job_output_dir(&job.id)
+        .join("test-local-reading-repo");
 
     let completed = run_job(
         &store,
@@ -782,6 +785,12 @@ fn wrapper_chunk_scratch_is_not_registered_as_an_artifact() {
         .artifacts
         .iter()
         .any(|artifact| artifact.kind == "markdown" && artifact.path.ends_with("Sample_Book.md")));
+    let test_projects = fs::read_dir(test_repo_root.join("books/local/zh-Hans"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(test_projects.len(), 1);
+    assert!(test_projects[0].path().is_dir());
     // Reclaiming the scratch must not leave rows pointing at missing files.
     let _ = fs::remove_dir_all(
         completed
