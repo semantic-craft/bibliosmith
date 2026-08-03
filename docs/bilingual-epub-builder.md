@@ -21,6 +21,11 @@ directory. The `build_reading` stage runs it with `--book-root` and registers
   fence counts as one paragraph however many blank lines it holds, and renders
   as `<pre><code>` on both sides of its pair. Counting its parts separately
   would inflate one side's total and cost the whole chapter its pairing.
+- A paragraph that is nothing but HTML comments is dropped before pairing, on
+  both sides alike. The PaddleOCR route writes a `<!-- page: N -->` anchor
+  between pages, and every block is escaped on its way into the chapter, so an
+  anchor left in place reached the reader as visible `<!-- page: N -->` text. A
+  comment inside a real paragraph, or inside a fence, is content and stays.
 - A count mismatch falls back to a whole-chapter pair and reports
   `alignment=chapter-fallback`.
 - The output is `output/reading/book_bilingual.epub`.
