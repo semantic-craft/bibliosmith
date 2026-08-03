@@ -1225,7 +1225,9 @@ def markdown_page_numbers(path: Path) -> list[int]:
     return pages
 
 
-def sidecar_page_numbers(path: Path) -> list[int]:
+def sidecar_page_numbers(
+    path: Path, *, expected_source_pdf_key: str | None = None
+) -> list[int]:
     """Page numbers a sidecar records, in any shape a route writes here.
 
     The pdf-text route writes one JSON object carrying a `pages` array of
@@ -1252,6 +1254,11 @@ def sidecar_page_numbers(path: Path) -> list[int]:
     if isinstance(parsed, dict) and isinstance(parsed.get("pages"), list):
         entries = parsed["pages"]
         if parsed.get("route") == ROUTE_MINERU:
+            if (
+                expected_source_pdf_key is not None
+                and parsed.get("source_pdf_key") != expected_source_pdf_key
+            ):
+                return []
             if all(type(entry) is int for entry in entries):
                 return entries
             return []
@@ -2309,7 +2316,17 @@ def emit_attachment_evidence(
 def infer_generated_markdown_route(markdown_path: Path, sidecar_path: Path) -> str:
     if sidecar_path.exists():
         try:
-            for raw_line in sidecar_path.read_text(encoding="utf-8").splitlines():
+            text = sidecar_path.read_text(encoding="utf-8")
+            try:
+                parsed_sidecar = json.loads(text)
+            except Exception:
+                parsed_sidecar = None
+            if (
+                isinstance(parsed_sidecar, dict)
+                and parsed_sidecar.get("route") == ROUTE_MINERU
+            ):
+                return ROUTE_MINERU
+            for raw_line in text.splitlines():
                 line = raw_line.strip()
                 if not line:
                     continue
@@ -2347,7 +2364,11 @@ def upload_test(config: Config, state: StateDB, local: ZoteroLocalClient, key: s
     )
     source_md5 = md5_file(attachment.path)
     page_count = pdf_page_count(attachment.path)
-    pages = sidecar_page_numbers(sidecar_path) or markdown_page_numbers(markdown_path)
+    pages = sidecar_page_numbers(
+        sidecar_path, expected_source_pdf_key=attachment.key
+    )
+    if route != ROUTE_MINERU and not pages:
+        pages = markdown_page_numbers(markdown_path)
     status = selection_status(pages, page_count, uploaded=True)
     state.upsert_document(
         attachment=attachment,

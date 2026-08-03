@@ -287,6 +287,7 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             completed = state.completed(attachment.key, source_md5)
             self.assertIsNotNone(completed)
             self.assertEqual("completed", completed["status"] if completed else None)
+            self.assertEqual("mineru", completed["route"] if completed else None)
 
             with self.assertLogs(level="INFO") as logs:
                 emit_attachment_evidence(
@@ -302,7 +303,72 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             )
             payload = json.loads(line.split("BOOK_PIPELINE_ATTACHMENT_EVIDENCE ", 1)[1])
             self.assertEqual("already_completed", payload["status"])
+            self.assertEqual("mineru", payload["route"])
             self.assertEqual("MDKEY123", payload["markdownAttachmentKey"])
+
+    def assert_upload_test_keeps_mineru_sidecar_partial(
+        self, sidecar: dict[str, object]
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.pdf"
+            source.write_bytes(b"%PDF fixture\n")
+            attachment = self.fixture_attachment(source)
+            config = get_config()
+            config.output_root = root / "output"
+            state = StateDB(root / "state.sqlite3")
+            staging = config.output_root / ".state" / "staging" / attachment.key
+            staging.mkdir(parents=True)
+            markdown = staging / "source.mineru.md"
+            markdown.write_text(
+                "# MinerU result\n\n"
+                "<!-- page: 1 -->\n\n"
+                "<!-- page: 2 -->\n\n"
+                "<!-- page: 3 -->\n",
+                encoding="utf-8",
+            )
+            markdown.with_suffix(".jsonl").write_text(
+                json.dumps(sidecar),
+                encoding="utf-8",
+            )
+            local = unittest.mock.Mock()
+            local.get_pdf_attachment.return_value = attachment
+
+            with (
+                patch("zotero_llm_worker.pdf_page_count", return_value=3),
+                patch("zotero_llm_worker.ZoteroWebClient") as web_client_class,
+            ):
+                web_client_class.return_value.create_markdown_attachment.return_value = (
+                    "MDKEY123"
+                )
+                upload_test(config, state, local, attachment.key)
+
+            source_md5 = md5_file(source)
+            self.assertIsNone(state.completed(attachment.key, source_md5))
+            row = state.document(attachment.key, source_md5)
+            self.assertIsNotNone(row)
+            self.assertEqual("uploaded_partial", row["status"] if row else None)
+            self.assertEqual("mineru", row["route"] if row else None)
+
+    def test_upload_test_keeps_an_invalid_mineru_sidecar_partial_even_with_markdown_pages(
+        self,
+    ) -> None:
+        self.assert_upload_test_keeps_mineru_sidecar_partial(
+            {
+                "source_pdf_key": "KXPSMW4C",
+                "route": "mineru",
+                "pages": [1, {"page": 2}, 3],
+            }
+        )
+
+    def test_upload_test_keeps_a_mismatched_mineru_sidecar_partial(self) -> None:
+        self.assert_upload_test_keeps_mineru_sidecar_partial(
+            {
+                "source_pdf_key": "OTHERKEY",
+                "route": "mineru",
+                "pages": [1, 2, 3],
+            }
+        )
 
     def test_completed_worker_evidence_binds_source_markdown_and_zotero_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
