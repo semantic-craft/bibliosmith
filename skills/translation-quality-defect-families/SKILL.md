@@ -379,8 +379,8 @@ If the round found only format, asset, path, EPUB structure, or other non-transl
   低 token 审计：先收集结构候选，不要盲读全书，例如 `rg -n --pcre2 "[A-Za-z][A-Za-z ,;:'’“”()/-]{35,}" chapters/final chapters/translated`，再把每个命中与相邻源文分页处对照；同时比较注号清单，并扫描每个已记录分页点附近是否重复句尾。
 - Fix by: Reconstruct the complete source sentence across the page boundary, translate it as one semantic unit, preserve its citation marker, then remove duplicated half-sentences and unapproved source fragments.
   修复方式：先跨页恢复完整原句，把它作为一个语义单元翻译并保留注号，再删除重复半句和未经批准的源语碎片。
-- Recheck: Rerun the boundary-candidate, Latin-span, duplicate-tail, and citation-inventory audits against both final Markdown and the text extracted from the generated PDF. Mark the fixing pass `FIXED_RECHECK_REQUIRED`; only a later clean pass may be `PASS`.
-  复查：对终稿 Markdown 与生成 PDF 的文本同时重跑分页候选、拉丁字母长串、重复句尾和注号清单审计。修复轮记为 `FIXED_RECHECK_REQUIRED`；只有后续零问题轮才能记为 `PASS`。
+- Recheck: Rerun the boundary-candidate, Latin-span, duplicate-tail, and citation-inventory audits against both final Markdown and the actual requested reading artifact: extracted XHTML for EPUB, the generated HTML for HTML output, or extracted PDF text only when a PDF was produced. Mark the fixing pass `FIXED_RECHECK_REQUIRED`; only a later clean pass may be `PASS`.
+  复查：对终稿 Markdown 与实际请求的阅读产物同时重跑分页候选、拉丁字母长串、重复句尾和注号清单审计：EPUB 检查其中的 XHTML，HTML 检查生成文件，只有实际生成 PDF 时才检查其抽取文本。修复轮记为 `FIXED_RECHECK_REQUIRED`；只有后续零问题轮才能记为 `PASS`。
 
 ### Reader-Facing Source-Name Clutter / 读者界面原名杂音
 
