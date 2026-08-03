@@ -138,6 +138,11 @@ class PageNumberReaderTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
+    def write_sidecar(self, text: str) -> Path:
+        path = self.root / "book.jsonl"
+        path.write_text(text, encoding="utf-8")
+        return path
+
     def test_a_file_converted_before_this_change_still_reads(self) -> None:
         path = self.write("# Book\n\n## Page 1\n\nBody.\n\n## Page 2\n\nMore.\n")
 
@@ -154,10 +159,62 @@ class PageNumberReaderTests(unittest.TestCase):
         self.assertEqual([], markdown_page_numbers(path))
 
     def test_a_sidecar_that_is_not_json_is_not_an_error(self) -> None:
-        path = self.root / "book.jsonl"
-        path.write_text('{"raw": {}}\n{"raw": {}}\n', encoding="utf-8")
+        path = self.write_sidecar('{"raw": {}}\n{"raw": {}}\n')
 
         self.assertEqual([], sidecar_page_numbers(path))
+
+    def test_the_pdf_text_sidecar_reads_from_its_pages_array(self) -> None:
+        path = self.write_sidecar(
+            json.dumps({"route": "pdf-text", "pages": [{"page": 1, "chars": 40}, {"page": 2, "chars": 12}]}, indent=2)
+        )
+
+        self.assertEqual([1, 2], sidecar_page_numbers(path))
+
+    def test_the_ocr_sidecar_reads_line_by_line(self) -> None:
+        """What both paddle-ocr branches write: JSONL, one page per line.
+
+        `json.loads()` cannot read the file whole, and no OCR route puts a page
+        marker in the Markdown, so reading only the pdf-text shape left
+        `--upload-test` with no pages at all and it recorded a fully converted
+        book as `uploaded_partial`.
+        """
+        path = self.write_sidecar(
+            '{"page": 1, "raw": {"prunedResult": {"rec_texts": ["Chapter One"]}}}\n'
+            '{"page": 2, "raw": {"markdown": {"text": "More."}}}\n'
+        )
+
+        self.assertEqual([1, 2], sidecar_page_numbers(path))
+
+    def test_a_one_page_ocr_sidecar_reads_too(self) -> None:
+        """A single JSONL line is also valid JSON whole, so parsing in one
+        piece cannot be what decides the file is the pdf-text shape."""
+        path = self.write_sidecar('{"page": 1, "raw": {"markdown": {"text": "Only page."}}}\n')
+
+        self.assertEqual([1], sidecar_page_numbers(path))
+
+    def test_a_half_written_sidecar_reports_the_pages_it_has(self) -> None:
+        """A truncated last line is what an interrupted run leaves behind."""
+        path = self.write_sidecar(
+            '{"page": 1, "raw": {}}\n'
+            '{"page": 2, "raw": {}}\n'
+            '{"page": 3, "raw": {"markd'
+        )
+
+        self.assertEqual([1, 2], sidecar_page_numbers(path))
+
+    def test_a_sidecar_cut_mid_character_reports_the_pages_it_has(self) -> None:
+        """An interrupted UTF-8 write can leave the final character partial."""
+        path = self.root / "book.jsonl"
+        path.write_bytes(
+            b'{"page": 1, "raw": {}}\n'
+            b'{"page": 2, "raw": {}}\n'
+            b'{"page": 3, "raw": {"text": "\xe4\xb8'
+        )
+
+        self.assertEqual([1, 2], sidecar_page_numbers(path))
+
+    def test_a_missing_sidecar_is_not_an_error(self) -> None:
+        self.assertEqual([], sidecar_page_numbers(self.root / "absent.jsonl"))
 
 
 if __name__ == "__main__":

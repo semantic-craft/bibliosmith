@@ -35,8 +35,10 @@ from zotero_llm_worker import (  # noqa: E402
     Attachment,
     StateDB,
     get_config,
+    markdown_page_numbers,
     md5_file,
     process_ocr_route,
+    upload_test,
 )
 
 
@@ -73,6 +75,24 @@ class FakeBaiduOCRClient:
         return json.dumps({"result": {"ocrResults": results}}, ensure_ascii=False) + "\n"
 
 
+class FakeLayoutClient(FakeBaiduOCRClient):
+    """The shape a PaddleOCR-VL model answers with: per-page Markdown.
+
+    The other fake cannot stand in for this one — the layout branch reads
+    `layoutParsingResults`, which is exactly what
+    `test_a_layout_model_still_takes_the_other_branch` relies on it not
+    finding — so a claim about what the layout branch writes needs its own.
+    """
+
+    def download_jsonl(self, url: str) -> str:
+        _, start, end = url.split("-")
+        results = [
+            {"markdown": {"text": " ".join(PAGE_TEXTS[page]), "images": {}}}
+            for page in range(int(start), int(end) + 1)
+        ]
+        return json.dumps({"result": {"layoutParsingResults": results}}, ensure_ascii=False) + "\n"
+
+
 def write_pdf(path: Path, page_count: int) -> Path:
     doc = fitz.open()
     for number in range(page_count):
@@ -98,7 +118,12 @@ class OcrRouteMarkdownTests(unittest.TestCase):
             content_type="application/pdf",
         )
 
-    def run_route(self, *, baidu_model: str = "PP-OCRv5"):  # type: ignore[no-untyped-def]
+    def run_route(
+        self,
+        *,
+        baidu_model: str = "PP-OCRv5",
+        baidu_client_class=FakeBaiduOCRClient,
+    ):  # type: ignore[no-untyped-def]
         config = dataclasses.replace(
             get_config(),
             output_root=self.root / "out",
@@ -108,7 +133,7 @@ class OcrRouteMarkdownTests(unittest.TestCase):
             baidu_max_upload_mb=64,
         )
         state = StateDB(self.root / "state.sqlite3")
-        with mock.patch("zotero_llm_worker.BaiduOCRClient", FakeBaiduOCRClient):
+        with mock.patch("zotero_llm_worker.BaiduOCRClient", baidu_client_class):
             status, pages_used = process_ocr_route(
                 attachment=self.attachment,
                 config=config,
@@ -171,6 +196,39 @@ class OcrRouteMarkdownTests(unittest.TestCase):
 
         self.assertEqual(sorted(PAGE_TEXTS), [entry["page"] for entry in lines])
         self.assertEqual(len(PAGE_TEXTS), pages_used)
+
+    def assert_upload_test_records_a_whole_book(self, markdown_path: Path) -> None:
+        """The upload seam persists a completed row for a full OCR artifact.
+
+        An OCR route writes no page marker into Markdown, so upload_test must
+        recover the complete page set from the sidecar. Otherwise the public
+        completed lookup stays empty and a later run can pay to OCR it again.
+        """
+        self.assertEqual([], markdown_page_numbers(markdown_path))
+        config = dataclasses.replace(get_config(), output_root=self.root / "out")
+        state = StateDB(self.root / "state.sqlite3")
+        local = mock.Mock()
+        local.get_pdf_attachment.return_value = self.attachment
+
+        with mock.patch("zotero_llm_worker.ZoteroWebClient") as web_client_class:
+            web_client_class.return_value.create_markdown_attachment.return_value = "MARKDOWNKEY"
+            upload_test(config, state, local, self.attachment.key)
+
+        completed = state.completed(self.attachment.key, md5_file(self.pdf))
+        self.assertEqual("completed", completed["status"] if completed else None)
+
+    def test_upload_test_reads_every_page_off_an_ocr_sidecar(self) -> None:
+        _, markdown_path, _, _ = self.run_route()
+
+        self.assert_upload_test_records_a_whole_book(markdown_path)
+
+    def test_upload_test_reads_every_page_off_a_layout_sidecar(self) -> None:
+        _, markdown_path, _, _ = self.run_route(
+            baidu_model="PaddleOCR-VL-1.6", baidu_client_class=FakeLayoutClient
+        )
+
+        self.assertIn("Chapter One", markdown_path.read_text(encoding="utf-8"))
+        self.assert_upload_test_records_a_whole_book(markdown_path)
 
     def test_a_layout_model_still_takes_the_other_branch(self) -> None:
         """The fake answers `ocrResults`, which the layout branch cannot read.
