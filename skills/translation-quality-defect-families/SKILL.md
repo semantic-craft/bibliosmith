@@ -367,6 +367,21 @@ If the round found only format, asset, path, EPUB structure, or other non-transl
 - Recheck: Verify the revised sentence no longer sounds translated, and that no source relation was lost.
   复查：确认修订句不再像翻译腔，同时没有丢失原文关系。
 
+### Page-Boundary Fracture and Mixed-Language Spill / 分页断裂与夹生源语
+
+- Symptom: PDF extraction leaves a sentence split across page boundaries, drops the joining phrase, or carries an untranslated source-language fragment into an otherwise translated paragraph. The target may still read fluently because the two broken halves were translated independently.
+  症状：PDF 提取在分页处截断句子、漏掉承接语，或把源语碎片夹进原本已经翻译的段落。由于断开的两半可能分别都译得顺，目标语表面流畅仍会掩盖缺失。
+- Risk: A page-local translation can reverse or truncate the source claim, duplicate a clause, detach a citation marker, or leave reader-facing mixed language even when chapter-level word counts look plausible.
+  风险：按页翻译会截断甚至反转原文论断、重复分句、让注号脱离所指，或留下读者可见的夹生源语；章节总字数看似合理也不能证明完整。
+- Find by: Before translation, join extraction blocks across page boundaries and flag page-final fragments that lack terminal punctuation, plus next-page openings that begin with lowercase letters, conjunctions, punctuation, or citation continuations. After translation, scan prose outside bibliography, code, formulas, URLs, and approved first-mention interfaces for long Latin-script spans and abrupt target/source switches.
+  发现方式：翻译前先跨页拼接提取块，标记没有句末标点的页末片段，以及以小写字母、连词、标点或续接注号开头的下一页。翻译后扫描正文中较长的拉丁字母串和目标语/源语突变；书目、代码、公式、网址和已批准的首次原名接口除外。
+- Low-token audit: Start with structural candidates rather than rereading the whole book, for example `rg -n --pcre2 "[A-Za-z][A-Za-z ,;:'’“”()/-]{35,}" chapters/final chapters/translated` and compare each hit with the neighboring source page boundary. Also compare citation-marker inventories and scan for repeated sentence tails around every recorded page break.
+  低 token 审计：先收集结构候选，不要盲读全书，例如 `rg -n --pcre2 "[A-Za-z][A-Za-z ,;:'’“”()/-]{35,}" chapters/final chapters/translated`，再把每个命中与相邻源文分页处对照；同时比较注号清单，并扫描每个已记录分页点附近是否重复句尾。
+- Fix by: Reconstruct the complete source sentence across the page boundary, translate it as one semantic unit, preserve its citation marker, then remove duplicated half-sentences and unapproved source fragments.
+  修复方式：先跨页恢复完整原句，把它作为一个语义单元翻译并保留注号，再删除重复半句和未经批准的源语碎片。
+- Recheck: Rerun the boundary-candidate, Latin-span, duplicate-tail, and citation-inventory audits against both final Markdown and the text extracted from the generated PDF. Mark the fixing pass `FIXED_RECHECK_REQUIRED`; only a later clean pass may be `PASS`.
+  复查：对终稿 Markdown 与生成 PDF 的文本同时重跑分页候选、拉丁字母长串、重复句尾和注号清单审计。修复轮记为 `FIXED_RECHECK_REQUIRED`；只有后续零问题轮才能记为 `PASS`。
+
 ### Reader-Facing Source-Name Clutter / 读者界面原名杂音
 
 - Symptom: A target-language paragraph interrupts ordinary reading with multiple source-language names, role names, or parenthetical originals in one sentence, even though the exact source spelling is not being analyzed.
