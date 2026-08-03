@@ -202,6 +202,17 @@ class PageNumberReaderTests(unittest.TestCase):
 
         self.assertEqual([1, 2], sidecar_page_numbers(path))
 
+    def test_a_sidecar_cut_mid_character_reports_the_pages_it_has(self) -> None:
+        """An interrupted UTF-8 write can leave the final character partial."""
+        path = self.root / "book.jsonl"
+        path.write_bytes(
+            b'{"page": 1, "raw": {}}\n'
+            b'{"page": 2, "raw": {}}\n'
+            b'{"page": 3, "raw": {"text": "\xe4\xb8'
+        )
+
+        self.assertEqual([1, 2], sidecar_page_numbers(path))
+
     def test_a_missing_sidecar_is_not_an_error(self) -> None:
         self.assertEqual([], sidecar_page_numbers(self.root / "absent.jsonl"))
 

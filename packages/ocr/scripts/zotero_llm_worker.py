@@ -1240,7 +1240,10 @@ def sidecar_page_numbers(path: Path) -> list[int]:
     """
     if not path.exists():
         return []
-    text = path.read_text(encoding="utf-8")
+    # An interrupted write can cut the final UTF-8 character in half. Ignore
+    # only the undecodable bytes so complete JSONL records before it still
+    # contribute their page numbers.
+    text = path.read_text(encoding="utf-8", errors="ignore")
     try:
         parsed = json.loads(text)
     except Exception:

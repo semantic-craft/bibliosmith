@@ -38,8 +38,7 @@ from zotero_llm_worker import (  # noqa: E402
     markdown_page_numbers,
     md5_file,
     process_ocr_route,
-    selection_status,
-    sidecar_page_numbers,
+    upload_test,
 )
 
 
@@ -119,7 +118,12 @@ class OcrRouteMarkdownTests(unittest.TestCase):
             content_type="application/pdf",
         )
 
-    def run_route(self, *, baidu_model: str = "PP-OCRv5", client=FakeBaiduOCRClient):  # type: ignore[no-untyped-def]
+    def run_route(
+        self,
+        *,
+        baidu_model: str = "PP-OCRv5",
+        baidu_client_class=FakeBaiduOCRClient,
+    ):  # type: ignore[no-untyped-def]
         config = dataclasses.replace(
             get_config(),
             output_root=self.root / "out",
@@ -129,7 +133,7 @@ class OcrRouteMarkdownTests(unittest.TestCase):
             baidu_max_upload_mb=64,
         )
         state = StateDB(self.root / "state.sqlite3")
-        with mock.patch("zotero_llm_worker.BaiduOCRClient", client):
+        with mock.patch("zotero_llm_worker.BaiduOCRClient", baidu_client_class):
             status, pages_used = process_ocr_route(
                 attachment=self.attachment,
                 config=config,
@@ -193,34 +197,38 @@ class OcrRouteMarkdownTests(unittest.TestCase):
         self.assertEqual(sorted(PAGE_TEXTS), [entry["page"] for entry in lines])
         self.assertEqual(len(PAGE_TEXTS), pages_used)
 
-    def assert_upload_test_sees_a_whole_book(self, markdown_path: Path, sidecar_path: Path) -> None:
-        """`upload_test()` decides the recorded status from these two readers.
+    def assert_upload_test_records_a_whole_book(self, markdown_path: Path) -> None:
+        """The upload seam persists a completed row for a full OCR artifact.
 
-        It takes `sidecar_page_numbers(...) or markdown_page_numbers(...)`, and
-        an OCR route writes no page marker into the Markdown at all, so the
-        sidecar is the only source there is. When it read back empty, a fully
-        converted book was recorded `uploaded_partial`: `StateDB.completed()`
-        then never matched the row, so the next run paid to OCR the book again
-        and `emit_attachment_evidence()` stayed silent about it.
+        An OCR route writes no page marker into Markdown, so upload_test must
+        recover the complete page set from the sidecar. Otherwise the public
+        completed lookup stays empty and a later run can pay to OCR it again.
         """
         self.assertEqual([], markdown_page_numbers(markdown_path))
-        pages = sidecar_page_numbers(sidecar_path) or markdown_page_numbers(markdown_path)
+        config = dataclasses.replace(get_config(), output_root=self.root / "out")
+        state = StateDB(self.root / "state.sqlite3")
+        local = mock.Mock()
+        local.get_pdf_attachment.return_value = self.attachment
 
-        self.assertEqual(sorted(PAGE_TEXTS), pages)
-        self.assertEqual("completed", selection_status(pages, len(PAGE_TEXTS), uploaded=True))
+        with mock.patch("zotero_llm_worker.ZoteroWebClient") as web_client_class:
+            web_client_class.return_value.create_markdown_attachment.return_value = "MARKDOWNKEY"
+            upload_test(config, state, local, self.attachment.key)
+
+        completed = state.completed(self.attachment.key, md5_file(self.pdf))
+        self.assertEqual("completed", completed["status"] if completed else None)
 
     def test_upload_test_reads_every_page_off_an_ocr_sidecar(self) -> None:
-        _, markdown_path, sidecar_path, _ = self.run_route()
+        _, markdown_path, _, _ = self.run_route()
 
-        self.assert_upload_test_sees_a_whole_book(markdown_path, sidecar_path)
+        self.assert_upload_test_records_a_whole_book(markdown_path)
 
     def test_upload_test_reads_every_page_off_a_layout_sidecar(self) -> None:
-        _, markdown_path, sidecar_path, _ = self.run_route(
-            baidu_model="PaddleOCR-VL-1.6", client=FakeLayoutClient
+        _, markdown_path, _, _ = self.run_route(
+            baidu_model="PaddleOCR-VL-1.6", baidu_client_class=FakeLayoutClient
         )
 
         self.assertIn("Chapter One", markdown_path.read_text(encoding="utf-8"))
-        self.assert_upload_test_sees_a_whole_book(markdown_path, sidecar_path)
+        self.assert_upload_test_records_a_whole_book(markdown_path)
 
     def test_a_layout_model_still_takes_the_other_branch(self) -> None:
         """The fake answers `ocrResults`, which the layout branch cannot read.
