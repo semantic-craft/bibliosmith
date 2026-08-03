@@ -170,6 +170,26 @@ class PageNumberReaderTests(unittest.TestCase):
 
         self.assertEqual([1, 2], sidecar_page_numbers(path))
 
+    def test_the_mineru_sidecar_reads_bare_integer_pages(self) -> None:
+        path = self.write_sidecar(
+            json.dumps({"route": "mineru", "pages": [1, 2, 3]}, indent=2)
+        )
+
+        self.assertEqual([1, 2, 3], sidecar_page_numbers(path))
+
+    def test_a_mixed_mineru_pages_array_is_not_accepted_as_a_page_list(self) -> None:
+        path = self.write_sidecar(
+            json.dumps(
+                {
+                    "route": "mineru",
+                    "pages": [{"page": 1}, {"page": 2}, "bad"],
+                },
+                indent=2,
+            )
+        )
+
+        self.assertEqual([], sidecar_page_numbers(path))
+
     def test_the_ocr_sidecar_reads_line_by_line(self) -> None:
         """What both paddle-ocr branches write: JSONL, one page per line.
 

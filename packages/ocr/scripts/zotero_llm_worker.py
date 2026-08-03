@@ -1226,13 +1226,14 @@ def markdown_page_numbers(path: Path) -> list[int]:
 
 
 def sidecar_page_numbers(path: Path) -> list[int]:
-    """Page numbers a sidecar records, in either shape a route writes here.
+    """Page numbers a sidecar records, in any shape a route writes here.
 
-    The pdf-text route writes one JSON object carrying a `pages` array; both
-    paddle-ocr branches write JSONL, one `{"page": N, "raw": {...}}` per page.
-    Both files are named `.jsonl`, and a one-page JSONL sidecar parses whole
-    just as well, so which shape this is has to be read off what is inside
-    rather than off whether the file parses in one piece.
+    The pdf-text route writes one JSON object carrying a `pages` array of
+    objects, MinerU writes the same field as bare integers, and both paddle-ocr
+    branches write JSONL, one `{"page": N, "raw": {...}}` per page. All files
+    are named `.jsonl`, and a one-page JSONL sidecar parses whole just as well,
+    so which shape this is has to be read off what is inside rather than off
+    whether the file parses in one piece.
 
     Pages come back in the order the file lists them, which is the order the
     route wrote them in: a chunk that fails and is split retries in the place
@@ -1249,9 +1250,14 @@ def sidecar_page_numbers(path: Path) -> list[int]:
     except Exception:
         parsed = None
     if isinstance(parsed, dict) and isinstance(parsed.get("pages"), list):
+        entries = parsed["pages"]
+        if parsed.get("route") == ROUTE_MINERU:
+            if all(type(entry) is int for entry in entries):
+                return entries
+            return []
         return [
             entry["page"]
-            for entry in parsed["pages"]
+            for entry in entries
             if isinstance(entry, dict) and isinstance(entry.get("page"), int)
         ]
     pages: list[int] = []

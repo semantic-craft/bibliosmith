@@ -26,6 +26,7 @@ from zotero_llm_worker import (  # noqa: E402
     process_mineru_route,
     route_attachment,
     source_key_from_provenance_note,
+    upload_test,
 )
 
 
@@ -239,6 +240,69 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             self.assertEqual("latin", sidecar["mineru_language"])
             self.assertEqual(str(artifact_dir), sidecar["mineru_artifact_dir"])
             self.assertTrue((artifact_dir / "mineru_manifest.json").is_file())
+
+    def test_upload_test_promotes_a_complete_mineru_artifact_to_handoff_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.pdf"
+            source.write_bytes(b"%PDF fixture\n")
+            attachment = self.fixture_attachment(source)
+            config = get_config()
+            config.output_root = root / "output"
+            state = StateDB(root / "state.sqlite3")
+            source_md5 = md5_file(source)
+
+            def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+                output_dir = Path(command[command.index("--output-dir") + 1])
+                result = output_dir / "document" / "full.md"
+                result.parent.mkdir(parents=True)
+                result.write_text("# Complete MinerU result\n", encoding="utf-8")
+                return SimpleNamespace(returncode=0)
+
+            with patch("zotero_llm_worker.subprocess.run", side_effect=fake_run):
+                status = process_mineru_route(
+                    attachment=attachment,
+                    config=config,
+                    state=state,
+                    source_md5=source_md5,
+                    page_count=3,
+                    pages=[1, 2, 3],
+                    route_reason="forced by test",
+                    no_upload=True,
+                    deadline=time.time() + 30,
+                )
+
+            self.assertEqual("local_complete", status)
+            local = unittest.mock.Mock()
+            local.get_pdf_attachment.return_value = attachment
+            with (
+                patch("zotero_llm_worker.pdf_page_count", return_value=3),
+                patch("zotero_llm_worker.ZoteroWebClient") as web_client_class,
+            ):
+                web_client_class.return_value.create_markdown_attachment.return_value = (
+                    "MDKEY123"
+                )
+                upload_test(config, state, local, attachment.key)
+
+            completed = state.completed(attachment.key, source_md5)
+            self.assertIsNotNone(completed)
+            self.assertEqual("completed", completed["status"] if completed else None)
+
+            with self.assertLogs(level="INFO") as logs:
+                emit_attachment_evidence(
+                    attachment=attachment,
+                    state=state,
+                    observed_status="skipped_completed",
+                )
+
+            line = next(
+                line
+                for line in logs.output
+                if "BOOK_PIPELINE_ATTACHMENT_EVIDENCE " in line
+            )
+            payload = json.loads(line.split("BOOK_PIPELINE_ATTACHMENT_EVIDENCE ", 1)[1])
+            self.assertEqual("already_completed", payload["status"])
+            self.assertEqual("MDKEY123", payload["markdownAttachmentKey"])
 
     def test_completed_worker_evidence_binds_source_markdown_and_zotero_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
