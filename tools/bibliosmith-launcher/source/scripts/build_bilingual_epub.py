@@ -23,7 +23,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.DOTALL)
@@ -33,7 +33,6 @@ HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.DOTALL)
 # being read as a fence.
 FENCE_OPEN = re.compile(r"^([ \t]{0,3})(`{3,}|~{3,})[ \t]*(.*)$")
 FENCE_CLOSE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$")
-COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 def read_text(path: Path) -> str:
@@ -68,7 +67,99 @@ def is_comment_only(block: str) -> bool:
     Only a block that is *entirely* comments goes; a comment sitting in a real
     paragraph is that paragraph's content and stays with it.
     """
-    return bool(block.strip()) and not COMMENT.sub("", block).strip()
+    cursor = 0
+    found_comment = False
+    while cursor < len(block):
+        while cursor < len(block) and block[cursor].isspace():
+            cursor += 1
+        if cursor == len(block):
+            break
+        if not block.startswith("<!--", cursor):
+            return False
+        end = block.find("-->", cursor + 4)
+        if end < 0 or "<!--" in block[cursor + 4 : end]:
+            return False
+        found_comment = True
+        cursor = end + 3
+    return found_comment
+
+
+def fenced_line_flags(lines: list[str]) -> list[bool]:
+    """Mark complete fence ranges so their comment samples stay literal."""
+    flags = [False] * len(lines)
+    index = 0
+    while index < len(lines):
+        fence = fence_opener(lines[index])
+        if fence is None:
+            index += 1
+            continue
+        _, marker = fence
+        end = index + 1
+        while end < len(lines) and not is_fence_closer(lines[end], marker):
+            end += 1
+        for line_number in range(index, min(end + 1, len(lines))):
+            flags[line_number] = True
+        index = end + 1
+    return flags
+
+
+def comment_closer_follows(
+    lines: list[str], fenced_lines: list[bool], line_number: int, column: int
+) -> bool:
+    """Find a closer before another opener, ignoring fenced code samples."""
+    for candidate_number in range(line_number, len(lines)):
+        if fenced_lines[candidate_number]:
+            continue
+        candidate = lines[candidate_number]
+        start = column if candidate_number == line_number else 0
+        opener_at = candidate.find("<!--", start)
+        closer_at = candidate.find("-->", start)
+        if closer_at >= 0 and (opener_at < 0 or closer_at < opener_at):
+            return True
+        if opener_at >= 0:
+            return False
+    return False
+
+
+def comment_is_open_after(
+    line: str,
+    initially_open: bool,
+    *,
+    line_is_fenced: bool,
+    closer_follows: Callable[[int], bool],
+) -> bool:
+    """Track only complete HTML comments outside fenced code."""
+    if line_is_fenced:
+        return initially_open
+    cursor = 0
+    is_open = initially_open
+    while cursor < len(line):
+        if is_open:
+            opener_at = line.find("<!--", cursor)
+            closer_at = line.find("-->", cursor)
+            if opener_at >= 0 and (closer_at < 0 or opener_at < closer_at):
+                is_open = False
+                cursor = opener_at
+                continue
+            if closer_at < 0:
+                break
+            is_open = False
+            cursor = closer_at + 3
+            continue
+        opener_at = line.find("<!--", cursor)
+        if opener_at < 0:
+            break
+        closer_at = line.find("-->", opener_at + 4)
+        nested_opener_at = line.find("<!--", opener_at + 4)
+        if closer_at >= 0 and (nested_opener_at < 0 or closer_at < nested_opener_at):
+            is_open = True
+            cursor = opener_at + 4
+            continue
+        if closer_follows(opener_at + 4):
+            is_open = True
+            break
+        cursor = opener_at + 4
+    return is_open
 
 
 def split_paragraphs(text: str) -> list[str]:
@@ -102,8 +193,11 @@ def split_paragraphs(text: str) -> list[str]:
     if not lines:
         return []
 
+    fenced_lines = fenced_line_flags(lines)
+
     blocks: list[str] = []
     paragraph: list[str] = []
+    comment_is_open = False
 
     def flush() -> None:
         block = "\n".join(paragraph).strip()
@@ -115,7 +209,8 @@ def split_paragraphs(text: str) -> list[str]:
 
     index = 0
     while index < len(lines):
-        fence = fence_opener(lines[index])
+        line = lines[index]
+        fence = None if comment_is_open else fence_opener(line)
         if fence is not None:
             flush()
             _, marker = fence
@@ -126,10 +221,18 @@ def split_paragraphs(text: str) -> list[str]:
             blocks.append("\n".join(lines[index : min(end + 1, len(lines))]))
             index = end + 1
             continue
-        if lines[index].strip():
-            paragraph.append(lines[index])
+        if line.strip() or comment_is_open:
+            paragraph.append(line)
         else:
             flush()
+        comment_is_open = comment_is_open_after(
+            line,
+            comment_is_open,
+            line_is_fenced=fenced_lines[index],
+            closer_follows=lambda column: comment_closer_follows(
+                lines, fenced_lines, index, column
+            ),
+        )
         index += 1
     flush()
     return blocks

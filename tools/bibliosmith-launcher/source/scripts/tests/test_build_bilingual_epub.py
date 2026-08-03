@@ -324,3 +324,44 @@ def test_a_multi_line_or_repeated_comment_block_also_goes() -> None:
     # The false positive a `startswith("<!--") and endswith("-->")` test would
     # produce: a real sentence between two comments, silently deleted.
     assert not BUILDER.is_comment_only("<!-- page: 1 --> a real sentence <!-- x -->")
+
+
+def test_blank_lines_inside_a_comment_do_not_split_it_into_visible_blocks() -> None:
+    assert BUILDER.split_paragraphs(
+        "<!--\n\npage note\n-->\n\nReadable paragraph.\n"
+    ) == ["Readable paragraph."]
+
+
+def test_an_unclosed_comment_cannot_swallow_prose_before_a_later_comment() -> None:
+    block = "<!-- broken\nreal prose\n<!-- page: 1 -->"
+
+    assert not BUILDER.is_comment_only(block)
+    assert BUILDER.split_paragraphs(block) == [block]
+
+
+def test_an_unclosed_comment_does_not_swallow_the_rest_of_the_chapter() -> None:
+    text = (
+        "<!-- no close\n\nLater paragraph.\n\n## Later heading\n\n"
+        "```html\n<div>Sample</div>\n```\n"
+    )
+
+    assert BUILDER.split_paragraphs(text) == [
+        "<!-- no close",
+        "Later paragraph.",
+        "## Later heading",
+        "```html\n<div>Sample</div>\n```",
+    ]
+
+
+def test_a_comment_sample_in_a_fence_cannot_close_an_earlier_opener() -> None:
+    text = (
+        "<!-- no close\n\nLater paragraph.\n\n"
+        "```html\n<!-- code sample -->\n```\n\nAfter fence.\n"
+    )
+
+    assert BUILDER.split_paragraphs(text) == [
+        "<!-- no close",
+        "Later paragraph.",
+        "```html\n<!-- code sample -->\n```",
+        "After fence.",
+    ]
