@@ -1,88 +1,100 @@
-# BiblioSmith Launcher 1.14.0
+# BiblioSmith Launcher 1.15.0
 
 ## ZH
 
-上一版公开发布是 1.13.0（2026-07-26）。1.14.0 是第一版使用 Developer ID 正式签名、经 Apple 公证并装订的 BiblioSmith Launcher，同时收录了上一版之后已经合入的流水线交互与可靠性改进。
+BiblioSmith Launcher 1.15.0 是继 2026-07-29 发布的 1.14.0 之后的一次阶段性版本。本版完成了 Launcher 岛式界面、PDF 智能路由、OCR 对照与 MinerU 精准处理、EPUB 与 BabelDOC 输入链路，以及多项成书和任务恢复修复。
 
-### 新增
+### 界面与工作流
 
-- **被拦截的书可以原地改路由。** 遇到脏文本层或缺少凭据时，可直接选择 MinerU、PaddleOCR 或重新自动判断，无需删除后重新发车；选择会持久化，重启后仍然有效。
-- **合集可以只从书架移除一本书。** 合集成员使用墓碑记录，既不破坏原始成员快照，也不会把同批其他书一起移除；移除最后一本时才删除整个批次。
-- **阅读器实测记录现在有完整界面。** 工件页可以记录阅读器、版本、结论以及被检产物；记录绑定产物哈希，产物变化后会明确标记失效。
-- **源文件清理审批现在可达、可审计。** 设置页会列出候选和逐项证据，只有阅读产物已验证且哈希匹配时才能批准；审批以结构化记录持久化，相关手动清理脚本会在删除源 PDF 前核验。
+- 将主流程收束为“书架 + 输入岛 + 书籍抽屉 + 设置浮层”。输入岛只保留空闲与处理中两种状态，处理中可直接查看阶段、进度与阻塞原因。
+- 书籍抽屉集中展示当前项目、产物与后续动作；移除旧侧边栏、多页向导及与新流程重复的页面。
+- 加强多书连续处理与交接：多本书的状态和交接证据不再互相覆盖。
 
-### 修复与改进
+### PDF、OCR 与输入能力
 
-- **长时间流水线不再占住应用主线程。** 后端命令改为异步调度，翻译、OCR 与转换子进程都有明确但足够长的上限；卡死会返回可辨认的超时错误。
-- **大量输出不会再被误判为超时。** stdout 与 stderr 在子进程运行期间持续抽取，长书完成后写出较大报告也不会因管道塞满而被杀掉。
-- **Zotero 实时发现的交接预览补全。** 需要翻译交接时，向导现在会显示相应步骤，不再少报后续工作。
-- **阅读产物统一写入 `output/reading/`。** HTML、单语 EPUB、双语 EPUB 与 Digest 不再分散在旧目录；没有旧式 `book.yaml` 的本地阅读项目会从正式的 `metadata/source_manifest.json` 读取来源、语言与标题信息。
-- **跨书籍和跨项目的旧状态不再短暂串台。** 样本摘录、模型选择、教程文档和删除确认都跟随当前对象重建；React hooks 检查同时升级到完整预设。
-- **更新中心不再声称执行并不存在的在线检查。** 原来的占位检查改为直接打开本仓 Releases 页面。
+- 新增按书检测 PDF 文本层的智能路由：原生文本 PDF 直接提取；扫描件或文本层质量不足的 PDF 进入 OCR；仍可手动强制指定路线，减少不必要的付费 OCR。
+- 新增 OCR 小样对照，可从同一 PDF 的内页抽取样本，比较 PaddleOCR 与 MinerU 结果后再选择整书路线。
+- 完成 MinerU v4 精准单书与批量流程；超出 200 页或 200 MB 的输入可分片处理并重组，同时保留明确的进度信息。
+- 支持 EPUB 转 Markdown，并新增 BabelDOC 版式保留型双语 PDF 输入链路。
+- 扩充按量付费模型支持，包括 Qwen 与 Doubao Responses 兼容接口；补充 Qwen 联网检索、翻译进度与检查点衔接。
 
-### 移除
+### 成书正确性
 
-- 删除没有任何界面入口的 OpenCode 集成，以及只会生成占位 Markdown、并未调用翻译引擎的 reflectionTranslation 路径。
+- 改进 PDF 文本提取、标题归一化、页锚点和页眉页脚清理；不会再用虚构的 “Page N” 条目伪造目录。
+- 修复 PaddleOCR、MinerU 与仅翻译交接中的资源保留、文件名冲突、临时产物泄漏和多书串扰。
+- 单语与双语 EPUB 现在会保留 fenced code block；内部页锚点继续服务于回溯，但不会出现在可见正文中。
+- 修复 PaddleOCR 与 MinerU 边车完成态识别，包括 MinerU 裸整数页码数组；无效或混合页表会整体拒绝，避免误记完整状态或重复 OCR。
+- Launcher 测试现在显式隔离本地阅读项目根，不再向真实工作树的 `books/local` 写入测试项目。
 
-### 安全与分发
+### 可靠性与分发
 
-- App 和 DMG 均使用 Developer ID Application 签名并分别提交 Apple 公证；公证票据已装订，发布前会挂载最终 DMG，重新执行签名、Gatekeeper、stapler 与镜像完整性验证。
-- 加密的 PKCS#12 证书只在 GitHub Actions 的临时钥匙串中导入并于任务结束后删除。Apple App 专用密码可通过 macOS 隐藏输入弹窗写入 GitHub Secret，不进入命令参数、终端历史或日志。
+- 强化任务持久化、截止时间、失败恢复、重试与源文件漂移检测；测试中的重试不再依赖真实等待。
+- 新建任务不再支持 `conversion_only` 模式；已有旧检查点仍可打开，新任务统一使用受支持的提取或翻译轨道。
+- 本版仍仅提供 macOS Apple Silicon DMG。安装包继续使用 Developer ID 签名、Apple 公证与 stapling，并通过 Gatekeeper 验证。
+- Launcher 暂不提供应用内自动更新；请从本版本的 GitHub Release 下载 DMG 手动升级。
 
 ## EN
 
-The previous public release was 1.13.0 (2026-07-26). Version 1.14.0 is the first BiblioSmith Launcher release signed with Developer ID, notarized by Apple, and stapled for distribution. It also includes the pipeline interaction and reliability work merged since the previous release.
+BiblioSmith Launcher 1.15.0 is a milestone release following 1.14.0, published on 2026-07-29. It completes the Launcher island interface, smart PDF routing, OCR comparison and precise MinerU processing, EPUB and BabelDOC inputs, and a broad set of book-production and recovery fixes.
 
-### Added
+### Interface and workflow
 
-- **A held book can be re-routed in place.** When a dirty text layer or missing credential blocks a book, you can choose MinerU, PaddleOCR, or automatic routing again without deleting and re-queueing it. The choice persists across restarts.
-- **One book can be removed from a collection batch.** A tombstone keeps the original membership snapshot intact while hiding only the chosen book; the whole batch is deleted only when its final book is removed.
-- **Reader-device evidence now has a complete UI.** The Artifacts tab records the reader, version, verdict, and checked artifact. Records are bound to the artifact hash and are visibly invalidated when the artifact changes.
-- **Source-file cleanup approval is reachable and auditable.** Settings lists candidates and each required check. Approval is allowed only for validated reading artifacts with matching hashes, is stored as a structured record, and is checked by the relevant manual cleanup scripts before a source PDF is deleted.
+- Consolidated the main experience into a shelf, a two-state input island, a book drawer, and a settings overlay. While work is running, the island shows the current phase, progress, and blocking reason.
+- Centralized project artifacts and next actions in the book drawer, retiring the former sidebar, multi-page wizard, and duplicate legacy views.
+- Improved consecutive multi-book runs and handoff. One book can no longer overwrite another book's state or handoff evidence.
 
-### Fixed and improved
+### PDF, OCR, and input support
 
-- **Long pipeline work no longer occupies the app main thread.** Backend commands are scheduled asynchronously, and translation, OCR, and conversion children have explicit but generous limits. A hung child returns a recognizable timeout error.
-- **Talkative children are no longer mistaken for hung ones.** stdout and stderr are drained while the process runs, so a long book can emit a large final report without filling a pipe and being killed as a timeout.
-- **Live Zotero discovery shows the complete handoff preview.** When translation handoff is required, the wizard now reports that step instead of understating the work to come.
-- **Reading artifacts now live consistently under `output/reading/`.** HTML, monolingual EPUB, bilingual EPUB, and Digest outputs are no longer scattered across legacy locations. Local-reading projects without the old `book.yaml` read source, language, and title metadata from the canonical `metadata/source_manifest.json` contract.
-- **State from the previous book or project no longer flashes into the current one.** Sample excerpts, model selection, guide documents, and deletion confirmation are rebuilt around the active item; React hooks checking now uses the complete preset.
-- **The Updates page no longer claims to perform an online check that did not exist.** The placeholder control is replaced by a direct link to this repository's Releases page.
+- Added per-book PDF text-layer probing. Native PDFs use direct extraction, while scans and low-quality text layers are routed to OCR. A route can still be forced explicitly, avoiding unnecessary paid OCR.
+- Added an OCR sample comparison that evaluates PaddleOCR and MinerU on the same interior pages before committing to a full-book route.
+- Completed precise MinerU v4 single-book and batch workflows. Inputs over 200 pages or 200 MB can be split and reassembled with explicit progress reporting.
+- Added EPUB-to-Markdown input and a BabelDOC path for layout-preserving bilingual PDFs.
+- Expanded pay-as-you-go provider support with Qwen and Doubao Responses-compatible endpoints, plus Qwen web search, translation progress, and checkpoint integration.
 
-### Removed
+### Book-production correctness
 
-- Removed the unreachable OpenCode integration and the reflectionTranslation path that created placeholder Markdown without ever calling the translation engine.
+- Improved PDF text extraction, heading normalization, page anchors, and running-header cleanup. The pipeline no longer fabricates “Page N” entries as a table of contents.
+- Fixed asset preservation, filename collisions, scratch-artifact leakage, and cross-book interference across PaddleOCR, MinerU, and translate-only handoffs.
+- Monolingual and bilingual EPUBs now preserve fenced code blocks. Internal page anchors remain available for traceability without appearing in visible prose.
+- Fixed completed-state detection for PaddleOCR and MinerU sidecars, including MinerU's bare integer page arrays. Invalid or mixed page tables are rejected as a whole, preventing false completion and repeat OCR.
+- Launcher tests now isolate the local reading project root explicitly and no longer write test projects into the real worktree's `books/local` directory.
 
-### Security and distribution
+### Reliability and distribution
 
-- Both the app and DMG are signed with Developer ID Application and submitted separately for Apple notarization. Tickets are stapled, and the final DMG is mounted before publication so signing, Gatekeeper, stapler, and image integrity are checked against the artifact users receive.
-- The encrypted PKCS#12 certificate is imported only into a temporary GitHub Actions keychain and deleted when the job finishes. The Apple app-specific password can be written to GitHub Secrets through a hidden macOS prompt without entering process arguments, shell history, or logs.
+- Strengthened durable task progress, deadlines, failure recovery, retries, and source-drift detection. Retry tests no longer require real sleeping.
+- Retired `conversion_only` for new jobs. Existing legacy checkpoints remain readable; new jobs use the supported extraction or translation tracks.
+- This release remains a macOS Apple Silicon DMG. The package is Developer ID signed, Apple notarized and stapled, and verified with Gatekeeper.
+- In-app updating is not yet available. Download the DMG from this GitHub Release to upgrade manually.
 
 ## JA
 
-前回の公開リリースは 1.13.0（2026-07-26）でした。1.14.0 は、Developer ID で正式に署名し、Apple の公証を受け、チケットを staple した最初の BiblioSmith Launcher です。前回以降に統合されたパイプライン操作と信頼性の改善も含みます。
+BiblioSmith Launcher 1.15.0 は、2026-07-29 公開の 1.14.0 に続く節目のリリースです。Launcher のアイランド型 UI、PDF のスマートルーティング、OCR 比較と MinerU の高精度処理、EPUB／BabelDOC 入力、および製本・タスク復旧に関する一連の修正をまとめています。
 
-### 追加
+### インターフェースとワークフロー
 
-- **保留された書籍をその場で再ルーティングできます。** 汚れたテキストレイヤーや資格情報不足で停止した場合、削除して再投入せずに MinerU、PaddleOCR、または自動判定を選び直せます。選択は再起動後も保持されます。
-- **コレクションのバッチから 1 冊だけを取り除けます。** 墓石記録により元のメンバーシップのスナップショットを保ったまま選んだ書籍だけを非表示にし、最後の 1 冊を取り除いたときだけバッチ全体を削除します。
-- **リーダー実機の検証記録に完全な UI が付きました。** 成果物タブでリーダー、バージョン、判定、検査した成果物を記録できます。記録は成果物のハッシュに結び付けられ、成果物が変わると明示的に無効と表示されます。
-- **ソースファイル削除の承認が操作可能かつ監査可能になりました。** 設定画面に候補と各証拠を表示し、検証済みの reading 成果物とハッシュが一致する場合だけ承認できます。承認は構造化記録として永続化され、該当する手動クリーンアップスクリプトはソース PDF を削除する前に確認します。
+- メイン操作を「書棚、2 状態の入力アイランド、ブックドロワー、設定オーバーレイ」に整理しました。処理中は現在の段階、進捗、停止理由を入力アイランドで確認できます。
+- プロジェクトの成果物と次の操作をブックドロワーに集約し、従来のサイドバー、複数ページのウィザード、重複していた旧画面を廃止しました。
+- 複数書籍の連続処理と引き継ぎを改善しました。別の書籍の状態や引き継ぎ証跡を上書きしません。
 
-### 修正と改善
+### PDF、OCR、入力形式
 
-- **長時間のパイプライン処理がアプリのメインスレッドを占有しなくなりました。** バックエンドコマンドを非同期に実行し、翻訳・OCR・変換の子プロセスに明示的で十分に長い上限を設けました。停止したプロセスは識別可能なタイムアウトエラーを返します。
-- **出力の多い子プロセスを停止中と誤判定しなくなりました。** 実行中に stdout と stderr を継続して読み取るため、長い書籍が大きな最終レポートを出してもパイプが詰まってタイムアウト扱いされません。
-- **Zotero のライブ検出で交接プレビューが完全になりました。** 翻訳への引き渡しが必要な場合、ウィザードがその手順を表示し、後続作業を少なく見積もることがなくなりました。
-- **閲覧成果物を `output/reading/` 配下へ統一しました。** HTML、単言語 EPUB、対訳 EPUB、Digest が旧来の場所に分散しなくなりました。旧 `book.yaml` のないローカル閲覧プロジェクトでは、正式な `metadata/source_manifest.json` 契約からソース、言語、タイトルの情報を読み取ります。
-- **前の書籍やプロジェクトの状態が現在の画面に一瞬混ざることがなくなりました。** サンプル抜粋、モデル選択、ガイド文書、削除確認は現在の対象に合わせて再構築され、React hooks の検査も完全なプリセットへ更新しました。
-- **存在しないオンライン更新確認を行ったと表示しなくなりました。** 更新画面のプレースホルダー操作を、このリポジトリの Releases ページへの直接リンクに置き換えました。
+- 書籍ごとに PDF のテキストレイヤーを検査するスマートルーティングを追加しました。ネイティブ PDF は直接抽出し、スキャン PDF や品質の低いテキストレイヤーは OCR に送ります。ルートの明示指定も可能で、不要な有料 OCR を避けられます。
+- 同じ PDF の本文ページを使って PaddleOCR と MinerU を比較し、全書処理の前にルートを選べる OCR サンプル比較を追加しました。
+- MinerU v4 の高精度な単書・バッチ処理を完成させました。200 ページまたは 200 MB を超える入力は分割して処理し、進捗を示しながら再結合できます。
+- EPUB から Markdown への入力と、レイアウトを維持する BabelDOC の対訳 PDF ルートを追加しました。
+- 従量課金プロバイダーとして Qwen と Doubao の Responses 互換エンドポイントに対応し、Qwen のウェブ検索、翻訳進捗、チェックポイント連携も追加しました。
 
-### 削除
+### 製本結果の正確性
 
-- UI から到達できなかった OpenCode 連携と、翻訳エンジンを呼ばずにプレースホルダー Markdown だけを作っていた reflectionTranslation 経路を削除しました。
+- PDF テキスト抽出、見出しの正規化、ページアンカー、柱の除去を改善しました。存在しない「Page N」を目次として生成することはありません。
+- PaddleOCR、MinerU、翻訳のみの引き継ぎにおける素材の欠落、ファイル名衝突、一時成果物の混入、書籍間の干渉を修正しました。
+- 単言語・対訳 EPUB で fenced code block を保持します。内部ページアンカーは追跡に利用できますが、可視本文には表示されません。
+- MinerU の整数だけで構成されたページ配列を含め、PaddleOCR と MinerU のサイドカー完了状態判定を修正しました。不正または混在したページ表は全体を拒否し、誤った完了判定や OCR の再実行を防ぎます。
+- Launcher のテストはローカル読書プロジェクトのルートを明示的に隔離し、実際のワークツリーにある `books/local` へテスト用プロジェクトを書き込まなくなりました。
 
-### セキュリティと配布
+### 信頼性と配布
 
-- App と DMG の両方を Developer ID Application で署名し、それぞれ Apple 公証へ提出します。公証チケットを staple し、公開前に最終 DMG をマウントして、ユーザーが受け取る成果物そのものに対して署名、Gatekeeper、stapler、イメージ整合性を再検証します。
-- 暗号化された PKCS#12 証明書は GitHub Actions の一時キーチェーンにだけ読み込み、ジョブ終了時に削除します。Apple のアプリ用パスワードは macOS の非表示入力ダイアログから GitHub Secret に保存でき、プロセス引数、シェル履歴、ログには入りません。
+- タスク進捗の永続化、期限、失敗復旧、再試行、入力元の変化検出を強化しました。再試行テストでは実時間の待機を行いません。
+- 新規ジョブでは `conversion_only` モードを廃止しました。既存の旧チェックポイントは引き続き開けますが、新規ジョブは対応済みの抽出または翻訳トラックを使用します。
+- 本リリースも macOS Apple Silicon 向け DMG のみです。Developer ID 署名、Apple の公証と stapling を行い、Gatekeeper で検証します。
+- アプリ内自動更新にはまだ対応していません。この GitHub Release から DMG をダウンロードして手動で更新してください。
