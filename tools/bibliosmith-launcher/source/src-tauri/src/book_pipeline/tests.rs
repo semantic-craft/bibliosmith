@@ -6397,18 +6397,38 @@ fn every_ocr_entry_point_runs_through_the_workspace_venv() {
 
 // `~/BiblioSmith` is a guess, not a promise. Handing a missing directory to
 // the runner as its cwd only produced an errno about a path the user never
-// picked, so the check has to name the settings that fix it instead.
+// picked, so the check has to name the source that actually needs fixing.
 #[test]
-fn missing_repo_root_names_the_settings_that_fix_it() {
+fn missing_configured_repo_root_only_names_launcher_settings() {
     let missing = temp_root("repo-root-absent");
-    let error = existing_repo_root(missing.clone()).unwrap_err();
+    let error = existing_repo_root(missing.clone(), RepoRootSource::LauncherConfig).unwrap_err();
 
     assert!(error.contains(&display_path(&missing)), "{error}");
-    assert!(error.contains("设置"), "{error}");
-    assert!(error.contains("BIBLIOSMITH_HOME"), "{error}");
+    assert!(error.contains("Launcher 设置"), "{error}");
+    assert!(!error.contains("BIBLIOSMITH_HOME"), "{error}");
 
     fs::create_dir_all(&missing).unwrap();
-    assert_eq!(existing_repo_root(missing.clone()).unwrap(), missing);
+    assert_eq!(
+        existing_repo_root(missing.clone(), RepoRootSource::LauncherConfig).unwrap(),
+        missing
+    );
+    fs::remove_dir_all(&missing).ok();
+}
+
+#[test]
+fn missing_environment_repo_root_only_names_bibliosmith_home() {
+    let missing = temp_root("repo-root-env-absent");
+    let error = existing_repo_root(missing.clone(), RepoRootSource::Environment).unwrap_err();
+
+    assert!(error.contains(&display_path(&missing)), "{error}");
+    assert!(error.contains("BIBLIOSMITH_HOME"), "{error}");
+    assert!(!error.contains("Launcher 设置"), "{error}");
+
+    fs::create_dir_all(&missing).unwrap();
+    assert_eq!(
+        existing_repo_root(missing.clone(), RepoRootSource::Environment).unwrap(),
+        missing
+    );
     fs::remove_dir_all(&missing).ok();
 }
 

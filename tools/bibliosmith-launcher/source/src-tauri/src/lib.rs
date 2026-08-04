@@ -3606,10 +3606,18 @@ fn launcher_config_path() -> Result<PathBuf, String> {
     let base = dirs::config_local_dir()
         .or_else(dirs::data_local_dir)
         .ok_or_else(|| "无法定位用户配置目录。".to_string())?;
-    Ok(base
-        .join("BiblioSmith")
-        .join("launcher")
-        .join("config.json"))
+    Ok(launcher_config_path_from_base(&base, cfg!(dev)))
+}
+
+fn launcher_config_path_from_base(base: &Path, development: bool) -> PathBuf {
+    let launcher_dir = if development {
+        "launcher-dev"
+    } else {
+        "launcher"
+    };
+    base.join("BiblioSmith")
+        .join(launcher_dir)
+        .join("config.json")
 }
 
 fn read_launcher_config() -> Option<LauncherConfig> {
@@ -4824,6 +4832,24 @@ mod tests {
             .expect("system clock should be valid")
             .as_nanos();
         env::temp_dir().join(format!("bibliosmith-launcher-{name}-{suffix}"))
+    }
+
+    #[test]
+    fn launcher_config_paths_separate_development_from_release() {
+        let base = Path::new("config-base");
+
+        assert_eq!(
+            launcher_config_path_from_base(base, true),
+            base.join("BiblioSmith")
+                .join("launcher-dev")
+                .join("config.json")
+        );
+        assert_eq!(
+            launcher_config_path_from_base(base, false),
+            base.join("BiblioSmith")
+                .join("launcher")
+                .join("config.json")
+        );
     }
 
     fn has_arg_pair(args: &[String], first: &str, second: &str) -> bool {

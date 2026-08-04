@@ -10241,10 +10241,10 @@ fn local_reading_repo_root() -> Result<PathBuf, String> {
     // self-hosted CI runner's own checkout sitting on the same disk); it stays
     // here purely as the dev/test fallback when no runtime config exists yet.
     if let Some(repo_root) = crate::configured_repo_root() {
-        return existing_repo_root(repo_root);
+        return existing_repo_root(repo_root, RepoRootSource::LauncherConfig);
     }
     if let Some(repo_root) = crate::bibliosmith_home_repo_root() {
-        return existing_repo_root(repo_root);
+        return existing_repo_root(repo_root, RepoRootSource::Environment);
     }
 
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -10265,12 +10265,26 @@ fn local_reading_repo_root() -> Result<PathBuf, String> {
 /// (`~/BiblioSmith`) is a guess that need not exist. Left unchecked the spawn
 /// itself fails and the user reads an errno about a directory they never chose,
 /// so the missing root is named here together with the settings that fix it.
-fn existing_repo_root(repo_root: PathBuf) -> Result<PathBuf, String> {
+#[derive(Clone, Copy)]
+enum RepoRootSource {
+    LauncherConfig,
+    Environment,
+}
+
+fn existing_repo_root(repo_root: PathBuf, source: RepoRootSource) -> Result<PathBuf, String> {
     if repo_root.is_dir() {
         return Ok(repo_root);
     }
+    let guidance = match source {
+        RepoRootSource::LauncherConfig => {
+            "该路径来自 Launcher 设置；请在设置里重新选择现有的本地 bibliosmith 仓库目录。"
+        }
+        RepoRootSource::Environment => {
+            "该路径来自 BIBLIOSMITH_HOME；请把 BIBLIOSMITH_HOME 指向现有的本地 bibliosmith 仓库。"
+        }
+    };
     Err(format!(
-        "BiblioSmith 仓库目录不存在：{}。请在设置里选择本地 bibliosmith 仓库目录，或把 BIBLIOSMITH_HOME 指向已有的仓库。",
+        "BiblioSmith 仓库目录不存在：{}。{guidance}",
         display_path(&repo_root)
     ))
 }
