@@ -6328,6 +6328,13 @@ fn run_job_with_handoff_mode(
     repo_root: Option<&Path>,
     retry_failed_durable_stage: bool,
 ) -> Result<BookPipelineJob, String> {
+    #[cfg(test)]
+    let implicit_test_repo_root = repo_root
+        .is_none()
+        .then(|| store.job_output_dir(job_id).join("test-local-reading-repo"));
+    #[cfg(test)]
+    let repo_root = repo_root.or(implicit_test_repo_root.as_deref());
+
     let mut state = store.load()?;
     let index = state
         .jobs
