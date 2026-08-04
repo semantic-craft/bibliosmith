@@ -51,6 +51,7 @@ import { copies, detectLocale, type LanguageSetting, type Locale } from "./i18n"
 import { SettingsOverlay } from "./pages/settings";
 import { pipelineJobOutcomeSucceeded, translationHandoffReady } from "./lib/pipeline-status";
 import { FloatingFeedback, Titlebar, type FloatingToast, type ToastTone } from "./shell";
+import { RepositorySetupGate } from "./startup/RepositorySetupGate";
 import launcherVersionManifest from "../launcher-version.json";
 import {
   PipelineWorkbench,
@@ -101,6 +102,16 @@ function loadLanguageSetting(): LanguageSetting {
 }
 
 export default function App() {
+  const languageSetting = loadLanguageSetting();
+  const locale = languageSetting === "system" ? detectLocale() : languageSetting;
+  return (
+    <RepositorySetupGate locale={locale} version={LAUNCHER_VERSION}>
+      <LauncherApp />
+    </RepositorySetupGate>
+  );
+}
+
+function LauncherApp() {
   const [languageSetting, setLanguageSetting] = useState<LanguageSetting>(loadLanguageSetting);
   const locale = useMemo<Locale>(
     () => (languageSetting === "system" ? detectLocale() : languageSetting),
