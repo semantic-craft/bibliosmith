@@ -200,7 +200,8 @@ pub(crate) fn collection_child_from_route(
         last_error: item.and_then(|item| item.last_error.clone()),
         local_project_root: None,
         source_identity: None,
-        custom_instructions: None,
+        prompt_pack_reference: job.prompt_pack_reference.clone(),
+        prompt_pack_selection_source: job.prompt_pack_selection_source.clone(),
         reader_evidence: Vec::new(),
         removed_at: None,
     };
@@ -443,7 +444,8 @@ pub(crate) fn legacy_child_from_job(
         last_error: job.last_error.clone(),
         local_project_root: None,
         source_identity: None,
-        custom_instructions: None,
+        prompt_pack_reference: job.prompt_pack_reference.clone(),
+        prompt_pack_selection_source: job.prompt_pack_selection_source.clone(),
         reader_evidence: Vec::new(),
         removed_at: None,
     }

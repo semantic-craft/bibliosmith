@@ -37,9 +37,27 @@ The run manifest has this shape:
   "placeholderRetries": 1,
   "secondPassEnabled": false,
   "textCleanup": false,
-  "customInstructions": {
-    "translation": "Use restrained literary Chinese.",
-    "reflection": "Critique anachronistic wording."
+  "promptPack": {
+    "schema": "translation-prompt-pack-revision-v1",
+    "packId": "builtin.structure-fidelity",
+    "revisionId": "2026.08.05-1",
+    "contentSha256": "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+    "displayName": "结构保真翻译",
+    "executor": "programmatic",
+    "sourceLanguage": "auto",
+    "targetLanguage": "zh-Hans",
+    "costHint": "1 次模型调用 / 原文块",
+    "source": {
+      "kind": "bibliosmith",
+      "label": "BiblioSmith 内置基线",
+      "license": "Project license",
+      "adaptation": "将现有结构保护、术语注入和目标语言规则收口为可版本化方案。"
+    },
+    "stages": [{
+      "stageId": "translate",
+      "label": "结构保真初译",
+      "template": "你是一名专业图书译者。请将当前原文块完整翻译为简体中文，忠实传达含义、语气和文体，不作解释、摘要或删节。只输出译文。"
+    }]
   },
   "units": [
     {"taskManifestPath": "qa/tasks/chapter_001.json"}
@@ -47,10 +65,11 @@ The run manifest has this shape:
 }
 ```
 
-`customInstructions` is optional. Its `translation` and `reflection` strings are
-isolated to their corresponding passes; empty strings are treated as absent. Each
-string is limited to 2000 characters. Engine-owned placeholder and Markdown
-structure requirements follow user directives and always take precedence.
+`promptPack` is required and carries the exact immutable revision snapshot whose
+ID and content hash are bound to the job and approval. The engine validates that
+the stage graph matches `secondPassEnabled`; structure, placeholder, glossary,
+target-language, and privacy constraints remain engine-owned and cannot be
+overridden by a stage template.
 
 ## Preflight sample report
 

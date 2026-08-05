@@ -70,19 +70,6 @@ export function pipelineCopy(locale: PipelineLocale) {
     drawerNext: zh ? "下一本" : "Next book",
     drawerClose: zh ? "关闭" : "Close",
     resizeDrawer: zh ? "调整书架与详情栏宽度" : "Resize bookshelf and details pane",
-    customInstructionsTitle: zh ? "本书自定义翻译指令" : "Custom instructions for this book",
-    customInstructionsHelp: zh
-      ? "两相互相隔离；占位符、标题和段落结构保护始终优先。"
-      : "The two phases stay isolated; placeholder, heading, and paragraph protection always wins.",
-    customTranslationLabel: zh ? "翻译遍" : "Translation pass",
-    customTranslationPlaceholder: zh ? "例如：保持克制、简洁的文学中文。" : "For example: Use restrained, concise literary prose.",
-    customReflectionLabel: zh ? "Reflection 二遍" : "Reflection pass",
-    customReflectionPlaceholder: zh ? "例如：重点检查时代错置的措辞。" : "For example: Critique anachronistic wording.",
-    customInstructionsCount: (count: number) => `${count} / 2000`,
-    customInstructionsTooLong: zh ? "每项最多 2000 个字符。" : "Each field is limited to 2000 characters.",
-    saveCustomInstructions: zh ? "保存指令" : "Save instructions",
-    savingCustomInstructions: zh ? "保存中…" : "Saving…",
-    customInstructionsSaved: zh ? "本书自定义指令已保存" : "Custom instructions saved for this book",
     structureCorrectionTitle: zh ? "审查并校正出版结构" : "Review and correct publication structure",
     structureCorrectionHelp: zh
       ? "结构门禁已阻止分章。你可以修改标题、层级、角色和类型；来源顺序、行号、页码、文件与锚点由系统锁定。保存后会按校正结果重新分章。"

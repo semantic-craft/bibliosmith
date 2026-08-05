@@ -26,14 +26,20 @@ import {
   runBookPipelineTranslationSample,
   setBookPipelineTranslationProvider,
   runBookPipelineJob,
-  saveBookPipelineCustomInstructions,
+  copyTranslationPromptPack,
+  deleteTranslationPromptPack,
+  getTranslationPromptPackDefault,
+  listTranslationPromptPacks,
+  previewBookTranslationPrompt,
+  saveTranslationPromptPackRevision,
+  selectBookTranslationPromptPack,
+  setTranslationPromptPackDefault,
   saveProxySettings,
   startRuntimePrepare,
   testProxySettings,
 } from "./api";
 import {
   ActivityItem,
-  BookPipelineCustomInstructions,
   BookPipelineJob,
   BookPipelinePreviewConfig,
   BookPipelineRouteItem,
@@ -44,6 +50,9 @@ import {
   ModelSlotView,
   NetworkProxySettings,
   ProxyTestResult,
+  TranslationPromptPackCatalog,
+  TranslationPromptPackReference,
+  TranslationPromptPackRevisionDraft,
 } from "./types";
 import { copies, detectLocale, type LanguageSetting, type Locale } from "./i18n";
 import { SettingsOverlay } from "./pages/settings";
@@ -141,11 +150,26 @@ function LauncherApp() {
     revision: 0,
     jobs: [],
   });
+  const [promptPackCatalog, setPromptPackCatalog] = useState<TranslationPromptPackCatalog | null>(null);
+  const [promptPackDefaults, setPromptPackDefaults] = useState<Record<"programmatic" | "expert-agent", TranslationPromptPackReference | null>>({
+    programmatic: null,
+    "expert-agent": null,
+  });
+  const [promptPackBusy, setPromptPackBusy] = useState(false);
   const [pipelineDraft, setPipelineDraft] = useState<PipelineDraft>(defaultPipelineDraft);
   // Slots keep their `configured` flag so the wizard can say which providers have
   // a key. Stays empty when the catalog cannot be read, which the wizard reads as
   // "unknown" rather than "none configured".
   const [modelSlots, setModelSlots] = useState<ModelSlotView[]>([]);
+  const refreshPromptPacks = useCallback(async () => {
+    const [catalog, programmatic, expert] = await Promise.all([
+      listTranslationPromptPacks(),
+      getTranslationPromptPackDefault("programmatic"),
+      getTranslationPromptPackDefault("expert-agent"),
+    ]);
+    setPromptPackCatalog(catalog);
+    setPromptPackDefaults({ programmatic, "expert-agent": expert });
+  }, []);
   // Default a new job's provider to whatever the user chose in Settings → Models,
   // so the wizard reflects that choice instead of the OpenAI fallback.
   useEffect(() => {
@@ -195,6 +219,21 @@ function LauncherApp() {
   const addActivity = useCallback((level: ActivityItem["level"], message: string) => {
     void recordFrontendActivity(level, message).catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    void Promise.all([
+      listTranslationPromptPacks(),
+      getTranslationPromptPackDefault("programmatic"),
+      getTranslationPromptPackDefault("expert-agent"),
+    ])
+      .then(([catalog, programmatic, expert]) => {
+        setPromptPackCatalog(catalog);
+        setPromptPackDefaults({ programmatic, "expert-agent": expert });
+      })
+      .catch((error) => {
+        addActivity("error", `Translation prompt packs unavailable: ${String(error)}`);
+      });
+  }, [addActivity]);
 
   useEffect(() => {
     const onError = (event: ErrorEvent) => {
@@ -286,13 +325,26 @@ function LauncherApp() {
     setPipelineBusy("queue");
     try {
       const source = buildPipelineSource();
+      const executor = pipelineDraft.translationMode === "expert" ? "expert-agent" : "programmatic";
+      const promptPackReference = promptPackDefaults[executor];
+      if (!promptPackReference || !promptPackCatalog) {
+        throw new Error("翻译提示词方案尚未加载，请稍后重试。");
+      }
+      const promptPackRevision = promptPackCatalog.packs
+        .find((pack) => pack.packId === promptPackReference.packId)
+        ?.revisions.find((revision) => revision.revisionId === promptPackReference.revisionId && revision.contentSha256 === promptPackReference.contentSha256);
+      if (!promptPackRevision || promptPackRevision.executor !== executor) {
+        throw new Error("默认翻译提示词方案与当前执行方式不兼容。");
+      }
+      const secondPassEnabled = promptPackRevision.stages.some((stage) => stage.stageId === "reflect")
+        && promptPackRevision.stages.some((stage) => stage.stageId === "improve");
       // Fast routes use the versioned provider registry IDs introduced by #60.
       // Every job now translates, so the flags no longer have to be masked off
       // for a conversion-only run.
       const translationIntent =
         pipelineDraft.translationMode === "expert"
-          ? { translationMode: "expert" as const, profileId: "expert-agent", configId: "default", skillIds: ["expert-translation-quality"], secondPassEnabled: false, textCleanup: false, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
-          : { translationMode: "fast" as const, profileId: pipelineDraft.providerProfileId, configId: pipelineDraft.providerConfigId, skillIds: [], secondPassEnabled: pipelineDraft.secondPassEnabled, textCleanup: pipelineDraft.textCleanup, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats };
+          ? { translationMode: "expert" as const, profileId: "expert-agent", configId: "default", skillIds: promptPackRevision.requiredSkillIds ?? ["expert-translation-quality"], promptPackReference, secondPassEnabled: false, textCleanup: false, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats }
+          : { translationMode: "fast" as const, profileId: pipelineDraft.providerProfileId, configId: pipelineDraft.providerConfigId, skillIds: [], promptPackReference, secondPassEnabled, textCleanup: pipelineDraft.textCleanup, digestMode: pipelineDraft.digestMode, outputFormats: pipelineDraft.outputFormats };
       // Not `pipelineDraft.mode` directly: the layout-preserving track is only
       // eligible for a single text PDF, and the draft can still be carrying that
       // choice from a book the user has since swapped away from.
@@ -326,7 +378,7 @@ function LauncherApp() {
     // pipelinePreview is here for the same reason: the effective mode is decided
     // from the current preflight, and a stale one would queue the layout track
     // for a book whose route no longer allows it.
-  }, [addActivity, buildPipelineSource, pipelineConfig, pipelineDraft.digestMode, pipelineDraft.mode, pipelineDraft.outputFormats, pipelineDraft.providerConfigId, pipelineDraft.providerProfileId, pipelineDraft.secondPassEnabled, pipelineDraft.textCleanup, pipelineDraft.translationMode, pipelinePreview, showFloatingToast]);
+  }, [addActivity, buildPipelineSource, pipelineConfig, pipelineDraft.digestMode, pipelineDraft.mode, pipelineDraft.outputFormats, pipelineDraft.providerConfigId, pipelineDraft.providerProfileId, pipelineDraft.textCleanup, pipelineDraft.translationMode, pipelinePreview, promptPackCatalog, promptPackDefaults, showFloatingToast]);
 
   const retryPipeline = useCallback(async (jobId: string) => {
     setPipelineBusy("retry");
@@ -396,17 +448,17 @@ function LauncherApp() {
     }
   }, [addActivity, showFloatingToast]);
 
-  const savePipelineCustomInstructions = useCallback(async (
+  const selectPipelinePromptPack = useCallback(async (
     jobId: string,
     childId: string,
-    customInstructions: BookPipelineCustomInstructions,
+    promptPackReference: TranslationPromptPackReference,
   ) => {
-    setPipelineBusy("customInstructions");
+    setPipelineBusy("promptPack");
     try {
-      const job = await saveBookPipelineCustomInstructions(jobId, childId, customInstructions);
+      const job = await selectBookTranslationPromptPack(jobId, childId, promptPackReference);
       setPipelineState((current) => upsertPipelineJob(current, job));
-      addActivity("success", `Book Pipeline custom instructions saved: ${jobId}/${childId}`);
-      showFloatingToast(bookPipelineCopy.customInstructionsSaved, "success");
+      addActivity("success", `Book Pipeline prompt pack selected: ${promptPackReference.packId}@${promptPackReference.revisionId}`);
+      showFloatingToast("已切换本书翻译提示词方案，旧审批已失效", "success");
     } catch (error) {
       const message = String(error);
       addActivity("error", message);
@@ -414,7 +466,36 @@ function LauncherApp() {
     } finally {
       setPipelineBusy(null);
     }
-  }, [addActivity, bookPipelineCopy.customInstructionsSaved, showFloatingToast]);
+  }, [addActivity, showFloatingToast]);
+
+  const previewPipelinePrompt = useCallback(async (jobId: string, childId: string) => {
+    return previewBookTranslationPrompt(jobId, childId);
+  }, []);
+
+  const mutatePromptPacks = useCallback(async (operation: () => Promise<unknown>, success: string) => {
+    setPromptPackBusy(true);
+    try {
+      await operation();
+      await refreshPromptPacks();
+      showFloatingToast(success, "success");
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+      throw error;
+    } finally {
+      setPromptPackBusy(false);
+    }
+  }, [addActivity, refreshPromptPacks, showFloatingToast]);
+
+  const copyPromptPack = useCallback((source: TranslationPromptPackReference, displayName: string) =>
+    mutatePromptPacks(() => copyTranslationPromptPack(source, displayName), "已创建可编辑的本地方案"), [mutatePromptPacks]);
+  const savePromptPackRevision = useCallback((draft: TranslationPromptPackRevisionDraft) =>
+    mutatePromptPacks(() => saveTranslationPromptPackRevision(draft), "新版本已保存；现有任务不会自动升级"), [mutatePromptPacks]);
+  const deletePromptPack = useCallback((packId: string) =>
+    mutatePromptPacks(() => deleteTranslationPromptPack(packId), "本地方案已删除；历史任务仍可解析原版本"), [mutatePromptPacks]);
+  const setPromptPackDefault = useCallback((executor: "programmatic" | "expert-agent", value: TranslationPromptPackReference) =>
+    mutatePromptPacks(() => setTranslationPromptPackDefault(executor, value), "默认翻译提示词方案已更新"), [mutatePromptPacks]);
 
   const overridePipelineRoute = useCallback(async (
     jobId: string,
@@ -871,9 +952,11 @@ function LauncherApp() {
               onApplySampleProvider={(jobId, childId, providerProfileId, providerConfigId) =>
                 void applyPipelineTranslationProvider(jobId, childId, providerProfileId, providerConfigId)
               }
-              onSaveCustomInstructions={(jobId, childId, customInstructions) =>
-                void savePipelineCustomInstructions(jobId, childId, customInstructions)
+              promptPackCatalog={promptPackCatalog}
+              onSelectPromptPack={(jobId, childId, promptPackReference) =>
+                void selectPipelinePromptPack(jobId, childId, promptPackReference)
               }
+              onPreviewPrompt={previewPipelinePrompt}
               onApproveGate={(jobId, childId, stageId) => void approvePipelineGate(jobId, childId, stageId)}
               onRouteOverride={(jobId, childId, routeItemId, routeOverride) =>
                 void overridePipelineRoute(jobId, childId, routeItemId, routeOverride)
@@ -902,6 +985,13 @@ function LauncherApp() {
               onProxyChange={updateProxySettingsDraft}
               onProxyTest={() => void doTestProxySettings()}
               onProxyAutoDetect={() => void doAutoDetectProxySettings(true, false)}
+              promptPackCatalog={promptPackCatalog}
+              promptPackDefaults={promptPackDefaults}
+              promptPackBusy={promptPackBusy}
+              onCopyPromptPack={copyPromptPack}
+              onSavePromptPackRevision={savePromptPackRevision}
+              onDeletePromptPack={deletePromptPack}
+              onSetPromptPackDefault={setPromptPackDefault}
               onClose={closeSettings}
             />
           )}

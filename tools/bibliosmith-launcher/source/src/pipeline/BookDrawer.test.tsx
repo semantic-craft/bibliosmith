@@ -7,6 +7,10 @@ import { pipelineCopy } from "./copy";
 import type { BookUnit } from "./model";
 import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
 import { approvalRef, artifact, bookUnit, stage, unitSummary } from "../test/fixtures";
+import promptPackCatalogJson from "../../src-tauri/resources/translation-prompt-packs.json";
+import type { TranslationPromptPackCatalog } from "../types";
+
+const promptPackCatalog = promptPackCatalogJson as TranslationPromptPackCatalog;
 
 // The drawer reads an artifact excerpt and a sample report on mount. Both are
 // desktop-only calls that reject in a browser, and api.ts answers a lot of other
@@ -35,7 +39,12 @@ function drawerProps(unit: BookUnit, over: Partial<BookDrawerProps> = {}): BookD
     onAdvance: vi.fn(),
     onSampleTranslation: vi.fn(),
     onApplySampleProvider: vi.fn(),
-    onSaveCustomInstructions: vi.fn(),
+    promptPackCatalog: null,
+    onSelectPromptPack: vi.fn(),
+    onPreviewPrompt: vi.fn(async () => ({
+      promptPackReference: unit.child!.promptPackReference,
+      stages: [],
+    })),
     onApproveGate: vi.fn(),
     onRouteOverride: vi.fn(),
     onSampleOcr: vi.fn(),
@@ -462,5 +471,54 @@ describe("BookDrawer gate sample preview", () => {
     rerender(<BookDrawer {...props} unit={second} />);
 
     expect(screen.queryByText(/First chapter opening line/)).toBeNull();
+  });
+});
+
+describe("BookDrawer translation prompt pack", () => {
+  it("shows the bound template, labels its source, and generates the actual prompt only on demand", async () => {
+    const user = userEvent.setup();
+    const unit = bookUnit({
+      childOver: { promptPackSelectionSource: "default" },
+      jobOver: { promptPackSelectionSource: "default" },
+    });
+    const onPreviewPrompt = vi.fn(async () => ({
+      promptPackReference: unit.child!.promptPackReference,
+      stages: [{
+        stageId: "translate",
+        actualPrompt: { systemInstruction: "系统提示", currentSource: "私人原文样本" },
+        injections: ["template", "current-source", "neighbor-context:none-for-first-segment", "glossary", "executor-safety"],
+      }],
+    }));
+    renderDrawer(unit, { promptPackCatalog, onPreviewPrompt });
+
+    expect(screen.getByText(/创建时默认 · 程序执行/)).toBeTruthy();
+    expect(screen.getByText(/你是一名专业图书译者/)).toBeTruthy();
+    expect(onPreviewPrompt).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+    expect(await screen.findByText(/私人原文样本/)).toBeTruthy();
+    expect(screen.getByText(/template · current-source/)).toBeTruthy();
+    expect(onPreviewPrompt).toHaveBeenCalledOnce();
+  });
+
+  it("only offers compatible revisions and sends an exact immutable reference when overridden", async () => {
+    const user = userEvent.setup();
+    const unit = bookUnit();
+    const onSelectPromptPack = vi.fn();
+    renderDrawer(unit, { promptPackCatalog, onSelectPromptPack });
+
+    const picker = screen.getByRole("combobox", { name: "本书使用" });
+    expect(within(picker).queryByText("语境回溯精译")).toBeNull();
+    await user.selectOptions(picker, "builtin.four-dimension-refinement:2026.08.05-2");
+
+    expect(onSelectPromptPack).toHaveBeenCalledWith(
+      "job-1",
+      "child-1",
+      {
+        packId: "builtin.four-dimension-refinement",
+        revisionId: "2026.08.05-2",
+        contentSha256: "e86141d65f8bfb4a674c597f157a86c6da80d49ac02d081d21f2ca325c8ea2e8",
+      },
+    );
   });
 });

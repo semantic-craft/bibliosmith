@@ -24,7 +24,7 @@ export type PipelineBusy =
   | "advance"
   | "sample"
   | "gateApproval"
-  | "customInstructions"
+  | "promptPack"
   | "routeOverride"
   | "readerEvidence"
   | "folder"

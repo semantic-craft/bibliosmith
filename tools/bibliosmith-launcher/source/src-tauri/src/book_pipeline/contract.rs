@@ -181,4 +181,3 @@ pub(crate) const READING_VALIDATION_STATUS_END: &str =
     "<!-- book-pipeline:reading-validation:end -->";
 pub(crate) const AGENT_EXECUTION_OWNER_PREFIX: &str = "agent:";
 pub(crate) const SPLIT_BLOCKED_ERROR: &str = "source_changed_downstream_exists";
-pub(crate) const MAX_CUSTOM_INSTRUCTION_CHARACTERS: usize = 2000;

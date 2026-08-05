@@ -1,11 +1,709 @@
 use super::*;
 
+fn write_translation_stage_evidence(
+    project_root: &Path,
+    evidence_type: &str,
+    reference: &PromptPackReference,
+    handoff_sha256: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut document = serde_json::json!({
+        "schema": "translation-stage-evidence-v1",
+        "evidenceType": evidence_type,
+        "promptPackReference": reference,
+        "translationHandoffSha256": handoff_sha256,
+        "status": "passed",
+    });
+    if let (Some(document), Some(extra)) = (document.as_object_mut(), extra.as_object()) {
+        document.extend(extra.clone());
+    }
+    let relative = format!("qa/evidence/{evidence_type}.json");
+    let path = project_root.join(&relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
+    serde_json::json!({
+        "path": relative,
+        "sha256": sha256_file(&path).unwrap(),
+    })
+}
+
 #[test]
 fn stderr_tail_surfaces_the_last_lines_of_a_python_traceback() {
     let stderr = "Traceback (most recent call last):\n  File \"x.py\", line 1\nRuntimeError: GOOGLE_API_KEY or GEMINI_API_KEY not set.\n";
     assert_eq!(
         stderr_tail(stderr),
         "Traceback (most recent call last): | File \"x.py\", line 1 | RuntimeError: GOOGLE_API_KEY or GEMINI_API_KEY not set."
+    );
+}
+
+#[test]
+fn prompt_pack_catalog_exposes_four_functional_packs_with_valid_revisions() {
+    let catalog = builtin_prompt_pack_catalog().unwrap();
+    let names = catalog
+        .packs
+        .iter()
+        .map(|pack| pack.latest_revision().unwrap().display_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "结构保真翻译",
+            "四维反思精修",
+            "语境回溯精译",
+            "全流程审校闭环"
+        ]
+    );
+    assert_eq!(
+        catalog.packs[0].latest_revision().unwrap().executor,
+        "programmatic"
+    );
+    assert_eq!(
+        catalog.packs[2].latest_revision().unwrap().executor,
+        "expert-agent"
+    );
+    for pack in &catalog.packs {
+        for revision in &pack.revisions {
+            validate_prompt_pack_revision(revision).unwrap();
+        }
+    }
+    let full_loop = catalog
+        .packs
+        .iter()
+        .find(|pack| pack.pack_id == "builtin.full-quality-loop")
+        .unwrap();
+    assert_eq!(full_loop.revisions.len(), 2);
+    assert_eq!(
+        full_loop.revisions[0].content_sha256,
+        "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74"
+    );
+    assert!(!full_loop.revisions[0].source["license"]
+        .as_str()
+        .unwrap()
+        .contains("CC BY-NC-SA"));
+    assert!(full_loop.revisions[1].source["license"]
+        .as_str()
+        .unwrap()
+        .contains("CC BY-NC-SA"));
+}
+
+#[test]
+fn prompt_pack_revision_rejects_non_string_skill_dependency_versions() {
+    let mut revision = builtin_prompt_pack_catalog().unwrap().packs[2]
+        .latest_revision()
+        .unwrap()
+        .clone();
+    revision.source["skillVersions"]["expert-translation-quality"] = serde_json::json!(42);
+
+    assert_eq!(
+        validate_prompt_pack_revision(&revision).unwrap_err(),
+        "invalid_prompt_pack_skill_versions"
+    );
+}
+
+#[test]
+fn custom_prompt_pack_revisions_are_append_only_and_deletion_keeps_history() {
+    let root = temp_root("prompt-pack-custom-revisions");
+    let store = PromptPackStore::for_test(&root);
+    let copied = store
+        .copy_builtin(
+            &PromptPackReference::new(
+                "builtin.structure-fidelity",
+                "2026.08.05-1",
+                "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+            ),
+            "我的克制译法",
+        )
+        .unwrap();
+    let first = copied.latest_revision().unwrap().clone();
+    let edited = store
+        .save_custom_revision(PromptPackRevisionDraft {
+            pack_id: copied.pack_id.clone(),
+            display_name: "我的克制译法（二版）".into(),
+            parameters: BTreeMap::from([
+                ("styleGuidance".into(), "克制的现代汉语".into()),
+                ("qualityFocus".into(), "术语一致性".into()),
+            ]),
+            stages: vec![PromptStageTemplate {
+                stage_id: "translate".into(),
+                label: "结构保真初译".into(),
+                template: "使用克制、准确的现代汉语完整翻译当前块。".into(),
+            }],
+        })
+        .unwrap();
+
+    assert_ne!(edited.revision_id, first.revision_id);
+    assert_ne!(edited.content_sha256, first.content_sha256);
+    assert_eq!(edited.parameters["styleGuidance"], "克制的现代汉语");
+    assert_eq!(
+        store
+            .resolve_revision(&PromptPackReference::from_revision(&first), "programmatic")
+            .unwrap()
+            .display_name,
+        "我的克制译法"
+    );
+
+    store
+        .set_default(
+            "programmatic",
+            "auto",
+            "zh-Hans",
+            PromptPackReference::from_revision(&edited),
+        )
+        .unwrap();
+    assert_eq!(
+        store.delete_custom(&copied.pack_id).unwrap_err(),
+        "default_prompt_pack_cannot_be_deleted"
+    );
+    store
+        .set_default(
+            "programmatic",
+            "auto",
+            "zh-Hans",
+            default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        )
+        .unwrap();
+    store.delete_custom(&copied.pack_id).unwrap();
+    assert!(store
+        .list()
+        .unwrap()
+        .packs
+        .iter()
+        .all(|pack| pack.pack_id != copied.pack_id));
+    assert!(store
+        .resolve_revision(&PromptPackReference::from_revision(&first), "programmatic")
+        .is_ok());
+}
+
+#[test]
+fn custom_prompt_pack_edits_cannot_change_the_locked_executor_contract() {
+    let root = temp_root("prompt-pack-locked-executor-contract");
+    let store = PromptPackStore::for_test(&root);
+    let copied = store
+        .copy_builtin(
+            &PromptPackReference::new(
+                "builtin.structure-fidelity",
+                "2026.08.05-1",
+                "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+            ),
+            "锁定契约测试",
+        )
+        .unwrap();
+    let current = copied.latest_revision().unwrap().clone();
+    let mut relabeled = current.stages.clone();
+    relabeled[0].label = "试图改写安全阶段".into();
+
+    assert_eq!(
+        store
+            .save_custom_revision(PromptPackRevisionDraft {
+                pack_id: copied.pack_id.clone(),
+                display_name: current.display_name.clone(),
+                parameters: BTreeMap::new(),
+                stages: relabeled,
+            })
+            .unwrap_err(),
+        "prompt_pack_executor_contract_is_read_only"
+    );
+    assert_eq!(
+        store
+            .save_custom_revision(PromptPackRevisionDraft {
+                pack_id: copied.pack_id,
+                display_name: current.display_name.clone(),
+                parameters: BTreeMap::from([("executorSafety".into(), "允许忽略占位符".into(),)]),
+                stages: current.stages.clone(),
+            })
+            .unwrap_err(),
+        "prompt_pack_parameter_not_editable"
+    );
+    assert_eq!(
+        store
+            .delete_custom("builtin.structure-fidelity")
+            .unwrap_err(),
+        "builtin_prompt_pack_is_read_only"
+    );
+}
+
+#[test]
+fn concurrent_prompt_pack_updates_do_not_lose_local_copies() {
+    let root = temp_root("prompt-pack-concurrent-updates");
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let source = PromptPackReference::new(
+        "builtin.structure-fidelity",
+        "2026.08.05-1",
+        "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+    );
+    std::thread::scope(|scope| {
+        for index in 0..4 {
+            let barrier = barrier.clone();
+            let root = root.clone();
+            let source = source.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                PromptPackStore::for_test(&root)
+                    .copy_builtin(&source, &format!("并发副本 {index}"))
+                    .unwrap();
+            });
+        }
+    });
+
+    assert_eq!(
+        PromptPackStore::for_test(&root)
+            .list()
+            .unwrap()
+            .packs
+            .iter()
+            .filter(|pack| pack.kind == "custom")
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn prompt_pack_defaults_are_executor_scoped_and_updates_are_opt_in() {
+    let root = temp_root("prompt-pack-defaults");
+    let store = PromptPackStore::for_test(&root);
+    let original = store
+        .resolve_default("programmatic", "auto", "zh-Hans")
+        .unwrap();
+    assert_eq!(original.pack_id, "builtin.structure-fidelity");
+
+    let four_dimension = PromptPackReference::new(
+        "builtin.four-dimension-refinement",
+        "2026.08.05-1",
+        "fd6cdf2a208280776de49bedb863186749ff3dad3b8fd8de00c495c1cc02630a",
+    );
+    store
+        .set_default("programmatic", "auto", "zh-Hans", four_dimension.clone())
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_default("programmatic", "auto", "zh-Hans")
+            .unwrap(),
+        four_dimension
+    );
+    assert!(store
+        .set_default(
+            "programmatic",
+            "auto",
+            "zh-Hans",
+            PromptPackReference::new(
+                "builtin.context-backtracking",
+                "2026.08.05-1",
+                "13d0d89ed81c8572311c31dbb8be56c95b583a9a0a86f779ad7ae8b1ec1e5fc7",
+            ),
+        )
+        .unwrap_err()
+        .contains("prompt_pack_executor_mismatch"));
+}
+
+#[test]
+fn new_builtin_revision_is_visible_diffable_and_never_silently_adopted() {
+    let root = temp_root("prompt-pack-builtin-update");
+    let store = PromptPackStore::for_test(&root);
+    let before = four_dimension_prompt_pack_reference();
+    let after = PromptPackReference::new(
+        "builtin.four-dimension-refinement",
+        "2026.08.05-2",
+        "e86141d65f8bfb4a674c597f157a86c6da80d49ac02d081d21f2ca325c8ea2e8",
+    );
+    let pack = store
+        .list()
+        .unwrap()
+        .packs
+        .into_iter()
+        .find(|pack| pack.pack_id == before.pack_id)
+        .unwrap();
+    assert_eq!(pack.revisions.len(), 2);
+    assert_eq!(
+        pack.latest_revision().unwrap().revision_id,
+        after.revision_id
+    );
+
+    store
+        .set_default("programmatic", "auto", "zh-Hans", before.clone())
+        .unwrap();
+    let copied = store.copy_builtin(&before, "旧版独立副本").unwrap();
+    let diff = store.diff_revisions(&before, &after).unwrap();
+    assert_ne!(diff.before_metadata.source, diff.after_metadata.source);
+    assert_eq!(
+        diff.after_metadata.source["license"],
+        serde_json::json!("MIT")
+    );
+    assert_eq!(
+        diff.stages
+            .iter()
+            .map(|stage| stage.stage_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["improve", "reflect"]
+    );
+    assert_eq!(
+        store
+            .resolve_default("programmatic", "auto", "zh-Hans")
+            .unwrap(),
+        before
+    );
+    assert!(copied.latest_revision().unwrap().stages[1]
+        .template
+        .contains("具体、可执行"));
+
+    store
+        .set_default("programmatic", "auto", "zh-Hans", after.clone())
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_default("programmatic", "auto", "zh-Hans")
+            .unwrap(),
+        after
+    );
+    assert!(copied.latest_revision().unwrap().stages[1]
+        .template
+        .contains("具体、可执行"));
+}
+
+#[test]
+fn expert_handoff_uses_the_selected_revision_without_persisting_private_prompt_text() {
+    let root = temp_root("prompt-pack-expert-handoff");
+    let store = PromptPackStore::for_test(&root);
+    let reference = store
+        .resolve_default("expert-agent", "auto", "zh-Hans")
+        .unwrap();
+    let handoff = store
+        .compile_expert_handoff(&reference, "Private source sample", &["Term=术语".into()])
+        .unwrap();
+
+    assert_eq!(handoff.prompt_pack_reference, reference);
+    assert_eq!(handoff.source_language, "auto");
+    assert_eq!(handoff.target_language, "zh-Hans");
+    assert_eq!(
+        handoff.skill_dependency_versions["expert-translation-quality"],
+        "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47"
+    );
+    assert_eq!(handoff.stage_instructions[0].stage_id, "context_plan");
+    assert!(handoff.actual_prompt.contains("Private source sample"));
+    assert!(handoff.actual_prompt.contains("语境计划"));
+    let persisted = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(!persisted.contains("Private source sample"));
+    assert!(!persisted.contains("Term=术语"));
+
+    let full_loop = PromptPackReference::new(
+        "builtin.full-quality-loop",
+        "2026.08.05-2",
+        "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
+    );
+    let full_handoff = store
+        .compile_expert_handoff(&full_loop, "Private source sample", &[])
+        .unwrap();
+    assert_ne!(handoff.actual_prompt, full_handoff.actual_prompt);
+    assert!(full_handoff.actual_prompt.contains("独立复核"));
+    assert!(full_handoff.evidence_policy.unwrap().independent_review);
+    assert!(full_handoff
+        .excluded_responsibilities
+        .contains(&"publication".into()));
+
+    let local = store.copy_builtin(&reference, "我的语境方案").unwrap();
+    let local_revision = local.latest_revision().unwrap();
+    let edited = store
+        .save_custom_revision(PromptPackRevisionDraft {
+            pack_id: local.pack_id.clone(),
+            display_name: "我的语境方案（二版）".into(),
+            parameters: BTreeMap::from([(
+                "styleGuidance".into(),
+                "LOCAL_EXPERT_PARAMETER 使用克制的现代汉语".into(),
+            )]),
+            stages: local_revision.stages.clone(),
+        })
+        .unwrap();
+    let local_handoff = store
+        .compile_expert_handoff(
+            &PromptPackReference::from_revision(&edited),
+            "Private source sample",
+            &[],
+        )
+        .unwrap();
+    assert!(local_handoff
+        .actual_prompt
+        .contains("LOCAL_EXPERT_PARAMETER"));
+    assert_eq!(
+        local_handoff.parameters["styleGuidance"],
+        "LOCAL_EXPERT_PARAMETER 使用克制的现代汉语"
+    );
+    assert_eq!(
+        local_handoff.skill_dependency_versions["expert-translation-quality"],
+        "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47"
+    );
+}
+
+#[test]
+fn changing_a_books_prompt_pack_rebinds_translation_approval_to_the_new_hash() {
+    let root = temp_root("prompt-pack-approval-rebind");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let prompt_store = PromptPackStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# Chapter\n\nPrivate paragraph.\n",
+    );
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    approve_ready_translation_for_test(&store, &job_id);
+    let before = store.load().unwrap().jobs[0].clone();
+    let old_approval = before.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .unwrap()
+        .approval_id
+        .clone()
+        .unwrap();
+
+    let changed = select_book_prompt_pack(
+        &store,
+        &prompt_store,
+        &job_id,
+        None,
+        four_dimension_prompt_pack_reference(),
+    )
+    .unwrap();
+
+    let gate = changed.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .unwrap();
+    assert_eq!(gate.status, STATUS_READY);
+    assert_eq!(changed.prompt_pack_selection_source, "book-override");
+    assert_eq!(
+        changed.children[0].prompt_pack_selection_source,
+        "book-override"
+    );
+    assert!(gate.approval_id.is_none());
+    assert!(gate.approval_request.as_ref().unwrap().second_pass_enabled);
+    assert!(!changed.second_pass_enabled);
+    assert_eq!(
+        gate.input_hashes["promptPackContentSha256"],
+        four_dimension_prompt_pack_reference().content_sha256
+    );
+    assert!(!changed
+        .approval_references
+        .iter()
+        .any(|approval| approval.approval_id == old_approval));
+    let persisted = fs::read_to_string(&store.state_path).unwrap();
+    assert!(!persisted.contains("Private paragraph"));
+    assert!(!persisted.contains("四维反思建议"));
+}
+
+#[test]
+fn selecting_an_expert_pack_adopts_its_exact_skill_contract() {
+    let root = temp_root("prompt-pack-expert-skill-switch");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let prompt_store = PromptPackStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# Chapter\n\nPrivate paragraph.\n",
+    );
+    configure_expert_job(&store, &job_id);
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    let full_loop = PromptPackReference::new(
+        "builtin.full-quality-loop",
+        "2026.08.05-2",
+        "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
+    );
+
+    let changed = select_book_prompt_pack(&store, &prompt_store, &job_id, None, full_loop).unwrap();
+
+    assert_eq!(
+        changed.translation_skill_ids,
+        vec![
+            "expert-translation-quality".to_string(),
+            "translation-quality-defect-families".to_string(),
+        ]
+    );
+    let request = changed.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .unwrap()
+        .approval_request
+        .as_ref()
+        .unwrap();
+    assert_eq!(request.skill_ids, changed.translation_skill_ids);
+}
+
+#[test]
+fn full_quality_loop_rejects_open_issues_and_accepts_closed_defect_families() {
+    let root = temp_root("full-quality-loop-gate");
+    let store = PromptPackStore::for_test(&root);
+    let reference = PromptPackReference::new(
+        "builtin.full-quality-loop",
+        "2026.08.05-2",
+        "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
+    );
+    let revision = store.resolve_revision(&reference, "expert-agent").unwrap();
+    let handoff_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let stage_evidence = revision
+        .required_evidence
+        .iter()
+        .map(|kind| {
+            (
+                kind.clone(),
+                write_translation_stage_evidence(
+                    &root,
+                    kind,
+                    &reference,
+                    handoff_sha256,
+                    if kind == "independent-review" {
+                        serde_json::json!({
+                            "translatorId": "translator-a",
+                            "independentReviewerId": "reviewer-b",
+                            "latestReviewOpenIssueCount": 1,
+                        })
+                    } else {
+                        serde_json::json!({})
+                    },
+                ),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let mut receipt = serde_json::json!({
+        "schema": "translation-prompt-pack-receipt-v1",
+        "translationHandoffSha256": handoff_sha256,
+        "promptPackReference": &reference,
+        "stageEvidence": stage_evidence,
+    });
+
+    assert!(store
+        .validate_expert_receipt(
+            &reference,
+            &receipt,
+            receipt["translationHandoffSha256"].as_str().unwrap(),
+            &root,
+        )
+        .unwrap_err()
+        .contains("expert_gate_open_issues"));
+
+    let defect_evidence = ["candidate-scan", "repair", "recheck"].map(|name| {
+        let relative = format!("qa/evidence/{name}.json");
+        let path = root.join(&relative);
+        fs::write(&path, format!("{{\"evidence\":\"{name}\"}}\n")).unwrap();
+        serde_json::json!({
+            "path": relative,
+            "sha256": sha256_file(&path).unwrap(),
+        })
+    });
+    let defect_families = serde_json::json!([{
+        "familyId": "omitted-honorific",
+        "candidateCount": 4,
+        "repairedCount": 4,
+        "openCount": 0,
+        "candidateScanEvidence": defect_evidence[0],
+        "repairEvidence": defect_evidence[1],
+        "recheckEvidence": defect_evidence[2],
+        "status": "closed"
+    }]);
+    receipt["stageEvidence"]["independent-review"] = write_translation_stage_evidence(
+        &root,
+        "independent-review",
+        &reference,
+        handoff_sha256,
+        serde_json::json!({
+            "translatorId": "translator-a",
+            "independentReviewerId": "reviewer-b",
+            "latestReviewOpenIssueCount": 0,
+        }),
+    );
+    receipt["stageEvidence"]["defect-family-closure"] = write_translation_stage_evidence(
+        &root,
+        "defect-family-closure",
+        &reference,
+        handoff_sha256,
+        serde_json::json!({"defectFamilies": defect_families.clone()}),
+    );
+
+    store
+        .validate_expert_receipt(
+            &reference,
+            &receipt,
+            receipt["translationHandoffSha256"].as_str().unwrap(),
+            &root,
+        )
+        .unwrap();
+
+    let research_path = root.join(
+        receipt["stageEvidence"]["research-brief"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let research_evidence = fs::read(&research_path).unwrap();
+    fs::write(&research_path, b"tampered evidence\n").unwrap();
+    assert_eq!(
+        store
+            .validate_expert_receipt(
+                &reference,
+                &receipt,
+                receipt["translationHandoffSha256"].as_str().unwrap(),
+                &root,
+            )
+            .unwrap_err(),
+        "invalid_translation_stage_evidence:research-brief"
+    );
+    fs::write(&research_path, research_evidence).unwrap();
+
+    let copied = store.copy_builtin(&reference, "本地全流程闭环").unwrap();
+    let copied_reference = PromptPackReference::from_revision(copied.latest_revision().unwrap());
+    assert!(copied.latest_revision().unwrap().evidence_policy.is_some());
+    receipt["promptPackReference"] = serde_json::to_value(&copied_reference).unwrap();
+    receipt["stageEvidence"] = serde_json::Value::Object(
+        copied
+            .latest_revision()
+            .unwrap()
+            .required_evidence
+            .iter()
+            .map(|kind| {
+                let extra = match kind.as_str() {
+                    "independent-review" => serde_json::json!({
+                        "translatorId": "translator-a",
+                        "independentReviewerId": "reviewer-b",
+                        "latestReviewOpenIssueCount": 1,
+                    }),
+                    "defect-family-closure" => {
+                        serde_json::json!({"defectFamilies": defect_families.clone()})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                (
+                    kind.clone(),
+                    write_translation_stage_evidence(
+                        &root,
+                        kind,
+                        &copied_reference,
+                        handoff_sha256,
+                        extra,
+                    ),
+                )
+            })
+            .collect(),
+    );
+    assert_eq!(
+        store
+            .validate_expert_receipt(
+                &copied_reference,
+                &receipt,
+                receipt["translationHandoffSha256"].as_str().unwrap(),
+                &root,
+            )
+            .unwrap_err(),
+        "expert_gate_open_issues"
     );
 }
 
@@ -205,6 +903,8 @@ fn mineru_overlay_fixture_job(project: &Path) -> BookPipelineJob {
     serde_json::from_value(serde_json::json!({
         "id": "job-mineru-overlay",
         "mode": "convert_then_translate",
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
         "source": { "kind": "zotero_attachment", "routeOverrides": {} },
         "route": [],
         "status": "completed",
@@ -219,6 +919,8 @@ fn mineru_overlay_fixture_job(project: &Path) -> BookPipelineJob {
             "parentJobId": "job-mineru-overlay",
             "status": "completed",
             "currentStageId": "validate_reading",
+            "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+            "promptPackSelectionSource": "default",
             "source": { "kind": "zotero_attachment", "routeOverrides": {} },
             "route": [{
                 "id": "book",
@@ -1468,7 +2170,7 @@ struct TranslationEngineFixtureExecutor {
     requested_units: Mutex<Vec<Vec<String>>>,
     expected_second_pass_enabled: bool,
     expected_text_cleanup: bool,
-    expected_custom_instructions: Option<BookPipelineCustomInstructions>,
+    expected_prompt_pack_id: &'static str,
     merge_translation_paragraphs: bool,
     // Emitted on every completed unit, so a test can drive the runner's
     // handling of a glossary warning without a real model to disobey.
@@ -1483,7 +2185,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
-            expected_custom_instructions: None,
+            expected_prompt_pack_id: "builtin.structure-fidelity",
             merge_translation_paragraphs: false,
             glossary_violations: Vec::new(),
         }
@@ -1496,7 +2198,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: true,
             expected_text_cleanup: false,
-            expected_custom_instructions: None,
+            expected_prompt_pack_id: "builtin.four-dimension-refinement",
             merge_translation_paragraphs: false,
             glossary_violations: Vec::new(),
         }
@@ -1509,20 +2211,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: true,
-            expected_custom_instructions: None,
-            merge_translation_paragraphs: false,
-            glossary_violations: Vec::new(),
-        }
-    }
-
-    fn with_custom_instructions(custom_instructions: BookPipelineCustomInstructions) -> Self {
-        Self {
-            fail_once: Mutex::new(None),
-            failure_code: "translation_structure_invalid".into(),
-            requested_units: Mutex::new(Vec::new()),
-            expected_second_pass_enabled: true,
-            expected_text_cleanup: false,
-            expected_custom_instructions: Some(custom_instructions),
+            expected_prompt_pack_id: "builtin.structure-fidelity",
             merge_translation_paragraphs: false,
             glossary_violations: Vec::new(),
         }
@@ -1535,7 +2224,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
-            expected_custom_instructions: None,
+            expected_prompt_pack_id: "builtin.structure-fidelity",
             merge_translation_paragraphs: false,
             glossary_violations: Vec::new(),
         }
@@ -1555,7 +2244,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
-            expected_custom_instructions: None,
+            expected_prompt_pack_id: "builtin.structure-fidelity",
             merge_translation_paragraphs: true,
             glossary_violations: Vec::new(),
         }
@@ -1605,13 +2294,11 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
         assert_eq!(manifest["targetLanguage"], "zh-Hans");
         assert_eq!(manifest["providerProfileId"], "fake-provider-profile");
         assert_eq!(manifest["providerConfigId"], "fake-provider-config");
-        match &self.expected_custom_instructions {
-            Some(custom_instructions) => assert_eq!(
-                manifest["customInstructions"],
-                serde_json::to_value(custom_instructions).unwrap()
-            ),
-            None => assert!(manifest.get("customInstructions").is_none()),
-        }
+        assert!(manifest.get("customInstructions").is_none());
+        assert_eq!(
+            manifest["promptPack"]["packId"],
+            self.expected_prompt_pack_id
+        );
         assert_eq!(
             manifest["secondPassEnabled"],
             self.expected_second_pass_enabled
@@ -1737,19 +2424,11 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
 #[derive(Default)]
 struct TranslationSampleFixtureExecutor {
     requests: Mutex<Vec<(String, String)>>,
-    // Recorded so a test can assert the sample manifest carries the same
-    // translation settings as the full run; without them the preview shows a
-    // translation the real run would not produce.
-    prompt_inputs: Mutex<Vec<(serde_json::Value, serde_json::Value)>>,
 }
 
 impl TranslationSampleFixtureExecutor {
     fn requests(&self) -> Vec<(String, String)> {
         self.requests.lock().unwrap().clone()
-    }
-
-    fn prompt_inputs(&self) -> Vec<(serde_json::Value, serde_json::Value)> {
-        self.prompt_inputs.lock().unwrap().clone()
     }
 }
 
@@ -1785,14 +2464,6 @@ impl RunnerCommandExecutor for TranslationSampleFixtureExecutor {
             .lock()
             .unwrap()
             .push((profile, config.clone()));
-        self.prompt_inputs.lock().unwrap().push((
-            manifest["textCleanup"].clone(),
-            manifest
-                .get("customInstructions")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        ));
-
         let units = manifest["units"].as_array().unwrap();
         assert_eq!(units.len(), 5);
         let mut chapter_ids = Vec::new();
@@ -2501,6 +3172,7 @@ fn fake_translation_intent() -> BookPipelineTranslationIntent {
         profile_id: "fake-provider-profile".into(),
         config_id: "fake-provider-config".into(),
         skill_ids: Vec::new(),
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         second_pass_enabled: false,
         text_cleanup: false,
         digest_mode: false,
@@ -3281,6 +3953,7 @@ fn fast_translation_intent() -> BookPipelineTranslationIntent {
         profile_id: "fixture-profile".into(),
         config_id: "fixture-config".into(),
         skill_ids: Vec::new(),
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         second_pass_enabled: false,
         text_cleanup: false,
         digest_mode: false,
@@ -3703,6 +4376,8 @@ fn legacy_jobs_migrate_to_versioned_parent_child_stage_state() {
         serde_json::json!({
             "id": id,
             "mode": "convert_then_translate",
+            "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+            "promptPackSelectionSource": "default",
             "source": {
                 "kind": "zotero_attachment",
                 "title": "Fabricated source",
@@ -3921,6 +4596,8 @@ fn stored_conversion_only_jobs_still_open_and_keep_their_three_stage_shape() {
         "jobs": [{
             "id": "stored-conversion-only",
             "mode": MODE_CONVERSION_ONLY,
+            "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+            "promptPackSelectionSource": "default",
             "source": {
                 "kind": "zotero_attachment",
                 "title": "Fabricated source",
@@ -3996,6 +4673,7 @@ fn queued_translation_modes_and_binding_identity_survive_persistence() {
             profile_id: "fake-provider-profile".into(),
             config_id: "fake-provider-config".into(),
             skill_ids: Vec::new(),
+            prompt_pack_reference: four_dimension_prompt_pack_reference(),
             second_pass_enabled: true,
             text_cleanup: true,
             digest_mode: false,
@@ -4013,6 +4691,7 @@ fn queued_translation_modes_and_binding_identity_survive_persistence() {
             profile_id: "fake-agent-profile".into(),
             config_id: "fake-agent-config".into(),
             skill_ids: vec!["expert-translation-quality".into()],
+            prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT),
             second_pass_enabled: false,
             text_cleanup: false,
             digest_mode: false,
@@ -4076,6 +4755,7 @@ fn queued_digest_mode_is_book_level_and_survives_persistence() {
         "profileId": "fake-provider-profile",
         "configId": "fake-provider-config",
         "skillIds": [],
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         "secondPassEnabled": false,
         "digestMode": true,
     }))
@@ -4085,6 +4765,7 @@ fn queued_digest_mode_is_book_level_and_survives_persistence() {
         "profileId": "fake-agent-profile",
         "configId": "fake-agent-config",
         "skillIds": ["expert-translation-quality"],
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT),
         "secondPassEnabled": false,
         "digestMode": true,
     }))
@@ -4137,6 +4818,7 @@ fn queued_output_formats_are_ordered_deduplicated_and_persisted() {
             profile_id: "fake-provider-profile".into(),
             config_id: "fake-provider-config".into(),
             skill_ids: Vec::new(),
+            prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
             second_pass_enabled: false,
             text_cleanup: false,
             digest_mode: false,
@@ -4174,6 +4856,7 @@ fn expert_translation_intent_rejects_fast_only_second_pass() {
         profile_id: "fake-agent-profile".into(),
         config_id: "fake-agent-config".into(),
         skill_ids: vec!["expert-translation-quality".into()],
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT),
         second_pass_enabled: true,
         text_cleanup: false,
         digest_mode: false,
@@ -4191,6 +4874,7 @@ fn expert_translation_intent_rejects_fast_only_text_cleanup() {
         profile_id: "fake-agent-profile".into(),
         config_id: "fake-agent-config".into(),
         skill_ids: vec!["expert-translation-quality".into()],
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT),
         second_pass_enabled: false,
         text_cleanup: true,
         digest_mode: false,
@@ -4210,6 +4894,8 @@ fn legacy_collection_migration_preserves_route_union_and_parent_handoff_state() 
         "jobs": [{
             "id": "legacy-collection-handoff",
             "mode": MODE_CONVERT_THEN_TRANSLATE,
+            "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+            "promptPackSelectionSource": "default",
             "source": {
                 "kind": "zotero_collection",
                 "title": "Fabricated collection",
@@ -9640,6 +10326,7 @@ fn fake_handoff_ready_job_with_text_cleanup(store: &BookPipelineStore, repo: &Pa
         "profileId": "fake-provider-profile",
         "configId": "fake-provider-config",
         "skillIds": [],
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         "secondPassEnabled": false,
         "textCleanup": true,
         "digestMode": false,
@@ -9711,6 +10398,11 @@ fn fake_handoff_ready_job_with_output_formats(
             profile_id: "fake-provider-profile".into(),
             config_id: "fake-provider-config".into(),
             skill_ids: Vec::new(),
+            prompt_pack_reference: if second_pass_enabled {
+                four_dimension_prompt_pack_reference()
+            } else {
+                default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST)
+            },
             second_pass_enabled,
             text_cleanup: false,
             digest_mode,
@@ -9775,6 +10467,10 @@ fn configure_expert_job(store: &BookPipelineStore, job_id: &str) {
     job.translation_profile_id = "fake-agent-profile".into();
     job.translation_config_id = "fake-agent-config".into();
     job.translation_skill_ids = vec![EXPERT_QA_SKILL_ID.into()];
+    job.prompt_pack_reference = default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT);
+    for child in &mut job.children {
+        child.prompt_pack_reference = job.prompt_pack_reference.clone();
+    }
     job.updated_at = now_label();
     derive_job(job);
     store.save(&state).unwrap();
@@ -9826,6 +10522,39 @@ fn satisfy_translation_handoff(job: &BookPipelineJob) {
         fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         fs::write(output_path, fixture_translation(&source, unit_id)).unwrap();
     }
+    let handoff_path = project_root.join("qa/handoffs/translate.json");
+    let handoff_sha256 = sha256_file(&handoff_path).unwrap();
+    let reference: PromptPackReference =
+        serde_json::from_value(handoff["promptPackReference"].clone()).unwrap();
+    let stage_evidence = handoff["requiredEvidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|kind| {
+            let kind = kind.as_str().unwrap();
+            (
+                kind.to_string(),
+                write_translation_stage_evidence(
+                    &project_root,
+                    kind,
+                    &reference,
+                    &handoff_sha256,
+                    serde_json::json!({}),
+                ),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let receipt = serde_json::json!({
+        "schema": "translation-prompt-pack-receipt-v1",
+        "translationHandoffSha256": handoff_sha256,
+        "promptPackReference": handoff["promptPackReference"].clone(),
+        "stageEvidence": stage_evidence,
+    });
+    fs::write(
+        project_root.join("qa/handoffs/translate-receipt.json"),
+        serde_json::to_string_pretty(&receipt).unwrap() + "\n",
+    )
+    .unwrap();
 }
 
 fn qa_handoff(job: &BookPipelineJob) -> ExpertQaHandoff {
@@ -10132,20 +10861,20 @@ fn advance_runs_prepare_and_parks_before_translation_gate() {
         .clone();
     let mut toggled = advanced.clone();
     toggled.second_pass_enabled = true;
-    assert!(ready_translation_approval_gate(&mut toggled, 0));
+    assert!(!ready_translation_approval_gate(&mut toggled, 0));
     let toggled_gate = toggled.children[0]
         .stages
         .iter()
         .find(|stage| stage.stage_id == "approve_translation")
         .unwrap();
     assert!(
-        toggled_gate
+        !toggled_gate
             .approval_request
             .as_ref()
             .unwrap()
             .second_pass_enabled
     );
-    assert_ne!(
+    assert_eq!(
         toggled_gate.input_hashes["approvalBindingSha256"],
         original_binding
     );
@@ -10220,71 +10949,6 @@ fn public_gate_approval_requires_explicit_current_binding() {
     )
     .unwrap_err();
     assert!(repeated.contains("not ready"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn preflight_sample_manifest_carries_the_run_text_cleanup_and_custom_instructions() {
-    // The sample exists so a user can approve the full run on the strength of
-    // a few translated passages. It only earns that if it is translated under
-    // the same instructions -- previously it carried neither field, so anyone
-    // who had set one was judging a preview the real run would not reproduce.
-    let root = temp_root("translation-sample-prompt-inputs");
-    let repo = handoff_repo_fixture(&root);
-    let source_path = root.join("source.md");
-    let store = BookPipelineStore::for_test(&root);
-    let job_id = handoff_ready_child_job(
-        &store,
-        &repo,
-        &source_path,
-        "# One\n\nFirst.\n\n# Two\n\nSecond.\n\n# Three\n\nThird.\n\n# Four\n\nFourth.\n\n# Five\n\nFifth.\n",
-    );
-    advance_job(&store, &job_id, None, false).unwrap();
-    let prepared = advance_job(&store, &job_id, None, false).unwrap();
-    let child_id = prepared.children[0].id.clone();
-
-    let custom_instructions = BookPipelineCustomInstructions {
-        translation: Some("Use restrained literary Chinese.".into()),
-        reflection: Some("Critique anachronistic wording.".into()),
-    };
-    save_book_custom_instructions(
-        &store,
-        &job_id,
-        Some(&child_id),
-        custom_instructions.clone(),
-    )
-    .unwrap();
-    let mut state = store.load().unwrap();
-    let job = state.jobs.iter_mut().find(|job| job.id == job_id).unwrap();
-    job.text_cleanup = true;
-    job.updated_at = now_label();
-    store.save(&state).unwrap();
-
-    let executor = TranslationSampleFixtureExecutor::default();
-    run_translation_sample_with_executor(
-        &store,
-        &job_id,
-        Some(&child_id),
-        "fake-provider-profile",
-        "sample-config-a",
-        false,
-        &executor,
-    )
-    .unwrap();
-
-    let inputs = executor.prompt_inputs();
-    assert_eq!(inputs.len(), 1);
-    let (text_cleanup, custom) = &inputs[0];
-    assert_eq!(text_cleanup, &serde_json::json!(true));
-    // The whole object goes over, matching the run manifest. The engine drops
-    // the reflection half on the sample path, which runs no reflection pass.
-    assert_eq!(
-        custom,
-        &serde_json::json!({
-            "translation": "Use restrained literary Chinese.",
-            "reflection": "Critique anachronistic wording.",
-        })
-    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -10652,78 +11316,21 @@ fn output_formats_change_reopens_completed_translation_approval() {
 }
 
 #[test]
-fn custom_instructions_change_reopens_completed_translation_approval() {
-    let root = temp_root("custom-instructions-approval-recheck");
-    let repo = handoff_repo_fixture(&root);
-    let source_path = root.join("source.md");
-    let store = BookPipelineStore::for_test(&root);
-    let job_id = handoff_ready_child_job(
-        &store,
-        &repo,
-        &source_path,
-        "# Chapter\n\nBody paragraph.\n",
-    );
-    advance_job(&store, &job_id, None, false).unwrap();
-    advance_job(&store, &job_id, None, false).unwrap();
-    approve_ready_translation_for_test(&store, &job_id);
-    let approved = store
-        .load()
-        .unwrap()
-        .jobs
-        .into_iter()
-        .find(|job| job.id == job_id)
-        .unwrap();
-    let original_gate = approved.children[0]
-        .stages
-        .iter()
-        .find(|stage| stage.stage_id == "approve_translation")
-        .unwrap();
-    let original_binding = original_gate.input_hashes["approvalBindingSha256"].clone();
-    let original_approval_id = original_gate.approval_id.clone().unwrap();
-
-    let updated = save_book_custom_instructions(
-        &store,
-        &job_id,
-        None,
-        BookPipelineCustomInstructions {
-            translation: Some("Use restrained literary Chinese.".into()),
-            reflection: None,
-        },
-    )
-    .unwrap();
-    let updated_gate = updated.children[0]
-        .stages
-        .iter()
-        .find(|stage| stage.stage_id == "approve_translation")
-        .unwrap();
-    assert_eq!(updated_gate.status, STATUS_READY);
-    assert!(updated_gate.approval_id.is_none());
-    assert!(updated_gate
-        .input_hashes
-        .contains_key("customInstructionsSha256"));
-    assert_ne!(
-        updated_gate.input_hashes["approvalBindingSha256"],
-        original_binding
-    );
-    assert!(!updated
-        .approval_references
-        .iter()
-        .any(|approval| approval.approval_id == original_approval_id));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn fast_book_passes_enabled_second_pass_to_translation_manifest() {
+fn four_dimension_pack_drives_second_pass_even_when_job_flag_is_stale() {
     let root = temp_root("fake-translate-second-pass");
     let repo = handoff_repo_fixture(&root);
     let store = BookPipelineStore::for_test(&root);
     let job_id = fake_handoff_ready_job_with_second_pass(&store, &repo, true);
+    let mut stale = store.load().unwrap();
+    stale.jobs[0].second_pass_enabled = false;
+    stale.revision = stale.revision.saturating_add(1);
+    store.write_state_unlocked(&stale).unwrap();
     let executor = TranslationEngineFixtureExecutor::with_second_pass_enabled();
 
     advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     let advanced = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
 
-    assert!(advanced.second_pass_enabled);
+    assert!(!advanced.second_pass_enabled);
     assert_eq!(child_stage_status(&advanced, "translate"), STATUS_COMPLETED);
     assert_eq!(
         executor.requested_units(),
@@ -10749,104 +11356,6 @@ fn fast_book_passes_enabled_text_cleanup_to_translation_manifest() {
         executor.requested_units(),
         vec![vec!["chapter_001".to_string()]]
     );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn book_custom_instructions_persist_bind_approval_and_flow_to_run_manifest() {
-    let root = temp_root("book-custom-instructions");
-    let repo = handoff_repo_fixture(&root);
-    let store = BookPipelineStore::for_test(&root);
-    let job_id = fake_handoff_ready_job_with_second_pass(&store, &repo, true);
-    let custom_instructions = BookPipelineCustomInstructions {
-        translation: Some("Use restrained literary Chinese.".into()),
-        reflection: Some("Critique anachronistic wording.".into()),
-    };
-
-    let saved =
-        save_book_custom_instructions(&store, &job_id, None, custom_instructions.clone()).unwrap();
-
-    assert_eq!(
-        saved.children[0].custom_instructions.as_ref(),
-        Some(&custom_instructions)
-    );
-    let persisted: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&store.state_path).unwrap()).unwrap();
-    assert_eq!(
-        persisted["jobs"][0]["children"][0]["customInstructions"],
-        serde_json::json!({
-            "translation": "Use restrained literary Chinese.",
-            "reflection": "Critique anachronistic wording.",
-        })
-    );
-
-    let executor =
-        TranslationEngineFixtureExecutor::with_custom_instructions(custom_instructions.clone());
-    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
-    let advanced = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
-    let gate = advanced.children[0]
-        .stages
-        .iter()
-        .find(|stage| stage.stage_id == "approve_translation")
-        .unwrap();
-    assert!(gate.input_hashes.contains_key("customInstructionsSha256"));
-    assert_eq!(child_stage_status(&advanced, "translate"), STATUS_COMPLETED);
-    let manifest: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(child_project_root(&advanced).join("qa/tasks/run.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        manifest["customInstructions"],
-        serde_json::to_value(custom_instructions).unwrap()
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn custom_instructions_are_per_book_and_reject_overlong_text() {
-    let root = temp_root("per-book-custom-instructions");
-    let store = BookPipelineStore::for_test(&root);
-    let job = queue_job_with_translation_intent(
-        &store,
-        fake_collection_source(),
-        MODE_CONVERT_THEN_TRANSLATE.into(),
-        fast_translation_intent(),
-        BookPipelinePreviewConfig::default(),
-    )
-    .unwrap();
-    let selected_child_id = job.children[0].id.clone();
-    let custom_instructions = BookPipelineCustomInstructions {
-        translation: Some("Keep this book's dry humor.".into()),
-        reflection: None,
-    };
-
-    let saved = save_book_custom_instructions(
-        &store,
-        &job.id,
-        Some(&selected_child_id),
-        custom_instructions.clone(),
-    )
-    .unwrap();
-
-    assert_eq!(
-        saved.children[0].custom_instructions.as_ref(),
-        Some(&custom_instructions)
-    );
-    assert!(saved.children[1..]
-        .iter()
-        .all(|child| child.custom_instructions.is_none()));
-
-    let error = save_book_custom_instructions(
-        &store,
-        &job.id,
-        Some(&selected_child_id),
-        BookPipelineCustomInstructions {
-            translation: Some("x".repeat(2001)),
-            reflection: None,
-        },
-    )
-    .unwrap_err();
-    assert!(error.contains("custom_instructions_too_long"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -15268,6 +15777,8 @@ fn excerpt_fixture_job(artifact_path: &Path) -> BookPipelineJob {
     serde_json::from_value(serde_json::json!({
         "id": "job-excerpt",
         "mode": "convert_then_translate",
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
         "source": { "kind": "local_pdf_folder", "title": "Fixture" },
         "route": [],
         "status": "waiting_for_approval",
@@ -16351,6 +16862,8 @@ fn layout_job(route: Vec<BookPipelineRouteItem>) -> BookPipelineJob {
     let mut job: BookPipelineJob = serde_json::from_value(serde_json::json!({
         "id": "job-layout",
         "mode": MODE_LAYOUT_PRESERVING,
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
         "source": { "kind": "zotero_attachment", "title": "Fixture attachment" },
         "route": [],
         "status": "routed",
@@ -17259,6 +17772,8 @@ fn known_extractor_handoff_rejects_missing_publication_evidence() {
     let job: BookPipelineJob = serde_json::from_value(serde_json::json!({
         "id": "job-missing-publication-evidence",
         "mode": MODE_CONVERT_THEN_TRANSLATE,
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
         "source": { "kind": "local_pdf_folder", "title": "Book", "path": display_path(&original_epub) },
         "route": [],
         "status": "running",
@@ -17381,6 +17896,8 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
     let job: BookPipelineJob = serde_json::from_value(serde_json::json!({
         "id": "job-epub-sidecar",
         "mode": MODE_CONVERT_THEN_TRANSLATE,
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
         "source": { "kind": "local_pdf_folder", "title": "Some Book", "path": display_path(&original_epub) },
         "route": [],
         "status": "running",
@@ -17506,6 +18023,8 @@ fn producer_contract_handoff(
     let job: BookPipelineJob = serde_json::from_value(serde_json::json!({
         "id": format!("job-producer-contract-{name}"),
         "mode": MODE_CONVERT_THEN_TRANSLATE,
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
         "source": {
             "kind": "local_pdf_folder",
             "title": format!("Producer Contract {name}"),

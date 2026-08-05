@@ -5,7 +5,7 @@ import unittest
 
 from translation_engine.engine import EngineError, run_manifest
 from translation_engine.providers import ProviderUnavailableError, TranslationRequest
-from tests.fixtures import build_run_fixture
+from tests.fixtures import STRUCTURE_FIDELITY_PROMPT_PACK, build_run_fixture
 
 
 class CapturingProvider:
@@ -180,7 +180,8 @@ class TextCleanupTests(unittest.TestCase):
             )
             self.assertEqual(
                 checkpoint["idempotencyKey"]["passId"],
-                "translation-v1-text-cleanup+chunking-policy-v5",
+                "translation-v1-text-cleanup+chunking-policy-v5-prompt-pack-"
+                f"{str(STRUCTURE_FIDELITY_PROMPT_PACK['contentSha256'])[:16]}",
             )
 
 

@@ -1,4 +1,4 @@
-# ADR 0004: Publication structure is independent of translation units
+# ADR 0005: Publication structure is independent of translation units
 
 - Status: Accepted
 - Date: 2026-08-05

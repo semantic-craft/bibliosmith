@@ -43,6 +43,27 @@ desktop launcher owns orchestration, but it does not own every component's data.
 - **Reader acceptance**: optional, artifact-bound evidence recorded from an
   actual reading system. Absence means not recorded, never accepted.
 
+## Translation prompt language
+
+- **Translation Prompt Pack**: a named translation behaviour contract with a
+  compatible executor, language direction, stage templates, and provenance.
+  Avoid: prompt, preset, custom instructions.
+- **Prompt Pack revision**: one immutable version of a Translation Prompt Pack,
+  identified by a revision ID and content hash. It includes stage templates,
+  explicitly open style/quality parameters, provenance, and any expert evidence
+  policy, so a local copy cannot shed its gates. Avoid: saved edit, current text.
+- **Prompt stage template**: the persistent, source-independent instruction for
+  one translation or review stage. Avoid: actual prompt, system prompt snapshot.
+- **Effective Prompt Pack**: the exact Prompt Pack revision resolved for one
+  book after applying defaults and an optional book override. Avoid: selected
+  mode, active prompt.
+- **Actual prompt preview**: an ephemeral rendering of one prompt stage with the
+  current book sample and executor-owned inputs injected. It is display data,
+  never durable job evidence. Avoid: prompt history, saved preview.
+- **Executor constraint**: a non-overridable rule owned by the programmatic
+  engine or expert-agent runner, including structure, placeholders, glossary,
+  privacy, retries, and evidence handling. Avoid: locked template text.
+
 ## Boundaries
 
 - The installed App bundle owns read-only code, provider registries, packages,
@@ -75,6 +96,9 @@ desktop launcher owns orchestration, but it does not own every component's data.
 - [ADR 0003](docs/adr/0003-separate-app-resources-and-user-workspace.md): the App
   resource, Application Support, Cache/temp, and user workspace layers have
   distinct locations and ownership.
-- [ADR 0004](docs/adr/0004-publication-structure-is-independent-of-translation-units.md):
+- [ADR 0004](docs/adr/0004-immutable-prompt-packs-and-ephemeral-compilation.md):
+  immutable Prompt Pack revisions, incompatible executors, verified expert
+  evidence references, and ephemeral actual-prompt compilation.
+- [ADR 0005](docs/adr/0005-publication-structure-is-independent-of-translation-units.md):
   publication sections and bounded translation units are separate contracts;
   package, structure, and reader acceptance are separate conclusions.

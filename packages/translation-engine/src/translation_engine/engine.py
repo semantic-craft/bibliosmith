@@ -40,6 +40,12 @@ from .placeholders import (
     protect_markdown_for_chunking,
 )
 from .profiles import TargetLanguageProfile, get_target_profile
+from .prompt_packs import (
+    PromptPackError,
+    PromptPackRevision,
+    compile_translation_prompt,
+    parse_prompt_pack_revision,
+)
 from .progress import OperationProgress
 from .providers import (
     LLMProvider,
@@ -57,7 +63,6 @@ class EngineError(Exception):
         self.code = code
 
 
-MAX_CUSTOM_INSTRUCTION_CHARACTERS = 2000
 CHUNKING_POLICY_VERSION = "chunking-policy-v5"
 
 # Enough places to see a pattern, few enough that a book-length report stays
@@ -118,7 +123,8 @@ def run_manifest(
     manifest = _read_json(manifest_path)
     if manifest.get("schema") != "translation-engine-run-v1":
         raise EngineError("unsupported_manifest_schema")
-    custom_translation, custom_reflection = _parse_custom_instructions(manifest)
+    if "customInstructions" in manifest:
+        raise EngineError("unsupported_manifest_field:customInstructions")
     project_root = Path(_required_string(manifest, "projectRoot")).resolve()
     source_map_path = _project_path(
         project_root, _required_string(manifest, "sourceMapPath")
@@ -128,6 +134,17 @@ def run_manifest(
         raise EngineError("unsupported_source_map_schema")
 
     target_language = _required_string(manifest, "targetLanguage")
+    source_language = str(manifest.get("sourceLanguage", "auto"))
+    try:
+        prompt_pack = parse_prompt_pack_revision(
+            manifest.get("promptPack"),
+            executor="programmatic",
+            source_language=source_language,
+            target_language=target_language,
+        )
+        prompt_pack.template_for("translate")
+    except PromptPackError as error:
+        raise EngineError(str(error)) from error
     try:
         profile = target_profile_factory(target_language)
         provider = provider_factory(
@@ -138,9 +155,11 @@ def run_manifest(
         raise EngineError(str(error).replace(" ", "_")) from error
     apply_model_override(provider, manifest)
 
-    second_pass_enabled = manifest.get("secondPassEnabled", False)
+    second_pass_enabled = manifest.get("secondPassEnabled", prompt_pack.uses_reflection)
     if not isinstance(second_pass_enabled, bool):
         raise EngineError("invalid_second_pass_enabled")
+    if second_pass_enabled != prompt_pack.uses_reflection:
+        raise EngineError("prompt_pack_stage_graph_mismatch")
     text_cleanup = _parse_text_cleanup(manifest)
     active_second_pass = None
     if second_pass_enabled:
@@ -165,8 +184,7 @@ def run_manifest(
         provider=provider,
         translation_policy_version=translation_policy_version,
         text_cleanup=text_cleanup,
-        custom_translation=custom_translation,
-        custom_reflection=custom_reflection,
+        prompt_pack=prompt_pack,
     )
     operation_progress = OperationProgress.from_environment(
         stage_id="translate", unit_kind="chunks", total=planned_work.total
@@ -198,7 +216,7 @@ def run_manifest(
                 task_path=_project_path(
                     project_root, _required_string(unit, "taskManifestPath")
                 ),
-                source_language=str(manifest.get("sourceLanguage", "auto")),
+                source_language=source_language,
                 target_language=target_language,
                 provider=provider,
                 target_profile=profile,
@@ -207,8 +225,7 @@ def run_manifest(
                 placeholder_retries=placeholder_retries,
                 second_pass=active_second_pass,
                 text_cleanup=text_cleanup,
-                custom_translation=custom_translation,
-                custom_reflection=custom_reflection,
+                prompt_pack=prompt_pack,
                 progress_callback=operation_progress.update_item,
             )
         except (
@@ -274,8 +291,7 @@ def _planned_translation_work(
     provider: LLMProvider,
     translation_policy_version: str,
     text_cleanup: bool,
-    custom_translation: str | None,
-    custom_reflection: str | None,
+    prompt_pack: PromptPackRevision,
 ) -> TranslationWorkPlan:
     total = 0
     resumed_by_unit: dict[str, int] = {}
@@ -294,7 +310,7 @@ def _planned_translation_work(
     )
     translation_pass_id = _translation_pass_id(
         "translation-v1-text-cleanup" if text_cleanup else "translation-v1",
-        custom_translation,
+        prompt_pack.content_sha256,
     )
     for unit in units:
         try:
@@ -321,7 +337,7 @@ def _planned_translation_work(
                 translation_pass_id=translation_pass_id,
                 max_tokens=max_tokens,
                 second_pass_enabled=pass_count == 2,
-                custom_reflection=custom_reflection,
+                prompt_pack=prompt_pack,
             )
             completion = completion_store.load(loaded.unit_id, completion_key)
             if completion is not None:
@@ -355,8 +371,9 @@ def _planned_translation_work(
                         provider_profile_id=provider.profile_id,
                         provider_config_id=provider.config_id,
                         translation_policy_version=translation_policy_version,
-                        pass_id=_custom_instruction_pass_id(
-                            f"reflection-v1+{translation_pass_id}", custom_reflection
+                        pass_id=_content_bound_pass_id(
+                            f"reflection-v1+{translation_pass_id}",
+                            prompt_pack.content_sha256,
                         ),
                     )
                     reflection = reflection_store.load(loaded.unit_id, reflection_key)
@@ -384,7 +401,7 @@ def _completion_key(
     translation_pass_id: str,
     max_tokens: int,
     second_pass_enabled: bool,
-    custom_reflection: str | None,
+    prompt_pack: PromptPackRevision,
 ) -> UnitIdempotencyKey:
     model = getattr(provider, "model", "")
     model_suffix = f"+model-{_sha256(model.encode())[:16]}" if model else ""
@@ -392,8 +409,8 @@ def _completion_key(
         f"completion-v1+{translation_pass_id}+max-{max_tokens}{model_suffix}"
     )
     if second_pass_enabled:
-        reflection_pass_id = _custom_instruction_pass_id(
-            f"reflection-v1+{translation_pass_id}", custom_reflection
+        reflection_pass_id = _content_bound_pass_id(
+            f"reflection-v1+{translation_pass_id}", prompt_pack.content_sha256
         )
         completed_pass_id = (
             f"completion-v1+{reflection_pass_id}+max-{max_tokens}{model_suffix}"
@@ -582,8 +599,7 @@ def _translate_unit(
     placeholder_retries: int,
     second_pass: SecondPass | None,
     text_cleanup: bool,
-    custom_translation: str | None,
-    custom_reflection: str | None,
+    prompt_pack: PromptPackRevision,
     progress_callback: Callable[[str, int, str], None] | None = None,
 ) -> dict[str, Any]:
     unit = load_translation_unit(
@@ -611,7 +627,7 @@ def _translate_unit(
     )
     translation_pass_id = _translation_pass_id(
         "translation-v1-text-cleanup" if text_cleanup else "translation-v1",
-        custom_translation,
+        prompt_pack.content_sha256,
     )
     completion_store = CompletionStore(
         project_root / "chapters" / "translated" / ".completed"
@@ -623,7 +639,7 @@ def _translate_unit(
         translation_pass_id=translation_pass_id,
         max_tokens=max_tokens,
         second_pass_enabled=second_pass is not None,
-        custom_reflection=custom_reflection,
+        prompt_pack=prompt_pack,
     )
     completion = completion_store.load(unit_id, completion_key)
     if completion is not None:
@@ -683,45 +699,23 @@ def _translate_unit(
     for index in range(resumed_chunk_count, len(chunks)):
         if progress_callback is not None:
             progress_callback(unit_id, persisted_chunk_count, "translating")
-        system_instruction = target_profile.build_system_instruction(
+        compiled_prompt = compile_translation_prompt(
+            revision=prompt_pack,
+            target_profile=target_profile,
             source_text=chunks[index],
+            source_language=source_language,
+            target_language=target_language,
             task_manifest=profile_task,
             text_cleanup=text_cleanup,
-            custom_instruction=custom_translation,
+            previous_translation_tail=(
+                _translation_context_tail(translated_chunks[-1])
+                if translated_chunks
+                else None
+            ),
         )
-        chunk_system_instruction = system_instruction
-        if translated_chunks:
-            previous_translation_tail = _translation_context_tail(
-                translated_chunks[-1]
-            )
-            if previous_translation_tail:
-                context_block = (
-                    "# PREVIOUS TRANSLATION CONTEXT — REFERENCE ONLY\n"
-                    "This text is not part of the current source segment. Use it only "
-                    "for terminology and continuity. Do not reproduce or continue it "
-                    "as a passage. Reuse individual terms only when the current source "
-                    "independently requires them.\n"
-                    f"{previous_translation_tail}\n\n"
-                    "# CURRENT SEGMENT ONLY\n"
-                    "Translate only the source segment in the user message. Do not "
-                    "reproduce the reference context as part of the answer."
-                )
-                if custom_translation:
-                    chunk_system_instruction = (
-                        f"{context_block}\n\n{system_instruction}"
-                    )
-                else:
-                    chunk_system_instruction = (
-                        f"{system_instruction}\n\n{context_block}"
-                    )
         result = translate_chunk_with_fallback(
             provider,
-            TranslationRequest(
-                text=chunks[index],
-                source_language=source_language,
-                target_language=target_language,
-                system_instruction=chunk_system_instruction,
-            ),
+            compiled_prompt.request,
             placeholder_retries=placeholder_retries,
             candidate_normalizer=lambda candidate, protected=protected_chunks[index]: (
                 _normalize_candidate_structure(protected, candidate)
@@ -743,7 +737,7 @@ def _translate_unit(
             ),
             candidate_repair=(
                 None
-                if text_cleanup or custom_translation
+                if text_cleanup
                 else lambda candidate, protected=protected_chunks[index]: (
                     _remove_unprotected_paragraph_breaks(protected, candidate)
                 )
@@ -802,8 +796,9 @@ def _translate_unit(
             provider_profile_id=provider.profile_id,
             provider_config_id=provider.config_id,
             translation_policy_version=translation_policy_version,
-            pass_id=_custom_instruction_pass_id(
-                f"reflection-v1+{translation_pass_id}", custom_reflection
+            pass_id=_content_bound_pass_id(
+                f"reflection-v1+{translation_pass_id}",
+                prompt_pack.content_sha256,
             ),
         )
         second_pass_checkpoint = second_pass_checkpoint_store.load(
@@ -862,7 +857,8 @@ def _translate_unit(
                         source_text=source_chunk,
                         task_manifest=profile_task,
                     ),
-                    custom_instruction=custom_reflection,
+                    reflection_template=prompt_pack.compiled_template_for("reflect"),
+                    improve_template=prompt_pack.compiled_template_for("improve"),
                 ),
                 candidate_retries=placeholder_retries,
                 candidate_normalizer=lambda candidate, protected=protected_chunks[index]: (
@@ -883,14 +879,8 @@ def _translate_unit(
                         candidate=candidate,
                     )
                 ),
-                draft_fallback_validator=(
-                    None
-                    if custom_reflection
-                    else lambda candidate, protected=protected_chunks[index]: (
-                        _candidate_allows_validated_draft_fallback(
-                            protected, candidate
-                        )
-                    )
+                draft_fallback_validator=lambda candidate, protected=protected_chunks[index]: (
+                    _candidate_allows_validated_draft_fallback(protected, candidate)
                 ),
             )
             reflection_chunks.append(result.reflection_text)
@@ -1174,42 +1164,12 @@ def _parse_text_cleanup(manifest: dict[str, Any]) -> bool:
     return text_cleanup
 
 
-def _parse_custom_instructions(
-    manifest: dict[str, Any],
-) -> tuple[str | None, str | None]:
-    if "customInstructions" not in manifest:
-        return None, None
-    value = manifest["customInstructions"]
-    if not isinstance(value, dict) or any(
-        key not in {"translation", "reflection"} for key in value
-    ):
-        raise EngineError("invalid_custom_instructions")
-
-    parsed: list[str | None] = []
-    for key in ("translation", "reflection"):
-        if key not in value:
-            parsed.append(None)
-            continue
-        instruction = value[key]
-        if not isinstance(instruction, str):
-            raise EngineError("invalid_custom_instructions")
-        if len(instruction) > MAX_CUSTOM_INSTRUCTION_CHARACTERS:
-            raise EngineError("custom_instructions_too_long")
-        parsed.append(instruction or None)
-    return parsed[0], parsed[1]
+def _content_bound_pass_id(base: str, content_sha256: str) -> str:
+    return f"{base}-prompt-pack-{content_sha256[:16]}"
 
 
-def _custom_instruction_pass_id(base: str, instruction: str | None) -> str:
-    if not instruction:
-        return base
-    digest = _sha256(instruction.encode())[:16]
-    return f"{base}-custom-{digest}"
-
-
-def _translation_pass_id(base: str, instruction: str | None) -> str:
-    return _custom_instruction_pass_id(
-        f"{base}+{CHUNKING_POLICY_VERSION}", instruction
-    )
+def _translation_pass_id(base: str, content_sha256: str) -> str:
+    return _content_bound_pass_id(f"{base}+{CHUNKING_POLICY_VERSION}", content_sha256)
 
 
 def _restore_chunks(
