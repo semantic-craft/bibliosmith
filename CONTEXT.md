@@ -20,6 +20,25 @@ desktop launcher owns orchestration, but it does not own every component's data.
   contains job metadata and aggregate progress only, never source titles, paths,
   logs, private text, or credentials.
 
+## Translation prompt language
+
+- **Translation Prompt Pack**: a named translation behaviour contract with a
+  compatible executor, language direction, stage templates, and provenance.
+  Avoid: prompt, preset, custom instructions.
+- **Prompt Pack revision**: one immutable version of a Translation Prompt Pack,
+  identified by a revision ID and content hash. Avoid: saved edit, current text.
+- **Prompt stage template**: the persistent, source-independent instruction for
+  one translation or review stage. Avoid: actual prompt, system prompt snapshot.
+- **Effective Prompt Pack**: the exact Prompt Pack revision resolved for one
+  book after applying defaults and an optional book override. Avoid: selected
+  mode, active prompt.
+- **Actual prompt preview**: an ephemeral rendering of one prompt stage with the
+  current book sample and executor-owned inputs injected. It is display data,
+  never durable job evidence. Avoid: prompt history, saved preview.
+- **Executor constraint**: a non-overridable rule owned by the programmatic
+  engine or expert-agent runner, including structure, placeholders, glossary,
+  privacy, retries, and evidence handling. Avoid: locked template text.
+
 ## Boundaries
 
 - The installed App bundle owns read-only code, provider registries, packages,
