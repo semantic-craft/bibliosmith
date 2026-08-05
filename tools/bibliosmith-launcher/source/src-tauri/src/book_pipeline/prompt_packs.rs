@@ -27,6 +27,7 @@ impl PromptPackReference {
         }
     }
 
+    #[cfg(test)]
     pub fn from_revision(revision: &PromptPackRevision) -> Self {
         Self {
             pack_id: revision.pack_id.clone(),
@@ -238,6 +239,7 @@ impl PromptPackStore {
         }
     }
 
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -772,6 +774,7 @@ fn builtin_default(executor: &str) -> PromptPackReference {
     }
 }
 
+#[cfg(test)]
 pub fn default_prompt_pack_reference_for_mode(translation_mode: &str) -> PromptPackReference {
     builtin_default(if translation_mode == TRANSLATION_MODE_EXPERT {
         "expert-agent"
@@ -780,6 +783,7 @@ pub fn default_prompt_pack_reference_for_mode(translation_mode: &str) -> PromptP
     })
 }
 
+#[cfg(test)]
 pub fn four_dimension_prompt_pack_reference() -> PromptPackReference {
     PromptPackReference::new(
         "builtin.four-dimension-refinement",

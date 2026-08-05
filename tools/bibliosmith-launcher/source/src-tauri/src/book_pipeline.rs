@@ -4440,8 +4440,7 @@ fn queue_zotero_collection_snapshot_job<E: RunnerCommandExecutor>(
                 &collection_key,
                 member,
                 &mode,
-                translation_intent.digest_mode,
-                &translation_intent.prompt_pack_reference,
+                &translation_intent,
                 &source.route_overrides,
             )
         })
@@ -4781,8 +4780,7 @@ fn collection_snapshot_child(
     collection_key: &str,
     member: &ZoteroCollectionSnapshotMember,
     mode: &str,
-    digest_mode: bool,
-    prompt_pack_reference: &PromptPackReference,
+    translation_intent: &BookPipelineTranslationIntent,
     route_overrides: &BTreeMap<String, String>,
 ) -> Option<BookPipelineChildJob> {
     let attachment_key = member.attachment_key.as_deref()?;
@@ -4800,7 +4798,7 @@ fn collection_snapshot_child(
                 } else {
                     STATUS_BLOCKED.into()
                 }
-            } else if stage_id == "build_digest" && !digest_mode {
+            } else if stage_id == "build_digest" && !translation_intent.digest_mode {
                 STATUS_SKIPPED.into()
             } else {
                 STATUS_PENDING.into()
@@ -4856,7 +4854,7 @@ fn collection_snapshot_child(
             eligibility: member.eligibility.clone(),
             reason: member.reason.clone(),
         }),
-        prompt_pack_reference: prompt_pack_reference.clone(),
+        prompt_pack_reference: translation_intent.prompt_pack_reference.clone(),
         prompt_pack_selection_source: "default".into(),
         reader_evidence: Vec::new(),
         removed_at: None,
