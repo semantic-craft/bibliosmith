@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import stat
 import subprocess
 import tempfile
@@ -20,6 +21,9 @@ TAURI_CONFIG = (
     / "src-tauri"
     / "tauri.conf.json"
 )
+LAUNCHER_PACKAGE = (
+    REPO_ROOT / "tools" / "bibliosmith-launcher" / "source" / "package.json"
+)
 VERIFIER = (
     REPO_ROOT
     / "tools"
@@ -27,6 +31,22 @@ VERIFIER = (
     / "source"
     / "scripts"
     / "verify-macos-release.sh"
+)
+RUNTIME_SIGNER = (
+    REPO_ROOT
+    / "tools"
+    / "bibliosmith-launcher"
+    / "source"
+    / "scripts"
+    / "sign-bundle-runtime-macos.mjs"
+)
+BROWSER_ENTITLEMENTS = (
+    REPO_ROOT
+    / "tools"
+    / "bibliosmith-launcher"
+    / "source"
+    / "scripts"
+    / "browser-runtime.entitlements.plist"
 )
 APPLE_PASSWORD_SECRET_SETTER = (
     REPO_ROOT
@@ -70,12 +90,125 @@ def test_release_uses_secret_backed_developer_id_signing_and_notarization() -> N
     assert 'security delete-keychain "$RUNNER_TEMP/bibliosmith-signing.keychain-db"' in workflow
 
 
+def test_tauri_build_signs_prepared_runtime_before_bundling() -> None:
+    package = json.loads(LAUNCHER_PACKAGE.read_text(encoding="utf-8"))
+    scripts = package["scripts"]
+
+    assert scripts["bundle:sign-macos"] == "node scripts/sign-bundle-runtime-macos.mjs"
+    assert scripts["build:tauri"] == (
+        "npm run bundle:prepare && npm run bundle:sign-macos && npm run build"
+    )
+
+
 def _write_command(path: Path, body: str) -> None:
     path.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+def test_runtime_signer_signs_every_macho_and_rebinds_browser_digest() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        runtime = root / "runtime"
+        browser = (
+            runtime
+            / "vendor"
+            / "playwright-core"
+            / ".local-browsers"
+            / "chromium-test"
+            / "chrome-headless-shell"
+        )
+        library = browser.parent / "libGLESv2.dylib"
+        plain_text = browser.parent / "resources.pak"
+        manifest = runtime / "vendor" / "playwright-core" / "browser-manifest.json"
+        for candidate, payload in (
+            (browser, b"browser"),
+            (library, b"library"),
+            (plain_text, b"plain"),
+        ):
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_bytes(payload)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema": "bibliosmith-browser-runtime-v1",
+                    "relativePath": str(browser.relative_to(runtime)),
+                    "version": "test",
+                    "sha256": "pre-sign-digest",
+                    "playwrightCoreVersion": "test",
+                }
+            ),
+            encoding="utf-8",
+        )
+        command_log = root / "commands.log"
+        _write_command(
+            bin_dir / "file",
+            'for candidate do :; done\n'
+            'case "$candidate" in\n'
+            '  *chrome-headless-shell|*.dylib) printf "Mach-O 64-bit arm64\\n" ;;\n'
+            '  *) printf "data\\n" ;;\n'
+            'esac',
+        )
+        _write_command(
+            bin_dir / "codesign",
+            'printf \'codesign %s\\n\' "$*" >> "$COMMAND_LOG"\n'
+            'if [ "$1" = "--force" ]; then\n'
+            '  for candidate do :; done\n'
+            '  printf \'signed\' >> "$candidate"\n'
+            'fi',
+        )
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
+                "APPLE_SIGNING_IDENTITY": "Developer ID Application: Test",
+                "COMMAND_LOG": str(command_log),
+            }
+        )
+
+        completed = subprocess.run(
+            ["node", str(RUNTIME_SIGNER), str(runtime)],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        commands = command_log.read_text(encoding="utf-8").splitlines()
+        signing_commands = [command for command in commands if " --force " in f" {command} "]
+        assert len(signing_commands) == 2
+        for candidate in (browser, library):
+            command = next(command for command in signing_commands if str(candidate) in command)
+            assert "--options runtime" in command
+            assert "--timestamp" in command
+            assert "--sign Developer ID Application: Test" in command
+        browser_command = next(
+            command for command in signing_commands if str(browser) in command
+        )
+        library_command = next(
+            command for command in signing_commands if str(library) in command
+        )
+        assert f"--entitlements {BROWSER_ENTITLEMENTS}" in browser_command
+        assert "--entitlements" not in library_command
+        assert all(str(plain_text) not in command for command in commands)
+        rebound = json.loads(manifest.read_text(encoding="utf-8"))
+        import hashlib
+
+        assert rebound["sha256"] == hashlib.sha256(browser.read_bytes()).hexdigest()
+
+
+def test_browser_runtime_entitlements_grant_only_jit_execution() -> None:
+    with BROWSER_ENTITLEMENTS.open("rb") as stream:
+        entitlements = plistlib.load(stream)
+
+    assert entitlements == {"com.apple.security.cs.allow-jit": True}
+
+
+def _run_verifier(
+    spctl_output: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         bin_dir = root / "bin"
@@ -98,6 +231,8 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
             "licenses/uv/LICENSE-MIT",
             "licenses/uv/LICENSE-APACHE",
             "vendor/epubchecker/vendors/test/epubcheck.jar",
+            "vendor/playwright-core/browser-manifest.json",
+            "vendor/playwright-core/.local-browsers/test/chrome-headless-shell",
         )
         for relative_path in required_runtime_files:
             fixture = fake_runtime / relative_path
@@ -113,6 +248,9 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
             '  printf \'node-js-ok\'\n'
             'elif [ "$1" = "--jitless" ] && [ "$#" -eq 4 ]; then\n'
             '  printf \'uv 0.11.8 (test)\'\n'
+            'elif [ "$1" = "--jitless" ] && [ "$#" -eq 5 ] && [ "$5" = "browser-runtime-smoke" ]; then\n'
+            '  printf \'called\\n\' > "$BROWSER_SMOKE_LOG"\n'
+            '  printf \'browser-runtime-ok\'\n'
             'else\n'
             '  exit 1\n'
             'fi',
@@ -122,6 +260,7 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
         dmg = root / "BiblioSmith Launcher.dmg"
         dmg.write_bytes(b"test-dmg")
         command_log = root / "commands.log"
+        browser_smoke_log = root / "browser-smoke.log"
 
         _write_command(
             bin_dir / "codesign",
@@ -156,6 +295,7 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
             {
                 "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
                 "COMMAND_LOG": str(command_log),
+                "BROWSER_SMOKE_LOG": str(browser_smoke_log),
                 "FAKE_NODE": str(fake_node),
                 "FAKE_RUNTIME": str(fake_runtime),
                 "FAKE_UV": str(fake_uv),
@@ -170,11 +310,16 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
             check=False,
         )
         commands = command_log.read_text(encoding="utf-8").splitlines() if command_log.exists() else []
-        return completed, commands
+        browser_smoke = (
+            browser_smoke_log.read_text(encoding="utf-8")
+            if browser_smoke_log.exists()
+            else ""
+        )
+        return completed, commands, browser_smoke
 
 
 def test_release_verifier_accepts_a_notarized_developer_id_app() -> None:
-    completed, commands = _run_verifier("accepted\nsource=Notarized Developer ID")
+    completed, commands, _ = _run_verifier("accepted\nsource=Notarized Developer ID")
 
     assert completed.returncode == 0, completed.stderr
     assert [command.split()[0] for command in commands] == [
@@ -200,7 +345,7 @@ def test_release_verifier_accepts_a_notarized_developer_id_app() -> None:
 
 
 def test_release_verifier_rejects_a_non_notarized_gatekeeper_source() -> None:
-    completed, commands = _run_verifier("accepted\nsource=Developer ID")
+    completed, commands, _ = _run_verifier("accepted\nsource=Developer ID")
 
     assert completed.returncode != 0
     assert "Notarized Developer ID" in completed.stderr
@@ -215,6 +360,15 @@ def test_release_verifier_rejects_a_non_notarized_gatekeeper_source() -> None:
         "spctl",
         "hdiutil",
     ]
+
+
+def test_release_verifier_executes_bundled_chromium_javascript() -> None:
+    completed, _, browser_smoke = _run_verifier(
+        "accepted\nsource=Notarized Developer ID"
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert browser_smoke == "called\n"
 
 
 def _run_apple_password_secret_setter(

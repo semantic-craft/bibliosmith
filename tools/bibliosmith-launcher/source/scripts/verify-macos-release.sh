@@ -18,6 +18,7 @@ verify_app() {
   local node_version
   local node_child_uv_version
   local uv_version
+  local browser_runtime_output
   local forbidden
   local entitlement_output
   local entitlement_payload
@@ -86,6 +87,55 @@ verify_app() {
   epubcheck_jars=("$runtime_root"/vendor/epubchecker/vendors/*/epubcheck.jar)
   [[ "${#epubcheck_jars[@]}" -eq 1 && -f "${epubcheck_jars[0]}" ]] || {
     echo "Expected exactly one bundled EPUBCheck jar." >&2
+    exit 1
+  }
+  browser_runtime_output=$("$node_sidecar" --jitless -e '
+    const { existsSync, readFileSync } = require("node:fs");
+    const { join, relative, resolve, sep } = require("node:path");
+
+    async function main() {
+      const runtimeRoot = resolve(process.argv[1]);
+      if (process.argv[2] !== "browser-runtime-smoke") process.exit(2);
+      const manifestPath = join(
+        runtimeRoot,
+        "vendor/playwright-core/browser-manifest.json",
+      );
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      if (manifest.schema !== "bibliosmith-browser-runtime-v1") {
+        throw new Error("Unsupported bundled browser manifest schema.");
+      }
+      const executablePath = resolve(runtimeRoot, String(manifest.relativePath ?? ""));
+      const relativePath = relative(runtimeRoot, executablePath);
+      if (
+        !relativePath
+        || relativePath === ".."
+        || relativePath.startsWith(`..${sep}`)
+        || !existsSync(executablePath)
+      ) {
+        throw new Error("Bundled browser executable is missing or outside the runtime.");
+      }
+      const { chromium } = require(join(runtimeRoot, "vendor/playwright-core"));
+      const browser = await chromium.launch({ executablePath, headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(
+          "<body><script>document.body.textContent = String(21 * 2)</script></body>",
+        );
+        const result = await page.textContent("body");
+        if (result !== "42") throw new Error("Bundled Chromium returned an invalid result.");
+      } finally {
+        await browser.close();
+      }
+      process.stdout.write("browser-runtime-ok");
+    }
+
+    main().catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    });
+  ' "$runtime_root" browser-runtime-smoke)
+  [[ "$browser_runtime_output" == "browser-runtime-ok" ]] || {
+    echo "Bundled Chromium cannot execute JavaScript under Hardened Runtime." >&2
     exit 1
   }
   forbidden=$(find "$runtime_root" \( \
