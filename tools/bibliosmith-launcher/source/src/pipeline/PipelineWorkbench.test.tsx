@@ -45,7 +45,12 @@ function workbenchProps(
     onAdvance: vi.fn(),
     onSampleTranslation: vi.fn(),
     onApplySampleProvider: vi.fn(),
-    onSaveCustomInstructions: vi.fn(),
+    promptPackCatalog: null,
+    onSelectPromptPack: vi.fn(),
+    onPreviewPrompt: vi.fn(async () => ({
+      promptPackReference: child.promptPackReference,
+      stages: [],
+    })),
     onApproveGate: vi.fn(),
     onRouteOverride: vi.fn(),
     onSampleOcr: vi.fn(),

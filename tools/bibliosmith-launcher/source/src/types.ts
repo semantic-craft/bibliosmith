@@ -258,7 +258,8 @@ export type BookPipelineChildJob = {
   attempts: number;
   lastError?: string | null;
   localProjectRoot?: string | null;
-  customInstructions?: BookPipelineCustomInstructions | null;
+  promptPackReference: TranslationPromptPackReference;
+  promptPackSelectionSource: "default" | "book-override" | string;
   readerEvidence?: BookPipelineReaderEvidence[];
   removedAt?: string | null;
 };
@@ -354,9 +355,85 @@ export type BookPipelineApprovalReference = {
 
 export type BookPipelineOutputFormat = "md" | "html" | "epub" | "bilingual";
 
-export type BookPipelineCustomInstructions = {
-  translation?: string | null;
-  reflection?: string | null;
+export type TranslationPromptPackReference = {
+  packId: string;
+  revisionId: string;
+  contentSha256: string;
+};
+
+export type TranslationPromptStageTemplate = {
+  stageId: string;
+  label: string;
+  template: string;
+};
+
+export type TranslationPromptPackRevision = {
+  schema: string;
+  packId: string;
+  revisionId: string;
+  contentSha256: string;
+  displayName: string;
+  executor: "programmatic" | "expert-agent";
+  sourceLanguage: string;
+  targetLanguage: string;
+  costHint: string;
+  source: Record<string, unknown>;
+  contextPolicy?: string;
+  requiredSkillIds?: string[];
+  requiredEvidence?: string[];
+  excludedResponsibilities?: string[];
+  stages: TranslationPromptStageTemplate[];
+};
+
+export type TranslationPromptPackDefinition = {
+  packId: string;
+  kind: "built-in" | "local" | string;
+  summary: string;
+  revisions: TranslationPromptPackRevision[];
+  deletedAt?: string;
+};
+
+export type TranslationPromptPackCatalog = {
+  schema: string;
+  packs: TranslationPromptPackDefinition[];
+};
+
+export type TranslationPromptPackRevisionDraft = {
+  packId: string;
+  displayName: string;
+  stages: TranslationPromptStageTemplate[];
+};
+
+export type TranslationPromptPackRevisionDiff = {
+  before: TranslationPromptPackReference;
+  after: TranslationPromptPackReference;
+  displayNameChanged: boolean;
+  sourceChanged: boolean;
+  stages: Array<{
+    stageId: string;
+    beforeTemplate?: string;
+    afterTemplate?: string;
+  }>;
+};
+
+export type TranslationPromptPreview = {
+  schema?: string;
+  promptPackReference: TranslationPromptPackReference;
+  stages: Array<{
+    stageId?: string;
+    label?: string;
+    template?: string;
+    actualPrompt: string | {
+      systemInstruction: string;
+      currentSource: string;
+    };
+    injections?: string[];
+  }>;
+  contextPolicy?: string;
+  requiredSkillIds?: string[];
+  skillDependencyVersions?: Record<string, string>;
+  requiredEvidence?: string[];
+  excludedResponsibilities?: string[];
 };
 
 export type BookPipelineTranslationIntent = {
@@ -364,6 +441,7 @@ export type BookPipelineTranslationIntent = {
   profileId: string;
   configId: string;
   skillIds: string[];
+  promptPackReference: TranslationPromptPackReference;
   secondPassEnabled: boolean;
   textCleanup: boolean;
   digestMode: boolean;
@@ -379,6 +457,8 @@ export type BookPipelineJob = {
   translationProfileId?: string;
   translationConfigId?: string;
   translationSkillIds?: string[];
+  promptPackReference: TranslationPromptPackReference;
+  promptPackSelectionSource: "default" | "book-override" | string;
   secondPassEnabled?: boolean;
   textCleanup?: boolean;
   digestMode?: boolean;

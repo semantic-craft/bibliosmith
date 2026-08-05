@@ -20,6 +20,7 @@ dev = [
 translation-engine = "translation_engine.cli:main"
 translation-engine-ner = "translation_engine.ner_cli:main"
 translation-engine-sample = "translation_engine.sample_cli:main"
+translation-engine-prompt-preview = "translation_engine.prompt_preview_cli:main"
 
 [tool.pytest.ini_options]
 # `pythonpath` puts the src/ layout on sys.path so the tests import the working

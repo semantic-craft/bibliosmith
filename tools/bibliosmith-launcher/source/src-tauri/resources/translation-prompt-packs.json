@@ -1,0 +1,244 @@
+{
+  "schema": "translation-prompt-pack-catalog-v1",
+  "packs": [
+    {
+      "packId": "builtin.structure-fidelity",
+      "kind": "builtin",
+      "summary": "单次程序化翻译，优先保证结构、占位符、术语和可追溯性。",
+      "revisions": [
+        {
+          "schema": "translation-prompt-pack-revision-v1",
+          "packId": "builtin.structure-fidelity",
+          "revisionId": "2026.08.05-1",
+          "contentSha256": "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+          "displayName": "结构保真翻译",
+          "executor": "programmatic",
+          "sourceLanguage": "auto",
+          "targetLanguage": "zh-Hans",
+          "costHint": "1 次模型调用 / 原文块",
+          "source": {
+            "kind": "bibliosmith",
+            "label": "BiblioSmith 内置基线",
+            "license": "Project license",
+            "adaptation": "将现有结构保护、术语注入和目标语言规则收口为可版本化方案。"
+          },
+          "stages": [
+            {
+              "stageId": "translate",
+              "label": "结构保真初译",
+              "template": "你是一名专业图书译者。请将当前原文块完整翻译为简体中文，忠实传达含义、语气和文体，不作解释、摘要或删节。只输出译文。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "packId": "builtin.four-dimension-refinement",
+      "kind": "builtin",
+      "summary": "初译后从准确性、流畅性、风格和术语四个维度反思，再据此改译。",
+      "revisions": [
+        {
+          "schema": "translation-prompt-pack-revision-v1",
+          "packId": "builtin.four-dimension-refinement",
+          "revisionId": "2026.08.05-1",
+          "contentSha256": "fd6cdf2a208280776de49bedb863186749ff3dad3b8fd8de00c495c1cc02630a",
+          "displayName": "四维反思精修",
+          "executor": "programmatic",
+          "sourceLanguage": "auto",
+          "targetLanguage": "zh-Hans",
+          "costHint": "3 次模型调用 / 原文块",
+          "source": {
+            "kind": "upstream-adaptation",
+            "repository": "https://github.com/andrewyng/translation-agent",
+            "commit": "e0fc605acbb5d78cb7a58a98bc8bd8f0056df49c",
+            "license": "MIT",
+            "adaptation": "借鉴三阶段翻译、反思、改译机制；加入 BiblioSmith 的邻块窗口、结构保护、术语约束、降级和断点恢复。"
+          },
+          "stages": [
+            {
+              "stageId": "translate",
+              "label": "初译",
+              "template": "先把当前原文块忠实翻译为简体中文。保持原作信息、语气和文体，只输出初译文本。"
+            },
+            {
+              "stageId": "reflect",
+              "label": "四维反思",
+              "template": "审阅当前原文块及其初译，分别从准确性、流畅性、风格和术语四个维度提出具体、可执行的修改建议。邻块只用于判断当前块的语境。只输出建议。"
+            },
+            {
+              "stageId": "improve",
+              "label": "改译",
+              "template": "依据四维反思建议修订当前块初译。逐项消除确有依据的问题，同时保持原作信息、文体和当前块边界。只输出最终译文。"
+            }
+          ]
+        },
+        {
+          "schema": "translation-prompt-pack-revision-v1",
+          "packId": "builtin.four-dimension-refinement",
+          "revisionId": "2026.08.05-2",
+          "contentSha256": "e86141d65f8bfb4a674c597f157a86c6da80d49ac02d081d21f2ca325c8ea2e8",
+          "displayName": "四维反思精修",
+          "executor": "programmatic",
+          "sourceLanguage": "auto",
+          "targetLanguage": "zh-Hans",
+          "costHint": "3 次模型调用 / 原文块",
+          "source": {
+            "kind": "upstream-adaptation",
+            "repository": "https://github.com/andrewyng/translation-agent",
+            "commit": "e0fc605acbb5d78cb7a58a98bc8bd8f0056df49c",
+            "license": "MIT",
+            "adaptation": "在首版三阶段机制上收紧反思证据：只报告能在当前原文、有限邻块或术语表中定位的问题，避免无依据改写；继续由 BiblioSmith 强制结构、术语、降级和断点约束。"
+          },
+          "stages": [
+            {
+              "stageId": "translate",
+              "label": "初译",
+              "template": "先把当前原文块忠实翻译为简体中文。保持原作信息、语气和文体，只输出初译文本。"
+            },
+            {
+              "stageId": "reflect",
+              "label": "四维反思",
+              "template": "审阅当前原文块及其初译，分别从准确性、流畅性、风格和术语四个维度提出修改建议。每项建议必须能在当前原文、有限邻块或术语表中定位依据；没有证据的维度明确写无须修改。邻块只用于判断当前块语境。只输出建议。"
+            },
+            {
+              "stageId": "improve",
+              "label": "改译",
+              "template": "依据有明确证据的四维反思建议修订当前块初译，不改写已经准确流畅的内容。保持原作信息、文体和当前块边界，只输出最终译文。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "packId": "builtin.context-backtracking",
+      "kind": "builtin",
+      "summary": "专家代理在动笔前主动回溯必要语境，并以可追溯证据完成逐块精译。",
+      "revisions": [
+        {
+          "schema": "translation-prompt-pack-revision-v1",
+          "packId": "builtin.context-backtracking",
+          "revisionId": "2026.08.05-1",
+          "contentSha256": "48c5907dda2fe67c29bfb84ea8690a64a9986d5a9f06a6b4fe42d08b92bd8833",
+          "displayName": "语境回溯精译",
+          "executor": "expert-agent",
+          "sourceLanguage": "auto",
+          "targetLanguage": "zh-Hans",
+          "costHint": "专家代理按语境需要执行多阶段任务",
+          "source": {
+            "kind": "bibliosmith-skill",
+            "label": "expert-translation-quality",
+            "skillId": "expert-translation-quality",
+            "skillVersion": "sha256:project-whitelist",
+            "skillVersions": {"expert-translation-quality": "sha256:project-whitelist"},
+            "license": "Project license",
+            "adaptation": "把语境依赖判断、回溯和证据要求固化为专家交接契约。"
+          },
+          "contextPolicy": "先用当前块与相邻块判断；仅在代词、术语、叙事承接或语义歧义确有需要时向前回溯，并记录回溯理由与范围。",
+          "requiredSkillIds": ["expert-translation-quality"],
+          "requiredEvidence": ["context-plan", "unit-translation", "context-review", "revision-receipt"],
+          "stages": [
+            {
+              "stageId": "context_plan",
+              "label": "语境计划",
+              "template": "判断当前翻译单元需要哪些邻近或前文语境，说明每项回溯的具体消歧功能；禁止无目的加载整本原文。"
+            },
+            {
+              "stageId": "translate_unit",
+              "label": "逐块精译",
+              "template": "结合已批准的有限语境和术语表，完整翻译当前单元，保留结构、语气、文体和可追溯标记。"
+            },
+            {
+              "stageId": "context_review",
+              "label": "语境复核",
+              "template": "对照当前原文、所用语境和译文，检查指代、承接、术语与叙事视角是否一致，列出有证据的问题。"
+            },
+            {
+              "stageId": "revise_unit",
+              "label": "定稿",
+              "template": "仅依据复核证据修订当前单元，交回最终译文及使用的证据引用。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "packId": "builtin.full-quality-loop",
+      "kind": "builtin",
+      "summary": "专家代理贯通译前研究、校准试译、分章翻译、独立复核、问题族关闭与精确回退。",
+      "revisions": [
+        {
+          "schema": "translation-prompt-pack-revision-v1",
+          "packId": "builtin.full-quality-loop",
+          "revisionId": "2026.08.05-1",
+          "contentSha256": "9d35dd17e71b08845fdce4c30031df6bdb73b6ec2b45124e1523d0fa37afe1f8",
+          "displayName": "全流程审校闭环",
+          "executor": "expert-agent",
+          "sourceLanguage": "auto",
+          "targetLanguage": "zh-Hans",
+          "costHint": "专家代理全流程，多轮审校与问题族复查",
+          "source": {
+            "kind": "mechanism-reference",
+            "repository": "https://github.com/SaberOnGo/public-domain-books-translation",
+            "commit": "219f452311817a09cfbe59d7e345a1ac2a81faa8",
+            "referenceFiles": ["AGENTS.md", ".opencode/agents/book-runner.md", ".opencode/agents/book-reviewer.md", ".opencode/commands/run-gates.md", ".opencode/commands/random-spotcheck.md"],
+            "skillVersions": {"expert-translation-quality": "sha256:project-whitelist"},
+            "license": "Mechanism reference only; BiblioSmith wording is original",
+            "commercialUse": "No upstream text is bundled; no upstream endorsement implied",
+            "adaptation": "提炼阶段机制并用 BiblioSmith 原创措辞实现；不纳入版权判断、在线找书、出版或 release。"
+          },
+          "contextPolicy": "阶段输入按最小必要范围提供；独立复核不得读取译者的自评结论；发现问题族后扩展到全书候选并用新证据关闭。",
+          "requiredSkillIds": ["expert-translation-quality"],
+          "requiredEvidence": ["research-brief", "calibration-result", "chapter-control", "multidimensional-review", "independent-review", "defect-family-closure", "rollback-receipt", "final-gate"],
+          "excludedResponsibilities": ["copyright-decision", "online-source-acquisition", "cover-or-epub-production", "publication", "commercial-licensing", "release", "global-template-backfill"],
+          "stages": [
+            {
+              "stageId": "research",
+              "label": "译前研究",
+              "template": "建立作品、时代、体裁、作者文体和关键术语的最小研究简报，只记录能改变翻译决策的证据。"
+            },
+            {
+              "stageId": "calibrate",
+              "label": "校准试译",
+              "template": "选择有代表性的短样本试译，形成可检验的术语和风格规则；未通过校准不得进入全书翻译。"
+            },
+            {
+              "stageId": "translate_chapter",
+              "label": "分章翻译",
+              "template": "按已批准的研究、术语和风格规则完整翻译当前章，保存单元级可追溯证据。"
+            },
+            {
+              "stageId": "chapter_control",
+              "label": "章级控制",
+              "template": "把本章作为整体检查结构、叙事连续性、语域、术语和漏译，不以孤立句子的顺滑替代整章一致。"
+            },
+            {
+              "stageId": "multidimensional_review",
+              "label": "多维审校",
+              "template": "分别检查忠实度、可读性、术语一致性和结构完整性，为每个问题给出原文与译文证据定位。"
+            },
+            {
+              "stageId": "independent_review",
+              "label": "独立复核",
+              "template": "在不依赖译者自评结论的前提下独立抽查并挑战现有译文；发现的问题必须进入可追踪清单。"
+            },
+            {
+              "stageId": "close_defect_families",
+              "label": "问题族关闭",
+              "template": "把已确认问题抽象为可检索的问题族，扫描全书候选、逐一判定和修复，再用新的复查证据关闭；不得用一次局部修复宣称全书完成。"
+            },
+            {
+              "stageId": "rollback",
+              "label": "精确回退",
+              "template": "若最新复查失败，只回退到产生缺陷的最近阶段，保留已通过且不受影响的证据，修复后重新经过下游门禁。"
+            },
+            {
+              "stageId": "final_gate",
+              "label": "最终翻译门禁",
+              "template": "只有最新的研究、校准、章级控制、多维审校、独立复核和问题族证据均通过且无未关闭问题时，才允许确认翻译完成。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

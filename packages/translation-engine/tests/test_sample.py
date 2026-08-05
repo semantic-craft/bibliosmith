@@ -1,12 +1,18 @@
 import json
+from copy import deepcopy
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from tests.fixtures import build_run_fixture, build_sample_fixture
+from tests.fixtures import (
+    STRUCTURE_FIDELITY_PROMPT_PACK,
+    build_run_fixture,
+    build_sample_fixture,
+)
 from translation_engine.engine import EngineError, run_manifest
+from translation_engine.prompt_packs import revision_content_sha256
 from translation_engine.providers import TranslationRequest
 from translation_engine.sample import run_sample_manifest
 
@@ -208,9 +214,8 @@ class SampleTranslationTests(unittest.TestCase):
 class SamplePromptFidelityTests(unittest.TestCase):
     """The preview exists to be trusted, so it has to use the real run's prompt.
 
-    Before this, the sample carried neither textCleanup nor customInstructions,
-    so anyone who had set either was approving a full run on the strength of a
-    translation produced under different instructions.
+    The sample and full run must compile the same selected immutable revision,
+    or approval would be based on a request the real run never sends.
     """
 
     def _sample_instruction(self, **fixture_kwargs: object) -> str:
@@ -259,15 +264,13 @@ class SamplePromptFidelityTests(unittest.TestCase):
         self.assertNotIn("# TEXT CLEANUP", without)
         self.assertIn("# TEXT CLEANUP - WITHIN PARAGRAPHS ONLY", with_cleanup)
 
-    def test_custom_translation_directive_precedes_structure_protection(self) -> None:
-        instruction = self._sample_instruction(
-            custom_instructions={"translation": "Use restrained literary Chinese."}
-        )
+    def test_selected_template_precedes_structure_protection(self) -> None:
+        prompt_pack = deepcopy(STRUCTURE_FIDELITY_PROMPT_PACK)
+        prompt_pack["stages"][0]["template"] = "Use restrained literary Chinese."
+        prompt_pack["contentSha256"] = revision_content_sha256(prompt_pack)
+        instruction = self._sample_instruction(prompt_pack=prompt_pack)
 
-        self.assertIn("# USER STYLE DIRECTIVES", instruction)
         self.assertIn("Use restrained literary Chinese.", instruction)
-        # The protection block has to stay last, or a style directive could talk
-        # the model out of preserving placeholders and headings.
         self.assertLess(
             instruction.index("Use restrained literary Chinese."),
             instruction.index("# MANDATORY STRUCTURE PROTECTION"),
@@ -280,35 +283,21 @@ class SamplePromptFidelityTests(unittest.TestCase):
         absent from each and the comparison covers the whole instruction rather
         than only the two sections in question.
         """
-        settings: dict[str, object] = {
-            "text_cleanup": True,
-            "custom_instructions": {"translation": "Use restrained literary Chinese."},
-        }
+        prompt_pack = deepcopy(STRUCTURE_FIDELITY_PROMPT_PACK)
+        prompt_pack["stages"][0]["template"] = "Use restrained literary Chinese."
+        prompt_pack["contentSha256"] = revision_content_sha256(prompt_pack)
+        settings: dict[str, object] = {"text_cleanup": True, "prompt_pack": prompt_pack}
 
         self.assertEqual(
             self._sample_instruction(**settings),
             self._run_instruction(**settings),
         )
 
-    def test_reflection_directive_is_validated_but_not_applied(self) -> None:
-        """The sample runs one pass, so a reflection directive has no pass to join.
-
-        It is still parsed, so a malformed one is rejected here exactly as the
-        full run would reject it rather than surviving review and failing later.
-        """
-        instruction = self._sample_instruction(
-            custom_instructions={
-                "translation": "Use restrained literary Chinese.",
-                "reflection": "Critique anachronistic wording.",
-            }
-        )
-
-        self.assertIn("Use restrained literary Chinese.", instruction)
-        self.assertNotIn("Critique anachronistic wording.", instruction)
-        self.assertNotIn("# USER REFLECTION DIRECTIVES", instruction)
-
-        with self.assertRaisesRegex(EngineError, "invalid_custom_instructions"):
-            self._sample_instruction(custom_instructions={"translation": 5})
+    def test_sample_rejects_a_tampered_prompt_pack_revision(self) -> None:
+        prompt_pack = deepcopy(STRUCTURE_FIDELITY_PROMPT_PACK)
+        prompt_pack["stages"][0]["template"] = "Tampered without a new hash."
+        with self.assertRaisesRegex(EngineError, "prompt_pack_content_hash_mismatch"):
+            self._sample_instruction(prompt_pack=prompt_pack)
 
     def test_non_boolean_text_cleanup_is_rejected(self) -> None:
         with self.assertRaisesRegex(EngineError, "invalid_text_cleanup"):

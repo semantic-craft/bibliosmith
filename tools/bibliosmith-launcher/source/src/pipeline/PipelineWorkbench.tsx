@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type {
-  BookPipelineCustomInstructions,
   BookPipelineRouteItem,
   BookPipelineShelfSelection,
   BookPipelineSource,
   BookPipelineState,
   ModelSlotView,
+  TranslationPromptPackCatalog,
+  TranslationPromptPackReference,
+  TranslationPromptPreview,
 } from "../types";
 import "./pipeline.css";
 import type { PipelineCopy } from "./copy";
@@ -34,11 +36,9 @@ export type PipelineWorkbenchProps = {
   onAdvance: (jobId: string, childId: string, invalidateDownstream?: boolean) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
-  onSaveCustomInstructions: (
-    jobId: string,
-    childId: string,
-    customInstructions: BookPipelineCustomInstructions,
-  ) => void;
+  promptPackCatalog: TranslationPromptPackCatalog | null;
+  onSelectPromptPack: (jobId: string, childId: string, value: TranslationPromptPackReference) => void;
+  onPreviewPrompt: (jobId: string, childId: string) => Promise<TranslationPromptPreview>;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
   onSampleOcr: (jobId: string, childId: string, samplePages: number) => void;
@@ -276,7 +276,9 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
               onAdvance={props.onAdvance}
               onSampleTranslation={props.onSampleTranslation}
               onApplySampleProvider={props.onApplySampleProvider}
-              onSaveCustomInstructions={props.onSaveCustomInstructions}
+              promptPackCatalog={props.promptPackCatalog}
+              onSelectPromptPack={props.onSelectPromptPack}
+              onPreviewPrompt={props.onPreviewPrompt}
               onApproveGate={props.onApproveGate}
               onRouteOverride={props.onRouteOverride}
               onSampleOcr={props.onSampleOcr}

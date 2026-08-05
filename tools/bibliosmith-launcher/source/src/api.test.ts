@@ -17,6 +17,11 @@ const intent: BookPipelineTranslationIntent = {
   profileId: "fake-provider-profile",
   configId: "fake-provider-config",
   skillIds: [],
+  promptPackReference: {
+    packId: "builtin.structure-fidelity",
+    revisionId: "2026.08.05-1",
+    contentSha256: "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+  },
   secondPassEnabled: false,
   textCleanup: false,
   digestMode: false,

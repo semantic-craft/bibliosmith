@@ -32,54 +32,6 @@ pub(crate) fn normalize_output_formats(formats: &[String]) -> Result<Vec<String>
     Ok(normalized)
 }
 
-pub(crate) fn normalize_custom_instruction(
-    phase: &str,
-    value: Option<String>,
-) -> Result<Option<String>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.trim().is_empty() {
-        return Ok(None);
-    }
-    if value.chars().count() > MAX_CUSTOM_INSTRUCTION_CHARACTERS {
-        return Err(format!(
-            "custom_instructions_too_long: {phase} exceeds {MAX_CUSTOM_INSTRUCTION_CHARACTERS} characters."
-        ));
-    }
-    Ok(Some(value))
-}
-
-pub(crate) fn normalize_custom_instructions(
-    value: BookPipelineCustomInstructions,
-) -> Result<Option<BookPipelineCustomInstructions>, String> {
-    let normalized = BookPipelineCustomInstructions {
-        translation: normalize_custom_instruction("translation", value.translation)?,
-        reflection: normalize_custom_instruction("reflection", value.reflection)?,
-    };
-    Ok((normalized.translation.is_some() || normalized.reflection.is_some()).then_some(normalized))
-}
-
-pub(crate) fn validate_custom_instructions(
-    value: Option<&BookPipelineCustomInstructions>,
-) -> Result<(), String> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    for (phase, instruction) in [
-        ("translation", value.translation.as_deref()),
-        ("reflection", value.reflection.as_deref()),
-    ] {
-        if instruction.is_some_and(|text| text.chars().count() > MAX_CUSTOM_INSTRUCTION_CHARACTERS)
-        {
-            return Err(format!(
-                "custom_instructions_too_long: {phase} exceeds {MAX_CUSTOM_INSTRUCTION_CHARACTERS} characters."
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn output_format_enabled(job: &BookPipelineJob, format: &str) -> bool {
     job.output_formats
         .iter()
@@ -123,6 +75,8 @@ pub struct BookPipelineJob {
     pub translation_config_id: String,
     #[serde(default)]
     pub translation_skill_ids: Vec<String>,
+    pub prompt_pack_reference: PromptPackReference,
+    pub prompt_pack_selection_source: String,
     #[serde(default)]
     pub second_pass_enabled: bool,
     #[serde(default)]
@@ -249,15 +203,6 @@ pub struct BookPipelineAttachmentIdentity {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BookPipelineCustomInstructions {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub translation: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reflection: Option<String>,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BookPipelineChildJob {
@@ -279,8 +224,8 @@ pub struct BookPipelineChildJob {
     pub local_project_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_identity: Option<BookPipelineAttachmentIdentity>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_instructions: Option<BookPipelineCustomInstructions>,
+    pub prompt_pack_reference: PromptPackReference,
+    pub prompt_pack_selection_source: String,
     #[serde(default)]
     pub reader_evidence: Vec<BookPipelineReaderEvidence>,
     /// When this book was dropped from the shelf. A collection's membership
@@ -467,6 +412,7 @@ pub struct BookPipelineApprovalRequest {
     pub config_id: String,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    pub prompt_pack_reference: PromptPackReference,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qa_policy: Option<String>,
     #[serde(default)]
@@ -631,6 +577,7 @@ pub struct BookPipelineTranslationIntent {
     pub config_id: String,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    pub prompt_pack_reference: PromptPackReference,
     #[serde(default)]
     pub second_pass_enabled: bool,
     #[serde(default)]
