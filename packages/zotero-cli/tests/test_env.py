@@ -40,3 +40,17 @@ def test_load_root_dotenv_silently_skips_standalone_install(
     load_root_dotenv(tmp_path)
 
     assert "STANDALONE_ENV_TEST" not in os.environ
+
+
+def test_desktop_runtime_can_disable_dotenv_loading(
+    monkeypatch, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "pyproject.toml").write_text("[tool.uv.workspace]\n", encoding="utf-8")
+    (tmp_path / "packages").mkdir()
+    (tmp_path / ".env").write_text("DESKTOP_SECRET=must-not-load\n", encoding="utf-8")
+    monkeypatch.setenv("BIBLIOSMITH_DISABLE_DOTENV", "1")
+    monkeypatch.delenv("DESKTOP_SECRET", raising=False)
+
+    load_root_dotenv(tmp_path)
+
+    assert "DESKTOP_SECRET" not in os.environ

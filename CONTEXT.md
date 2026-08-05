@@ -22,6 +22,16 @@ desktop launcher owns orchestration, but it does not own every component's data.
 
 ## Boundaries
 
+- The installed App bundle owns read-only code, provider registries, packages,
+  and runtime scripts. Production never executes those resources from a source
+  checkout or a user workspace.
+- The operating system's Application Support directory owns launcher config,
+  logs, pipeline state, and managed runtime state. Credentials remain in the
+  system Keychain.
+- The operating system's Cache and temporary directories own disposable OCR
+  staging, samples, download caches, and other reproducible intermediates.
+- The configured user workspace (recommended: `~/Documents/BiblioSmith`) owns
+  source books, translations, QA evidence, and final reading artifacts.
 - `tools/bibliosmith-launcher` owns Book Pipeline orchestration and its public state.
 - `packages/ocr` owns OCR worker data and SQLite.
 - `books/local/...` owns each private local-reading project and its manifests,
@@ -39,3 +49,6 @@ desktop launcher owns orchestration, but it does not own every component's data.
 - [ADR 0002](docs/adr/0002-progress-and-terminal-notifications.md): Tauri stage/unit
   progress plus terminal webhook notifications for v1; SRT, DOCX, and TTS are
   deferred follow-up capabilities.
+- [ADR 0003](docs/adr/0003-separate-app-resources-and-user-workspace.md): the App
+  resource, Application Support, Cache/temp, and user workspace layers have
+  distinct locations and ownership.

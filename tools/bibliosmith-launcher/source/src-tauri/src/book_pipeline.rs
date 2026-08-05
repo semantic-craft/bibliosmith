@@ -7,7 +7,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::{
@@ -451,11 +451,9 @@ fn derive_job_progress(job: &BookPipelineJob) -> BookPipelineProgress {
     BookPipelineProgress {
         stage_total,
         stage_completed,
-        percent: if stage_total == 0 {
-            0
-        } else {
-            ((stage_completed * 100) / stage_total) as u8
-        },
+        percent: (stage_completed * 100)
+            .checked_div(stage_total)
+            .unwrap_or_default() as u8,
         active_stage_id: active
             .map(|stage| stage.stage_id.clone())
             .unwrap_or_else(|| job.current_stage_id.clone()),
@@ -654,7 +652,8 @@ fn overlay_current_mineru_source_evidence(job: &mut BookPipelineJob) {
             continue;
         };
         let Some(expected_sha256) = manifest
-            .get("source_sha256")
+            .get("cleaned_markdown_sha256")
+            .or_else(|| manifest.get("source_sha256"))
             .and_then(serde_json::Value::as_str)
         else {
             continue;
@@ -1015,9 +1014,15 @@ fn source_reference_sha256(source: &BookPipelineSource) -> String {
 fn artifact_default_stage(kind: &str) -> &'static str {
     match kind {
         "collection_manifest" => "discover",
-        "markdown" | "html" | "epub" | "pdf" | "metadata" | "index" | "ocr_sample_report" => {
-            "extract"
-        }
+        "markdown"
+        | "html"
+        | "epub"
+        | "pdf"
+        | "source_book"
+        | "reading_bilingual_pdf"
+        | "metadata"
+        | "index"
+        | "ocr_sample_report" => "extract",
         "translation_source"
         | "source_manifest"
         | "translation_draft"
@@ -1063,6 +1068,7 @@ fn artifact_privacy(kind: &str) -> &'static str {
     } else if matches!(
         kind,
         "markdown"
+            | "source_book"
             | "translation_source"
             | "translation_draft"
             | "translation_revised"
@@ -1077,6 +1083,7 @@ fn artifact_privacy(kind: &str) -> &'static str {
             | "reading_html"
             | "reading_epub"
             | "reading_bilingual_epub"
+            | "reading_bilingual_pdf"
     ) {
         "private_text"
     } else {
@@ -1215,21 +1222,23 @@ fn refresh_navigation_targets(job: &mut BookPipelineJob) {
             Path::new(output_dir),
             None,
         );
-        // The layout track's whole deliverable is one PDF sitting in the job
-        // output directory -- it builds no reading project, so without this the
-        // finished book offers "Open workspace" and leaves the user to find the
-        // file themselves.
+        // The layout track promotes its final PDF from Cache into a user-owned
+        // project before completion. Open that durable copy directly.
         if job.mode == MODE_LAYOUT_PRESERVING {
-            if let Some(artifact) = job
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.kind == "pdf" && artifact.validation.hash_matches)
-            {
+            if let Some(artifact) = job.artifacts.iter().find(|artifact| {
+                artifact.kind == "reading_bilingual_pdf" && artifact.validation.hash_matches
+            }) {
+                let durable_root = job
+                    .children
+                    .iter()
+                    .find_map(|child| child.local_project_root.as_deref())
+                    .map(Path::new)
+                    .unwrap_or_else(|| Path::new(output_dir));
                 register_navigation_target(
                     &mut targets,
                     "bilingual_pdf",
                     Path::new(&artifact.path),
-                    Path::new(output_dir),
+                    durable_root,
                     Some(&artifact.artifact_id),
                 );
             }
@@ -2009,42 +2018,10 @@ impl SystemWebhookSink {
     fn from_config() -> Option<Self> {
         std::env::var("BOOK_PIPELINE_WEBHOOK_URL")
             .ok()
-            .or_else(|| {
-                let env_path = local_reading_repo_root().ok()?.join(".env");
-                let raw = fs::read_to_string(env_path).ok()?;
-                dotenv_value(&raw, "BOOK_PIPELINE_WEBHOOK_URL")
-            })
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(|endpoint| Self { endpoint })
     }
-}
-
-fn dotenv_value(raw: &str, key: &str) -> Option<String> {
-    raw.lines().find_map(|line| {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            return None;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let (candidate, value) = line.split_once('=')?;
-        if candidate.trim() != key {
-            return None;
-        }
-        let value = value.trim();
-        Some(
-            value
-                .strip_prefix('"')
-                .and_then(|value| value.strip_suffix('"'))
-                .or_else(|| {
-                    value
-                        .strip_prefix('\'')
-                        .and_then(|value| value.strip_suffix('\''))
-                })
-                .unwrap_or(value)
-                .to_string(),
-        )
-    })
 }
 
 impl BookPipelineNotificationSink for SystemWebhookSink {
@@ -2429,13 +2406,13 @@ fn preview_book_pipeline_route_with_executor<E: RunnerCommandExecutor>(
             mode,
             config,
             20,
-            &book_ocr_conversion_root(),
+            &book_ocr_conversion_root()?,
         );
     }
     // A local folder gets the same treatment as a Zotero source: the route is
     // real evidence about the books on disk, not a guess from the source kind.
     if source.kind == "local_pdf_folder" {
-        let plan = local_pdf_route_plan(executor, source, &book_ocr_conversion_root());
+        let plan = local_pdf_route_plan(executor, source, &book_ocr_conversion_root()?);
         return Ok(preview_route_with_local_plan(source, mode, config, &plan));
     }
     Ok(preview_route(source, mode, config))
@@ -2557,18 +2534,66 @@ fn retry_job_from_ui(
     retry_job_to_quiescence(store, runner, job_id)
 }
 
-/// Remove a job from the shelf. Files on disk (extraction output, the local
-/// reading project, Zotero attachments) are deliberately left untouched — this
-/// only forgets the job, so a re-queued book can reuse the converted Markdown.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct BookPipelineShelfSelection {
+    pub job_id: String,
+    pub child_id: Option<String>,
+}
+
 #[tauri::command]
-pub async fn delete_book_pipeline_job(
+pub async fn remove_books_from_shelf(
+    selections: Vec<BookPipelineShelfSelection>,
+    explicit_approval: bool,
+) -> Result<BookPipelineState, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        remove_books_from_shelf_in_store(&store, &selections, explicit_approval)
+    })
+    .await
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BookPipelineProjectMigration {
+    pub required: bool,
+    pub source_root: String,
+    pub destination_root: String,
+}
+
+#[tauri::command]
+pub async fn inspect_book_pipeline_project_migration(
+    job_id: String,
+    child_id: Option<String>,
+) -> Result<BookPipelineProjectMigration, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let state = store.load()?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| format!("Book Pipeline job not found: {job_id}"))?;
+        inspect_book_project_migration(job, child_id.as_deref(), &user_workspace_root()?)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn migrate_book_pipeline_project(
     job_id: String,
     child_id: Option<String>,
     explicit_approval: bool,
 ) -> Result<BookPipelineState, String> {
     crate::run_blocking(move || {
         let store = BookPipelineStore::default()?;
-        delete_job(&store, &job_id, child_id.as_deref(), explicit_approval)
+        migrate_book_project_in_store(
+            &store,
+            &job_id,
+            child_id.as_deref(),
+            &user_workspace_root()?,
+            explicit_approval,
+        )
     })
     .await
 }
@@ -2582,14 +2607,321 @@ fn live_children(job: &BookPipelineJob) -> impl Iterator<Item = &BookPipelineChi
         .filter(|child| child.removed_at.is_none())
 }
 
-fn delete_job(
+fn remove_books_from_shelf_in_store(
     store: &dyn BookPipelineStateStore,
-    job_id: &str,
-    child_id: Option<&str>,
+    selections: &[BookPipelineShelfSelection],
     explicit_approval: bool,
 ) -> Result<BookPipelineState, String> {
     if !explicit_approval {
-        return Err("Explicit approval is required to delete a Book Pipeline job.".into());
+        return Err("Explicit approval is required to remove books from the shelf.".into());
+    }
+    if selections.is_empty() {
+        return Err("Select at least one book to remove from the shelf.".into());
+    }
+    let unique = selections.iter().cloned().collect::<BTreeSet<_>>();
+    if unique.len() != selections.len() {
+        return Err("The shelf selection contains the same book more than once.".into());
+    }
+
+    let mut state = store.load()?;
+    let mut grouped = BTreeMap::<String, BTreeSet<Option<String>>>::new();
+    for selection in selections {
+        grouped
+            .entry(selection.job_id.clone())
+            .or_default()
+            .insert(selection.child_id.clone());
+    }
+
+    // Validate the complete selection before changing anything. A stale card,
+    // an active batch, or an already-removed child rejects the whole request.
+    for (job_id, child_ids) in &grouped {
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == *job_id)
+            .ok_or_else(|| format!("Book Pipeline job not found: {job_id}"))?;
+        if job_is_actively_running(job) {
+            return Err(format!(
+                "Book Pipeline job {job_id} is currently running; no selected books were removed."
+            ));
+        }
+        if child_ids.contains(&None) && child_ids.len() > 1 {
+            return Err(format!(
+                "Book Pipeline job {job_id} was selected both as a whole job and as individual books."
+            ));
+        }
+        for child_id in child_ids.iter().flatten() {
+            if !live_children(job).any(|child| child.id == *child_id) {
+                return Err(format!("Book Pipeline child not found: {child_id}"));
+            }
+        }
+    }
+
+    let removed_at = now_label();
+    let mut remove_job_ids = BTreeSet::new();
+    for job in &mut state.jobs {
+        let Some(child_ids) = grouped.get(&job.id) else {
+            continue;
+        };
+        let live_count = live_children(job).count();
+        let remove_whole_job = child_ids.contains(&None) || child_ids.len() == live_count;
+        if remove_whole_job {
+            remove_job_ids.insert(job.id.clone());
+            continue;
+        }
+        let mut removed_titles = Vec::new();
+        for child in &mut job.children {
+            if child_ids.contains(&Some(child.id.clone())) {
+                child.removed_at = Some(removed_at.clone());
+                removed_titles.push(source_title(&child.source));
+            }
+        }
+        job.current_step = format!("Removed {} books from this batch", removed_titles.len());
+        for title in removed_titles {
+            job.log_summary
+                .push(format!("Removed {title} from this batch"));
+        }
+        job.log_summary = trim_log_summary(&job.log_summary);
+        job.updated_at = removed_at.clone();
+        derive_job(job);
+    }
+    state.jobs.retain(|job| !remove_job_ids.contains(&job.id));
+    store.save(&state)?;
+    store.load()
+}
+
+fn selected_project_child<'a>(
+    job: &'a BookPipelineJob,
+    child_id: Option<&str>,
+) -> Result<&'a BookPipelineChildJob, String> {
+    if let Some(child_id) = child_id {
+        return live_children(job)
+            .find(|child| child.id == child_id)
+            .ok_or_else(|| format!("Book Pipeline child not found: {child_id}"));
+    }
+    let children = live_children(job).collect::<Vec<_>>();
+    if children.len() != 1 {
+        return Err("Choose one book before migrating its local project.".into());
+    }
+    Ok(children[0])
+}
+
+fn books_local_suffix(project_root: &Path) -> Result<PathBuf, String> {
+    let components = project_root.components().collect::<Vec<_>>();
+    let index = components
+        .windows(2)
+        .position(|pair| pair[0].as_os_str() == "books" && pair[1].as_os_str() == "local")
+        .ok_or_else(|| {
+            format!(
+                "The existing project is not inside a books/local tree: {}",
+                display_path(project_root)
+            )
+        })?;
+    let mut suffix = PathBuf::new();
+    for component in &components[index + 2..] {
+        suffix.push(component.as_os_str());
+    }
+    if suffix.as_os_str().is_empty() {
+        return Err("The existing project root cannot be books/local itself.".into());
+    }
+    Ok(suffix)
+}
+
+fn inspect_book_project_migration(
+    job: &BookPipelineJob,
+    child_id: Option<&str>,
+    workspace_root: &Path,
+) -> Result<BookPipelineProjectMigration, String> {
+    let child = selected_project_child(job, child_id)?;
+    let source_root = child
+        .local_project_root
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| "This book does not have a local project to migrate.".to_string())?;
+    if !source_root.is_dir() {
+        return Err(format!(
+            "The existing local project is missing: {}",
+            display_path(&source_root)
+        ));
+    }
+    let source_canonical = fs::canonicalize(&source_root).map_err(|error| error.to_string())?;
+    let workspace_canonical =
+        fs::canonicalize(workspace_root).map_err(|error| error.to_string())?;
+    if source_canonical.starts_with(&workspace_canonical) {
+        return Ok(BookPipelineProjectMigration {
+            required: false,
+            source_root: display_path(&source_root),
+            destination_root: display_path(&source_root),
+        });
+    }
+    let destination = workspace_root
+        .join("books/local")
+        .join(books_local_suffix(&source_canonical)?);
+    Ok(BookPipelineProjectMigration {
+        required: true,
+        source_root: display_path(&source_root),
+        destination_root: display_path(&destination),
+    })
+}
+
+fn project_tree_hashes(root: &Path) -> Result<BTreeMap<PathBuf, String>, String> {
+    fn walk(
+        root: &Path,
+        current: &Path,
+        hashes: &mut BTreeMap<PathBuf, String>,
+    ) -> Result<(), String> {
+        let mut entries = fs::read_dir(current)
+            .map_err(|error| format!("Cannot read {}: {error}", display_path(current)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Project migration does not follow symbolic links: {}",
+                    display_path(&path)
+                ));
+            }
+            if metadata.is_dir() {
+                walk(root, &path, hashes)?;
+            } else if metadata.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| error.to_string())?
+                    .to_path_buf();
+                hashes.insert(relative, sha256_file(&path)?);
+            } else {
+                return Err(format!(
+                    "Unsupported project entry: {}",
+                    display_path(&path)
+                ));
+            }
+        }
+        Ok(())
+    }
+    let metadata = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("The local project root must be a real directory, not a symbolic link.".into());
+    }
+    let mut hashes = BTreeMap::new();
+    walk(root, root, &mut hashes)?;
+    Ok(hashes)
+}
+
+fn copy_project_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    fn copy_entries(source: &Path, destination: &Path) -> Result<(), String> {
+        fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+        for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let metadata = fs::symlink_metadata(&source_path).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Project migration does not follow symbolic links: {}",
+                    display_path(&source_path)
+                ));
+            }
+            if metadata.is_dir() {
+                copy_entries(&source_path, &destination_path)?;
+            } else if metadata.is_file() {
+                fs::copy(&source_path, &destination_path).map_err(|error| {
+                    format!("Cannot copy {}: {error}", display_path(&source_path))
+                })?;
+            } else {
+                return Err(format!(
+                    "Unsupported project entry: {}",
+                    display_path(&source_path)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    let expected = project_tree_hashes(source)?;
+    if destination.exists() {
+        let actual = project_tree_hashes(destination)?;
+        if actual != expected {
+            return Err(format!(
+                "The migration destination already exists with different contents: {}",
+                display_path(destination)
+            ));
+        }
+        return Ok(());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Migration destination has no parent.".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = parent.join(format!(".bibliosmith-migration-{}", new_job_id()));
+    let copied = copy_entries(source, &temporary).and_then(|_| {
+        let actual = project_tree_hashes(&temporary)?;
+        if actual != expected {
+            return Err(
+                "Project migration verification failed; the copied files do not match the source."
+                    .into(),
+            );
+        }
+        fs::rename(&temporary, destination).map_err(|error| error.to_string())
+    });
+    if copied.is_err() && temporary.exists() {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    copied
+}
+
+fn relocated_path(path: &str, old_root: &Path, new_root: &Path) -> Option<String> {
+    Path::new(path).strip_prefix(old_root).ok().map(|relative| {
+        if relative.as_os_str().is_empty() {
+            display_path(new_root)
+        } else {
+            display_path(&new_root.join(relative))
+        }
+    })
+}
+
+fn relocate_project_value(
+    value: &mut serde_json::Value,
+    old_root: &Path,
+    new_root: &Path,
+    artifact_ids: &BTreeMap<String, String>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                relocate_project_value(item, old_root, new_root, artifact_ids);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for field in fields.values_mut() {
+                relocate_project_value(field, old_root, new_root, artifact_ids);
+            }
+        }
+        serde_json::Value::String(text) => {
+            if let Some(replacement) = artifact_ids.get(text) {
+                *text = replacement.clone();
+            } else if let Some(replacement) = relocated_path(text, old_root, new_root) {
+                *text = replacement;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn migrate_book_project_in_store(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    workspace_root: &Path,
+    explicit_approval: bool,
+) -> Result<BookPipelineState, String> {
+    if !explicit_approval {
+        return Err(
+            "Explicit approval is required to copy a local project into the current library."
+                .into(),
+        );
     }
     let mut state = store.load()?;
     let job_index = find_job_index(&state, job_id)?;
@@ -2598,35 +2930,55 @@ fn delete_job(
             "This book is currently running; wait for the active stage to finish first.".into(),
         );
     }
-    // The shelf shows one row per book and a collection queues many under one
-    // job, so removing the job for the book the user pointed at took the rest of
-    // the batch with it. Drop just that book when others would remain.
-    if let Some(child_id) = child_id {
-        let job = &mut state.jobs[job_index];
-        let remaining = live_children(job)
-            .filter(|child| child.id != child_id)
-            .count();
-        let target = job
-            .children
-            .iter_mut()
-            .find(|child| child.id == child_id && child.removed_at.is_none())
-            .ok_or_else(|| "Book Pipeline child not found.".to_string())?;
-        if remaining > 0 {
-            target.removed_at = Some(now_label());
-            let title = source_title(&target.source);
-            job.current_step = "Removed one book from this batch".into();
-            job.log_summary
-                .push(format!("Removed {title} from this batch"));
-            job.log_summary = trim_log_summary(&job.log_summary);
-            job.updated_at = now_label();
-            derive_job(job);
-            store.save(&state)?;
-            return store.load();
-        }
-        // Nothing would be left on the shelf, so the row and the job are the
-        // same thing again and an empty batch is not worth keeping.
+    let plan = inspect_book_project_migration(&state.jobs[job_index], child_id, workspace_root)?;
+    if !plan.required {
+        return Err("This book project is already inside the current BiblioSmith library.".into());
     }
-    state.jobs.remove(job_index);
+    let old_root = PathBuf::from(&plan.source_root);
+    let new_root = PathBuf::from(&plan.destination_root);
+    copy_project_tree(&old_root, &new_root)?;
+
+    let job = &state.jobs[job_index];
+    let artifacts = job
+        .artifacts
+        .iter()
+        .chain(job.children.iter().flat_map(|child| child.artifacts.iter()))
+        .chain(
+            job.collection_items
+                .iter()
+                .flat_map(|item| item.artifacts.iter()),
+        );
+    let mut artifact_ids = BTreeMap::new();
+    for artifact in artifacts {
+        if artifact.artifact_id.is_empty() {
+            continue;
+        }
+        let Some(path) = relocated_path(&artifact.path, &old_root, &new_root) else {
+            continue;
+        };
+        let identity = format!(
+            "{}\0{}\0{}",
+            artifact.kind,
+            path,
+            artifact.sha256.as_deref().unwrap_or("missing")
+        );
+        artifact_ids.insert(
+            artifact.artifact_id.clone(),
+            format!("artifact-{}", sha256_str(&identity)),
+        );
+    }
+    let mut value = serde_json::to_value(job).map_err(|error| error.to_string())?;
+    relocate_project_value(&mut value, &old_root, &new_root, &artifact_ids);
+    let mut relocated: BookPipelineJob =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    relocated.updated_at = now_label();
+    relocated.log_summary.push(format!(
+        "Copied and verified local project in the current library: {}",
+        display_path(&new_root)
+    ));
+    relocated.log_summary = trim_log_summary(&relocated.log_summary);
+    derive_job(&mut relocated);
+    state.jobs[job_index] = relocated;
     store.save(&state)?;
     store.load()
 }
@@ -2986,8 +3338,8 @@ pub async fn open_book_pipeline_output(job_id: String) -> Result<BookPipelineAct
             .find(|job| job.id == job_id)
             .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
         let mut allowed_roots = vec![store.job_output_dir(&job.id)];
-        if let Ok(repo_root) = local_reading_repo_root() {
-            allowed_roots.push(repo_root.join("books").join("local"));
+        if let Ok(workspace_root) = user_workspace_root() {
+            allowed_roots.push(workspace_root.join("books").join("local"));
         }
         let resolved = resolve_book_pipeline_open_target(job, &allowed_roots)?;
         open::that(&resolved.path).map_err(|err| err.to_string())?;
@@ -3031,8 +3383,8 @@ pub async fn read_book_pipeline_artifact_excerpt(
             .find(|job| job.id == job_id)
             .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
         let mut allowed_roots = vec![store.job_output_dir(&job.id)];
-        if let Ok(repo_root) = local_reading_repo_root() {
-            allowed_roots.push(repo_root.join("books").join("local"));
+        if let Ok(workspace_root) = user_workspace_root() {
+            allowed_roots.push(workspace_root.join("books").join("local"));
         }
         read_artifact_excerpt(job, &artifact_id, max_chars, &allowed_roots)
     })
@@ -3095,8 +3447,8 @@ pub async fn attach_book_pipeline_artifact_to_zotero(
     crate::run_blocking(move || {
         let store = BookPipelineStore::default()?;
         let mut allowed_roots = vec![store.job_output_dir(&job_id)];
-        if let Ok(repo_root) = local_reading_repo_root() {
-            allowed_roots.push(repo_root.join("books").join("local"));
+        if let Ok(workspace_root) = user_workspace_root() {
+            allowed_roots.push(workspace_root.join("books").join("local"));
         }
         attach_artifact_to_zotero_with_executor(
             &store,
@@ -3446,7 +3798,7 @@ pub async fn handoff_book_pipeline_markdown(
             &store,
             &job_id,
             artifact_path.as_deref(),
-            &local_reading_repo_root()?,
+            &user_workspace_root()?,
         )
     })
     .await
@@ -3611,7 +3963,7 @@ fn queue_standard_job_with_translation_intent<E: RunnerCommandExecutor>(
         mode,
         translation_intent,
         config,
-        &book_ocr_conversion_root(),
+        &book_ocr_conversion_root()?,
     )
 }
 
@@ -3873,7 +4225,8 @@ fn queue_zotero_collection_snapshot_job<E: RunnerCommandExecutor>(
 }
 
 fn build_zotero_collection_snapshot_command(collection_key: &str) -> Result<RunnerCommand, String> {
-    let repo_root = local_reading_repo_root()?;
+    let resource_root = bundled_resource_root()?;
+    let scratch_dir = default_output_root()?.join("zotero-commands");
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: ZOTERO_COLLECTION_SNAPSHOT_COMMAND_LABEL.into(),
@@ -3887,8 +4240,8 @@ fn build_zotero_collection_snapshot_command(collection_key: &str) -> Result<Runn
             collection_key.into(),
         ],
         env: Vec::new(),
-        cwd: Some(repo_root.clone()),
-        output_dir: repo_root,
+        cwd: Some(resource_root),
+        output_dir: scratch_dir,
         attempts: 1,
         accepted_exit_codes: vec![0],
     })
@@ -5548,7 +5901,7 @@ fn continue_after_item_index(
             handoff_job_markdown_with_runner(store, job_id, None, repo_root, handoff_runner)
         }
         None => {
-            let repo_root = local_reading_repo_root()?;
+            let repo_root = user_workspace_root()?;
             handoff_job_markdown_with_runner(store, job_id, None, &repo_root, handoff_runner)
         }
     }
@@ -6185,7 +6538,7 @@ fn run_durable_collection_handoff_stage(
             &markdown_path,
             repo_root,
         ),
-        None => local_reading_repo_root().and_then(|repo_root| {
+        None => user_workspace_root().and_then(|repo_root| {
             handoff_runner.handoff_attachment(
                 &running_job,
                 &running_child,
@@ -6395,6 +6748,20 @@ fn run_job_with_handoff_mode(
 
     let output_dir = store.job_output_dir(&running_job.id);
     let result = runner.run(&running_job, &output_dir);
+    let result = match result {
+        Ok(output) if running_job.mode == MODE_LAYOUT_PRESERVING => {
+            let workspace_root = repo_root
+                .map(Path::to_path_buf)
+                .map(Ok)
+                .unwrap_or_else(user_workspace_root);
+            workspace_root.and_then(|workspace_root| {
+                promote_layout_output_to_workspace(&running_job, output, &workspace_root)
+                    .map(|(output, project_root)| (output, Some(project_root)))
+            })
+        }
+        Ok(output) => Ok((output, None)),
+        Err(error) => Err(error),
+    };
     let mut state = store.load()?;
     let index = state
         .jobs
@@ -6405,13 +6772,18 @@ fn run_job_with_handoff_mode(
     let should_handoff = should_handoff_after_run(&state.jobs[index].mode);
 
     match result {
-        Ok(output) => {
+        Ok((output, durable_project_root)) => {
             state.jobs[index].last_error = None;
             state.jobs[index].artifacts = output.artifacts;
             state.jobs[index].collection_items = output.collection_items;
             state.jobs[index].output_dir = output.output_dir.map(|path| display_path(&path));
             state.jobs[index].log_summary.extend(output.log_summary);
             apply_runner_output_to_children(&mut state.jobs[index]);
+            if let Some(project_root) = durable_project_root {
+                for child in &mut state.jobs[index].children {
+                    child.local_project_root = Some(display_path(&project_root));
+                }
+            }
             if runnable_item_index_child(&state.jobs[index], None).is_some() {
                 state.jobs[index].current_step =
                     "Extraction completed; item-scoped index ready".into();
@@ -6496,7 +6868,7 @@ fn run_job_with_handoff_mode(
                     let handoff_result = if let Some(repo_root) = repo_root {
                         handoff_runner.handoff(&handoff_job, selected, repo_root)
                     } else {
-                        local_reading_repo_root().and_then(|repo_root| {
+                        user_workspace_root().and_then(|repo_root| {
                             handoff_runner.handoff(&handoff_job, selected, &repo_root)
                         })
                     };
@@ -6666,8 +7038,14 @@ impl TranslationHandoffRunner for LocalProjectHandoffRunner {
         artifact_path: &str,
         repo_root: &Path,
     ) -> Result<TranslationHandoffOutput, String> {
+        let mut child_scoped_job = job.clone();
+        child_scoped_job.source = child.source.clone();
+        child_scoped_job.route = child.route.clone();
+        if let Some(identity) = child.source_identity.as_ref() {
+            child_scoped_job.source.path = Some(identity.attachment_path.clone());
+        }
         create_translation_handoff_project_with_title(
-            job,
+            &child_scoped_job,
             Some(artifact_path),
             repo_root,
             child.source.title.as_deref(),
@@ -6693,11 +7071,10 @@ impl<E: RunnerCommandExecutor> PipelineRunner for CommandPipelineRunner<E> {
             if job.source.kind == "markdown_source" {
                 return run_markdown_source_job(job, output_dir);
             }
-            let root = self
-                .book_ocr_conversion_root
-                .as_deref()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(book_ocr_conversion_root);
+            let root = match self.book_ocr_conversion_root.as_deref() {
+                Some(root) => root.to_path_buf(),
+                None => book_ocr_conversion_root()?,
+            };
             return run_zotero_batch_job(&self.executor, job, output_dir, &root);
         }
 
@@ -6715,11 +7092,10 @@ impl<E: RunnerCommandExecutor> PipelineRunner for CommandPipelineRunner<E> {
         child: &BookPipelineChildJob,
         _output_dir: &Path,
     ) -> Result<AttachmentRouteOutput, String> {
-        let root = self
-            .book_ocr_conversion_root
-            .as_deref()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(book_ocr_conversion_root);
+        let root = match self.book_ocr_conversion_root.as_deref() {
+            Some(root) => root.to_path_buf(),
+            None => book_ocr_conversion_root()?,
+        };
         route_zotero_attachment_from_worker(&self.executor, child, &root)
     }
 
@@ -6729,11 +7105,10 @@ impl<E: RunnerCommandExecutor> PipelineRunner for CommandPipelineRunner<E> {
         child: &BookPipelineChildJob,
         output_dir: &Path,
     ) -> Result<RunnerOutput, String> {
-        let root = self
-            .book_ocr_conversion_root
-            .as_deref()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(book_ocr_conversion_root);
+        let root = match self.book_ocr_conversion_root.as_deref() {
+            Some(root) => root.to_path_buf(),
+            None => book_ocr_conversion_root()?,
+        };
         let command = build_zotero_child_conversion_command_for_root(child, output_dir, &root)?;
         execute_conversion_command(&self.executor, command)
     }
@@ -6911,8 +7286,8 @@ fn build_zotero_item_index_command(
             "--embedding-profile-id".into(),
             index_input.embedding_profile_id,
         ],
-        env: Vec::new(),
-        cwd: Some(local_reading_repo_root()?),
+        env: vec![zotero_index_env_for(&crate::app_paths::current()?)],
+        cwd: Some(bundled_resource_root()?),
         output_dir: output_dir.to_path_buf(),
         attempts: child
             .stages
@@ -6939,8 +7314,8 @@ fn build_zotero_item_index_profile_command(
             "zfulltext".into(),
             "profile".into(),
         ],
-        env: Vec::new(),
-        cwd: Some(local_reading_repo_root()?),
+        env: vec![zotero_index_env_for(&crate::app_paths::current()?)],
+        cwd: Some(bundled_resource_root()?),
         output_dir: output_dir.to_path_buf(),
         attempts: child
             .stages
@@ -6953,8 +7328,7 @@ fn build_zotero_item_index_profile_command(
 }
 
 /// Inject the Keychain-stored key for the Zotero full-text search embedding
-/// backend. A no-op when no key is stored, so indexing still falls back to a
-/// key in the repository-root .env.
+/// backend. A no-op when no key is stored.
 fn inject_embedding_credential(command: &mut RunnerCommand) {
     if let Some((key_env, value)) = crate::embedding_settings::resolve_credential_env() {
         command.env.push((key_env, value));
@@ -6962,8 +7336,7 @@ fn inject_embedding_credential(command: &mut RunnerCommand) {
 }
 
 /// Inject the Keychain-stored PaddleOCR / MinerU tokens into an OCR worker
-/// command. A no-op when nothing is stored; the worker's own repo-root .env
-/// lookup remains the fallback (it never overrides an injected variable).
+/// command. A no-op when nothing is stored.
 /// Routing/discovery commands need this too — the worker decides between
 /// paddle-ocr and missing-paddleocr-token routes by looking at these vars.
 fn inject_ocr_credentials(command: &mut RunnerCommand) {
@@ -6973,9 +7346,7 @@ fn inject_ocr_credentials(command: &mut RunnerCommand) {
 }
 
 /// Inject the Keychain-stored Zotero Web API credentials into a `zsearch`
-/// write command. A no-op when nothing is stored; the CLI's own repo-root
-/// `.env` lookup remains the fallback, and it never overrides an injected
-/// variable.
+/// write command. A no-op when nothing is stored.
 fn inject_zotero_credentials(command: &mut RunnerCommand) {
     for (key_env, value) in crate::zotero_settings::resolve_credential_env() {
         command.env.push((key_env, value));
@@ -6989,8 +7360,8 @@ fn inject_zotero_credentials(command: &mut RunnerCommand) {
 /// to fail here with something the user can act on rather than a stack trace from
 /// inside the subprocess.
 fn inject_layout_pdf_model_env(command: &mut RunnerCommand) -> Result<(), String> {
-    let repo_root = translation_engine_repo_root()?;
-    let endpoint = crate::model_settings::resolve_openai_compatible_endpoint(&repo_root)?;
+    let resource_root = translation_engine_resource_root()?;
+    let endpoint = crate::model_settings::resolve_openai_compatible_endpoint(&resource_root)?;
     command
         .env
         .push((LAYOUT_PDF_BASE_URL_ENV.into(), endpoint.base_url));
@@ -7471,8 +7842,8 @@ fn build_external_adapter_command(
 }
 
 /// The OCR and Zotero wrappers import PyMuPDF, pypdf, requests and markdown,
-/// which the `ocr` workspace member declares and uv installs into the repo-root
-/// `.venv`. A bare interpreter only ever found them where a machine happened to
+/// which the `ocr` workspace member declares and uv installs into the app's
+/// Application Support runtime environment. A bare interpreter only ever found them where a machine happened to
 /// have them installed globally, so these scripts go through `uv run --package`
 /// exactly like the translation, index and digest stages already do. The command
 /// runs from the OCR root, from which uv discovers the enclosing workspace.
@@ -7490,7 +7861,7 @@ fn build_local_pdf_folder_command(
     job: &BookPipelineJob,
     output_dir: &Path,
 ) -> Result<RunnerCommand, String> {
-    build_local_pdf_folder_command_for_root(job, output_dir, &book_ocr_conversion_root())
+    build_local_pdf_folder_command_for_root(job, output_dir, &book_ocr_conversion_root()?)
 }
 
 fn build_local_pdf_folder_command_for_root(
@@ -7659,13 +8030,12 @@ fn build_epub_extract_command(
     })
 }
 
-/// The repository root, having checked that the layout-preserving package is
-/// actually there. `uv run --package` resolves against the workspace root, so a
-/// repoRoot pointing somewhere without this member fails inside uv with a much
-/// worse message than this one.
-fn layout_pdf_repo_root() -> Result<PathBuf, String> {
-    let repo_root = local_reading_repo_root()?;
-    let package_manifest = repo_root
+/// The bundled resource root, having checked that the layout-preserving package
+/// is actually there. `uv run --package` resolves against this packaged Python
+/// workspace.
+fn layout_pdf_resource_root() -> Result<PathBuf, String> {
+    let resource_root = bundled_resource_root()?;
+    let package_manifest = resource_root
         .join("packages")
         .join("layout-pdf")
         .join("pyproject.toml");
@@ -7675,7 +8045,7 @@ fn layout_pdf_repo_root() -> Result<PathBuf, String> {
             display_path(&package_manifest)
         ));
     }
-    Ok(repo_root)
+    Ok(resource_root)
 }
 
 /// The source PDF for a layout-track route.
@@ -7749,7 +8119,7 @@ fn build_layout_pdf_command(
     job: &BookPipelineJob,
     output_dir: &Path,
 ) -> Result<RunnerCommand, String> {
-    build_layout_pdf_command_for_root(job, output_dir, &layout_pdf_repo_root()?)
+    build_layout_pdf_command_for_root(job, output_dir, &layout_pdf_resource_root()?)
 }
 
 fn build_layout_pdf_command_for_root(
@@ -7789,7 +8159,7 @@ fn build_zotero_conversion_command(
     job: &BookPipelineJob,
     output_dir: &Path,
 ) -> Result<RunnerCommand, String> {
-    build_zotero_conversion_command_for_root(job, output_dir, &book_ocr_conversion_root())
+    build_zotero_conversion_command_for_root(job, output_dir, &book_ocr_conversion_root()?)
 }
 
 fn build_zotero_conversion_command_for_root(
@@ -7947,9 +8317,8 @@ fn build_zotero_discovery_command_for_root(
         args,
         env: Vec::new(),
         cwd: Some(root.to_path_buf()),
-        output_dir: root
-            .join("output")
-            .join("book-pipeline")
+        output_dir: default_output_root()?
+            .join("probes")
             .join("zotero-discovery"),
         attempts: 0,
         accepted_exit_codes: vec![0],
@@ -7964,7 +8333,7 @@ fn discover_zotero_sources<E: RunnerCommandExecutor>(
     if source.kind == "zotero_collection" && source.fake_zotero_items.is_none() {
         return discover_zotero_collection_snapshot(executor, source);
     }
-    discover_zotero_sources_with_root(executor, source, limit, &book_ocr_conversion_root())
+    discover_zotero_sources_with_root(executor, source, limit, &book_ocr_conversion_root()?)
 }
 
 fn discover_zotero_sources_with_root<E: RunnerCommandExecutor>(
@@ -8449,12 +8818,30 @@ fn resolve_runner_program_in(dirs: &[PathBuf], program: &Path) -> PathBuf {
 }
 
 /// The launcher downloads a private JRE and CPython, and `run_epubcheck.js` /
-/// `run_python.js` already honour `BIBLIOSMITH_JAVA` / `BIBLIOSMITH_PYTHON`;
+/// `run_python.cjs` already honours `BIBLIOSMITH_JAVA` / `BIBLIOSMITH_PYTHON`;
 /// resolving the same way here keeps the Rust EPUBCheck and bilingual-build
 /// calls on that contract instead of whatever interpreter a desktop session
 /// inherited. Resolved per call, not cached: preparing a runtime from Settings
 /// mid-session has to take effect on the next stage rather than after a restart.
+fn bundled_tool_path(paths: &crate::app_paths::AppPaths, name: &str) -> PathBuf {
+    paths
+        .runtime_bin_root()
+        .join(if cfg!(target_os = "windows") {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        })
+}
+
 fn resolve_runner_program(program: &Path) -> PathBuf {
+    if let Some(name @ ("uv" | "node")) = program.as_os_str().to_str() {
+        if let Ok(paths) = crate::app_paths::current() {
+            let bundled = bundled_tool_path(&paths, name);
+            if bundled.is_file() || !cfg!(debug_assertions) {
+                return bundled;
+            }
+        }
+    }
     let managed = match program.as_os_str().to_str() {
         Some("java") => crate::managed_java_executable(),
         Some("python3") => crate::managed_python_executable(),
@@ -8468,22 +8855,58 @@ fn resolve_runner_program(program: &Path) -> PathBuf {
 
 /// The child needs the same search path: `uv` has to find a Python, `node` has
 /// to find its own tooling, and neither inherits anything useful from a desktop
-/// launch. `command.env` is applied afterwards so a command can still override.
-fn runner_path_env_value() -> Option<OsString> {
-    env::join_paths(program_search_dirs()).ok()
+/// launch.
+fn runner_path_env_value(resource_root: &Path) -> Option<OsString> {
+    let mut dirs = vec![resource_root.join("bin")];
+    dirs.extend(program_search_dirs().iter().cloned());
+    env::join_paths(dirs).ok()
+}
+
+/// Every pipeline process can indirectly launch the bundled Python runner.
+/// Apply command-specific values first, then protect the four-layer runtime
+/// paths so a nested Node process cannot send uv back into the signed resource
+/// tree or re-enable repository dotenv discovery.
+fn runner_runtime_env_for(
+    paths: &crate::app_paths::AppPaths,
+    command: &RunnerCommand,
+) -> Vec<(String, String)> {
+    let mut values = command.env.iter().cloned().collect::<BTreeMap<_, _>>();
+    values.insert(
+        "BIBLIOSMITH_UV".into(),
+        display_path(&bundled_tool_path(paths, "uv")),
+    );
+    values.insert(
+        "BIBLIOSMITH_RUNTIME_ROOT".into(),
+        display_path(&paths.resource_root()),
+    );
+    values.insert(
+        "PYTHONPYCACHEPREFIX".into(),
+        display_path(&paths.cache_root().join("python-bytecode")),
+    );
+    for (key, value) in uv_runtime_env_for(paths) {
+        values.insert(key, value);
+    }
+    values.insert("BIBLIOSMITH_DISABLE_DOTENV".into(), "1".into());
+    values.into_iter().collect()
 }
 
 fn run_process_command(command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+    let paths = crate::app_paths::current()?;
+    let resource_root = paths.resource_root();
+    fs::create_dir_all(paths.cache_root().join("python-bytecode"))
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(paths.support_root().join("runtimes")).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&command.output_dir).map_err(|error| error.to_string())?;
     let program = resolve_runner_program(&command.program);
     let mut process = Command::new(&program);
     process.args(&command.args);
     let live_progress_path = command.output_dir.join(LIVE_PROGRESS_FILE);
     let _ = fs::remove_file(&live_progress_path);
     process.env(LIVE_PROGRESS_PATH_ENV, &live_progress_path);
-    if let Some(path_value) = runner_path_env_value() {
+    if let Some(path_value) = runner_path_env_value(&resource_root) {
         process.env("PATH", path_value);
     }
-    process.envs(command.env.iter().map(|(key, value)| (key, value)));
+    process.envs(runner_runtime_env_for(&paths, command));
     if let Some(cwd) = &command.cwd {
         process.current_dir(cwd);
     }
@@ -9434,9 +9857,8 @@ fn build_local_pdf_route_plan_command(
         // does not create its output tree. This is only the directory the runner
         // hangs its live-progress file off, named the way Zotero discovery names
         // its own -- never the user's book folder.
-        output_dir: root
-            .join("output")
-            .join("book-pipeline")
+        output_dir: default_output_root()?
+            .join("probes")
             .join("local-pdf-route-plan"),
         attempts: 0,
         accepted_exit_codes: vec![0],
@@ -9677,6 +10099,151 @@ fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> R
     Ok(())
 }
 
+fn promote_layout_output_to_workspace(
+    job: &BookPipelineJob,
+    mut output: RunnerOutput,
+    workspace_root: &Path,
+) -> Result<(RunnerOutput, PathBuf), String> {
+    let source_path = layout_pdf_source_path(layout_pdf_route(job)?)?;
+    let cached_pdf = output
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "pdf")
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .filter(|path| path.is_file())
+        .ok_or_else(|| {
+            "Layout-preserving translation finished without a bilingual PDF to preserve."
+                .to_string()
+        })?;
+    let target_dir = workspace_root.join("books").join("local").join("zh-Hans");
+    let project_slug = clean_project_slug(
+        job.source
+            .title
+            .as_deref()
+            .or_else(|| source_path.file_stem().and_then(|name| name.to_str()))
+            .unwrap_or("layout_pdf"),
+    );
+    let project_root = create_new_local_project(&target_dir, &project_slug)?;
+
+    let promotion = (|| -> Result<Vec<BookPipelineArtifact>, String> {
+        let source_extension = source_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("pdf")
+            .to_ascii_lowercase();
+        let stored_source = project_root
+            .join("source")
+            .join(format!("original.{source_extension}"));
+        copy_file_verified(&source_path, &stored_source)?;
+        fs::write(
+            project_root.join("source").join("source.md"),
+            "# Layout-preserving source\n\nThe original source is stored as [original.pdf](original.pdf). This project preserves the translated reading output without extracting a Markdown source.\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let final_name = cached_pdf
+            .file_name()
+            .ok_or_else(|| "The bilingual PDF has no file name.".to_string())?;
+        let durable_pdf = project_root.join("output").join("reading").join(final_name);
+        copy_file_verified(&cached_pdf, &durable_pdf)?;
+        write_binary_source_manifest(&project_root, &source_path, &stored_source)?;
+        let manifest = project_root.join("metadata").join("source_manifest.json");
+        Ok(vec![
+            BookPipelineArtifact {
+                kind: "source_book".into(),
+                path: display_path(&stored_source),
+                sha256: Some(sha256_file(&stored_source)?),
+                producer_stage: Some("extract".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "source_manifest".into(),
+                path: display_path(&manifest),
+                sha256: Some(sha256_file(&manifest)?),
+                producer_stage: Some("extract".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "reading_bilingual_pdf".into(),
+                path: display_path(&durable_pdf),
+                sha256: Some(sha256_file(&durable_pdf)?),
+                producer_stage: Some("extract".into()),
+                ..BookPipelineArtifact::default()
+            },
+        ])
+    })();
+
+    let artifacts = match promotion {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&project_root);
+            return Err(error);
+        }
+    };
+    output.artifacts = artifacts;
+    output.log_summary.push(format!(
+        "Layout-preserving book saved in the user workspace at {}",
+        display_path(&project_root)
+    ));
+    output.current_step = Some("Layout-preserving bilingual PDF ready".into());
+    Ok((output, project_root))
+}
+
+fn copy_file_verified(source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "BiblioSmith only imports regular source files: {}",
+            display_path(source)
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let expected = sha256_file(source)?;
+    fs::copy(source, target).map_err(|error| error.to_string())?;
+    let actual = sha256_file(target)?;
+    if expected != actual {
+        let _ = fs::remove_file(target);
+        return Err(format!(
+            "Copied file failed SHA-256 verification: {}",
+            display_path(target)
+        ));
+    }
+    Ok(())
+}
+
+fn write_binary_source_manifest(
+    project_root: &Path,
+    original_path: &Path,
+    stored_path: &Path,
+) -> Result<(), String> {
+    let stored_relative = stored_path
+        .strip_prefix(project_root)
+        .map_err(|_| "Stored source escaped its book project.".to_string())?;
+    let source_format = original_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
+    let manifest = serde_json::json!({
+        "schema": "local-reading-source-manifest-v1",
+        "project_type": "book",
+        "source_file_name": original_path.file_name().and_then(|name| name.to_str()).unwrap_or("original"),
+        "stored_source_path": display_path(stored_relative),
+        "source_sha256": sha256_file(stored_path)?,
+        "source_format": source_format,
+        "source_language": "auto",
+        "target_language": "zh-Hans",
+        "extraction_status": "layout_translation_completed",
+        "notes": "The user-owned original and final bilingual PDF were copied and hash-verified by BiblioSmith.",
+    });
+    fs::write(
+        project_root.join("metadata").join("source_manifest.json"),
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())? + "\n",
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn create_translation_handoff_project(
     job: &BookPipelineJob,
     artifact_path: Option<&str>,
@@ -9713,71 +10280,149 @@ fn create_translation_handoff_project_with_title(
             display_path(&markdown_path)
         ));
     }
+    let original_source = original_source_for_handoff(job, &markdown_path, project_title)?;
     let target_dir = repo_root.join("books").join("local").join("zh-Hans");
     let project_slug = clean_project_slug(
         project_title
             .or_else(|| markdown_path.file_stem().and_then(|name| name.to_str()))
             .unwrap_or("book_pipeline_handoff"),
     );
-    let project_root = target_dir.join(format!(
-        "{:03}_{}",
-        next_local_project_number(&target_dir)?,
-        project_slug
-    ));
-    create_local_project_contract(&project_root)?;
-    let original = project_root.join("source").join("original.md");
-    let source = project_root.join("source").join("source.md");
-    fs::copy(&markdown_path, &original).map_err(|err| err.to_string())?;
-    fs::copy(&markdown_path, &source).map_err(|err| err.to_string())?;
-    let source_resources_path = match markdown_resource_directory(&markdown_path) {
-        Some(resources) => {
-            let directory_name = resources
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| "Markdown resource directory has an invalid name.".to_string())?;
-            // Keep the directory name: the Markdown references it by that exact
-            // relative path, so renaming it here would dangle every figure link.
-            let target = project_root.join("source").join(directory_name);
-            copy_directory_tree(&resources, &target)?;
-            Some(format!("source/{directory_name}"))
+    let project_root = create_new_local_project(&target_dir, &project_slug)?;
+    let handoff = (|| -> Result<TranslationHandoffOutput, String> {
+        let original_extension = original_source
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("bin")
+            .to_ascii_lowercase();
+        let original = project_root
+            .join("source")
+            .join(format!("original.{original_extension}"));
+        let source = project_root.join("source").join("source.md");
+        copy_file_verified(&original_source, &original)?;
+        copy_file_verified(&markdown_path, &source)?;
+        let source_resources_path = match markdown_resource_directory(&markdown_path) {
+            Some(resources) => {
+                let directory_name = resources
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        "Markdown resource directory has an invalid name.".to_string()
+                    })?;
+                // Keep the directory name: the Markdown references it by that exact
+                // relative path, so renaming it here would dangle every figure link.
+                let target = project_root.join("source").join(directory_name);
+                copy_directory_tree(&resources, &target)?;
+                Some(format!("source/{directory_name}"))
+            }
+            None => None,
+        };
+        write_source_manifest(
+            &project_root,
+            &original_source,
+            &original,
+            &source,
+            "cleaned_markdown_ready",
+            source_resources_path.as_deref(),
+        )?;
+        let manifest = project_root.join("metadata").join("source_manifest.json");
+        let artifacts = vec![
+            BookPipelineArtifact {
+                kind: "source_book".into(),
+                path: display_path(&original),
+                sha256: Some(sha256_file(&original)?),
+                zotero_key: markdown.zotero_key.clone(),
+                producer_stage: Some("handoff".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "translation_source".into(),
+                path: display_path(&source),
+                sha256: Some(sha256_file(&source)?),
+                zotero_key: markdown.zotero_key.clone(),
+                producer_stage: Some("handoff".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "source_manifest".into(),
+                path: display_path(&manifest),
+                sha256: Some(sha256_file(&manifest)?),
+                zotero_key: markdown.zotero_key.clone(),
+                producer_stage: Some("handoff".into()),
+                ..BookPipelineArtifact::default()
+            },
+        ];
+        let log_summary = vec![format!(
+            "Translation handoff ready at {}",
+            display_path(&project_root)
+        )];
+        Ok(TranslationHandoffOutput {
+            log_summary,
+            artifacts,
+        })
+    })();
+    match handoff {
+        Ok(output) => Ok(output),
+        Err(error) => {
+            let _ = fs::remove_dir_all(&project_root);
+            Err(error)
         }
-        None => None,
-    };
-    let source_sha256 = sha256_file(&markdown_path)?;
-    write_source_manifest(
-        &project_root,
-        &markdown_path,
-        &source_sha256,
-        "cleaned_markdown_ready",
-        source_resources_path.as_deref(),
-    )?;
-    let manifest = project_root.join("metadata").join("source_manifest.json");
-    let artifacts = vec![
-        BookPipelineArtifact {
-            kind: "translation_source".into(),
-            path: display_path(&source),
-            sha256: Some(sha256_file(&source)?),
-            zotero_key: markdown.zotero_key.clone(),
-            producer_stage: Some("handoff".into()),
-            ..BookPipelineArtifact::default()
-        },
-        BookPipelineArtifact {
-            kind: "source_manifest".into(),
-            path: display_path(&manifest),
-            sha256: Some(sha256_file(&manifest)?),
-            zotero_key: markdown.zotero_key.clone(),
-            producer_stage: Some("handoff".into()),
-            ..BookPipelineArtifact::default()
-        },
-    ];
-    let log_summary = vec![format!(
-        "Translation handoff ready at {}",
-        display_path(&project_root)
-    )];
-    Ok(TranslationHandoffOutput {
-        log_summary,
-        artifacts,
-    })
+    }
+}
+
+fn original_source_for_handoff(
+    job: &BookPipelineJob,
+    markdown_path: &Path,
+    project_title: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = job
+        .source
+        .path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Ok(path);
+    }
+    let mut candidates = job
+        .route
+        .iter()
+        .filter(|route| route.can_run && route.route_kind != "translation_handoff")
+        .filter_map(|route| {
+            let path = route
+                .source_ref
+                .rsplit_once("#source_md5=")
+                .map(|(path, _)| path)
+                .unwrap_or(&route.source_ref)
+                .trim();
+            (!path.is_empty()).then_some(path)
+        })
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0));
+    }
+    let expected_slugs = [
+        markdown_path.file_stem().and_then(|name| name.to_str()),
+        project_title,
+    ]
+    .into_iter()
+    .flatten()
+    .map(clean_project_slug)
+    .collect::<BTreeSet<_>>();
+    candidates
+        .into_iter()
+        .find(|path| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|stem| expected_slugs.contains(&clean_project_slug(stem)))
+        })
+        .ok_or_else(|| {
+            "BiblioSmith could not identify the original source book for this translation project."
+                .to_string()
+        })
 }
 
 /// The sibling directory a cleaned Markdown file needs in order to render.
@@ -9962,30 +10607,59 @@ fn create_local_project_contract(project_root: &Path) -> Result<(), String> {
     .map_err(|err| err.to_string())?;
     fs::write(
         project_root.join("AGENTS.md"),
-        "# Book Project Instructions\n\n- Use `skills/local-book-reading-pipeline/SKILL.md` from the repository root.\n- Put source chapters in `chapters/src/`, drafts in `chapters/translated/`, final text in `chapters/final/`.\n",
+        "# BiblioSmith Book Project\n\n- This directory is user-owned reading data managed by the BiblioSmith App.\n- Put source chapters in `chapters/src/`, drafts in `chapters/translated/`, final text in `chapters/final/`.\n- App resources and runtime scripts do not belong in this directory.\n",
     )
     .map_err(|err| err.to_string())?;
     Ok(())
 }
 
+fn create_new_local_project(target_dir: &Path, project_slug: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(target_dir).map_err(|error| error.to_string())?;
+    let first_number = next_local_project_number(target_dir)?;
+    for number in first_number..=u32::MAX {
+        let project_root = target_dir.join(format!("{number:03}_{project_slug}"));
+        match fs::create_dir(&project_root) {
+            Ok(()) => {
+                if let Err(error) = create_local_project_contract(&project_root) {
+                    let _ = fs::remove_dir_all(&project_root);
+                    return Err(error);
+                }
+                return Ok(project_root);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("BiblioSmith could not reserve a unique book project directory.".into())
+}
+
 fn write_source_manifest(
     project_root: &Path,
-    markdown_path: &Path,
-    sha256: &str,
+    original_path: &Path,
+    stored_original: &Path,
+    cleaned_markdown: &Path,
     extraction_status: &str,
     source_resources_path: Option<&str>,
 ) -> Result<(), String> {
+    let stored_source_path = stored_original
+        .strip_prefix(project_root)
+        .map_err(|_| "Stored source escaped its book project.".to_string())?;
+    let cleaned_markdown_path = cleaned_markdown
+        .strip_prefix(project_root)
+        .map_err(|_| "Cleaned Markdown escaped its book project.".to_string())?;
     let mut manifest = serde_json::json!({
         "schema": "local-reading-source-manifest-v1",
         "project_type": "book",
-        "source_file_name": markdown_path.file_name().and_then(|name| name.to_str()).unwrap_or("source.md"),
-        "stored_source_path": "source/original.md",
-        "source_sha256": sha256,
-        "source_format": "md",
+        "source_file_name": original_path.file_name().and_then(|name| name.to_str()).unwrap_or("original"),
+        "stored_source_path": display_path(stored_source_path),
+        "source_sha256": sha256_file(stored_original)?,
+        "source_format": original_path.extension().and_then(|extension| extension.to_str()).unwrap_or("bin").to_ascii_lowercase(),
+        "cleaned_markdown_path": display_path(cleaned_markdown_path),
+        "cleaned_markdown_sha256": sha256_file(cleaned_markdown)?,
         "source_language": "auto",
         "target_language": "zh-Hans",
         "extraction_status": extraction_status,
-        "notes": "Created by Book Pipeline translation handoff from a cleaned Markdown artifact.",
+        "notes": "The original source and cleaned Markdown were copied and hash-verified by BiblioSmith.",
     });
     if let Some(path) = source_resources_path {
         manifest["source_resources_path"] = serde_json::Value::String(path.to_string());
@@ -10029,9 +10703,17 @@ fn is_index_artifact(path: &Path) -> bool {
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let file = File::open(path).map_err(|err| err.to_string())?;
+    let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
-    hasher.update(bytes);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).map_err(|err| err.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -10175,104 +10857,83 @@ fn is_runtime_staging_path(path: &Path) -> bool {
 }
 
 fn default_state_dir() -> Result<PathBuf, String> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::config_local_dir)
-        .ok_or_else(|| "Could not locate local app data directory.".to_string())?;
-    Ok(base
-        .join("BiblioSmith")
-        .join("launcher")
-        .join("book-pipeline"))
+    Ok(state_dir_for(&crate::app_paths::current()?))
 }
 
 fn default_output_root() -> Result<PathBuf, String> {
-    let ocr_root = book_ocr_conversion_root();
-    if ocr_root.is_dir() {
-        return Ok(ocr_root.join("output").join("book-pipeline"));
-    }
-    Ok(default_state_dir()?.join("output"))
+    Ok(output_root_for(&crate::app_paths::current()?))
 }
 
-fn book_ocr_conversion_root() -> PathBuf {
-    let fallback_root = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Projects")
-        .join("book-ocr-conversion");
+fn state_dir_for(paths: &crate::app_paths::AppPaths) -> PathBuf {
+    paths.support_root().join("book-pipeline")
+}
 
-    match local_reading_repo_root() {
-        Ok(repo_root) => {
-            let monorepo_root = repo_root.join("packages").join("ocr");
-            if monorepo_root.is_dir() {
-                return monorepo_root;
-            }
-            eprintln!(
-                "Warning: monorepo OCR package not found at {}; falling back to legacy OCR root at {}.",
-                display_path(&monorepo_root),
-                display_path(&fallback_root)
-            );
-        }
-        Err(error) => eprintln!(
-            "Warning: could not locate the local reading repository ({error}); falling back to legacy OCR root at {}.",
-            display_path(&fallback_root)
+fn output_root_for(paths: &crate::app_paths::AppPaths) -> PathBuf {
+    paths.cache_root().join("book-pipeline").join("output")
+}
+
+fn bundled_resource_root() -> Result<PathBuf, String> {
+    let root = crate::app_paths::current()?.resource_root();
+    if root.is_dir() {
+        Ok(root)
+    } else {
+        Err(format!(
+            "BiblioSmith App resource root is missing: {}",
+            display_path(&root)
+        ))
+    }
+}
+
+fn user_workspace_root() -> Result<PathBuf, String> {
+    let root = crate::configured_or_recommended_workspace_root()?;
+    if crate::app_paths::workspace_status(&root) == crate::app_paths::WorkspaceStatus::Ready {
+        Ok(root)
+    } else {
+        Err(format!(
+            "BiblioSmith 书库尚未准备好：{}",
+            display_path(&root)
+        ))
+    }
+}
+
+fn book_ocr_conversion_root() -> Result<PathBuf, String> {
+    let root = bundled_resource_root()?.join("packages").join("ocr");
+    if root.join("pyproject.toml").is_file() {
+        Ok(root)
+    } else {
+        Err(format!(
+            "BiblioSmith OCR resource is missing: {}",
+            display_path(&root)
+        ))
+    }
+}
+
+fn uv_runtime_env_for(paths: &crate::app_paths::AppPaths) -> Vec<(String, String)> {
+    vec![
+        (
+            "UV_PROJECT_ENVIRONMENT".into(),
+            display_path(&paths.support_root().join("runtimes").join("python-env")),
         ),
-    }
-
-    fallback_root
+        (
+            "UV_CACHE_DIR".into(),
+            display_path(&paths.cache_root().join("uv")),
+        ),
+        (
+            "UV_PYTHON_INSTALL_DIR".into(),
+            display_path(&paths.support_root().join("runtimes").join("uv-python")),
+        ),
+        ("UV_NO_MODIFY_PATH".into(), "1".into()),
+        // The packaged lockfile is part of the read-only resource tree. uv may
+        // sync the mutable environment, but it must never rewrite that lock.
+        ("UV_FROZEN".into(), "1".into()),
+    ]
 }
 
-fn local_reading_repo_root() -> Result<PathBuf, String> {
-    #[cfg(test)]
-    {
-        let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        if let Some(repo_root) = start.ancestors().find(|path| {
-            path.join("AGENTS.md").is_file()
-                && path
-                    .join("tools")
-                    .join("create_local_book_project.py")
-                    .is_file()
-        }) {
-            return Ok(repo_root.to_path_buf());
-        }
-    }
-
-    // The installed app's repo root is a runtime choice (configured repoRoot,
-    // then BIBLIOSMITH_HOME), never the machine that happened to compile the
-    // binary. CARGO_MANIFEST_DIR is a build-time constant baked into the
-    // executable, so it only points at the right tree by coincidence (e.g. a
-    // self-hosted CI runner's own checkout sitting on the same disk); it stays
-    // here purely as the dev/test fallback when no runtime config exists yet.
-    if let Some(repo_root) = crate::configured_repo_root() {
-        return existing_repo_root(repo_root);
-    }
-    if let Some(repo_root) = crate::bibliosmith_home_repo_root() {
-        return existing_repo_root(repo_root);
-    }
-
-    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    start
-        .ancestors()
-        .find(|path| {
-            path.join("AGENTS.md").is_file()
-                && path
-                    .join("tools")
-                    .join("create_local_book_project.py")
-                    .is_file()
-        })
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "Could not locate bibliosmith repo root.".to_string())
-}
-
-/// The repo root is the cwd of nearly every runner command, and the default one
-/// (`~/BiblioSmith`) is a guess that need not exist. Left unchecked the spawn
-/// itself fails and the user reads an errno about a directory they never chose,
-/// so the missing root is named here together with the settings that fix it.
-fn existing_repo_root(repo_root: PathBuf) -> Result<PathBuf, String> {
-    if repo_root.is_dir() {
-        return Ok(repo_root);
-    }
-    Err(format!(
-        "BiblioSmith 仓库目录不存在：{}。请在设置里选择本地 bibliosmith 仓库目录，或把 BIBLIOSMITH_HOME 指向已有的仓库。",
-        display_path(&repo_root)
-    ))
+fn zotero_index_env_for(paths: &crate::app_paths::AppPaths) -> (String, String) {
+    (
+        "BIBLIOSMITH_ZOTERO_INDEX_PATH".into(),
+        display_path(&paths.cache_root().join("zotero").join("vectors.sqlite")),
+    )
 }
 
 fn source_title(source: &BookPipelineSource) -> String {
@@ -11383,9 +12044,9 @@ fn translation_failure_summary(failures: &[BookPipelineUnitFailure]) -> String {
     )
 }
 
-pub(crate) fn translation_engine_repo_root() -> Result<PathBuf, String> {
-    let repo_root = local_reading_repo_root()?;
-    let package_manifest = repo_root
+pub(crate) fn translation_engine_resource_root() -> Result<PathBuf, String> {
+    let resource_root = bundled_resource_root()?;
+    let package_manifest = resource_root
         .join("packages")
         .join("translation-engine")
         .join("pyproject.toml");
@@ -11395,7 +12056,7 @@ pub(crate) fn translation_engine_repo_root() -> Result<PathBuf, String> {
             display_path(&package_manifest)
         ));
     }
-    Ok(repo_root)
+    Ok(resource_root)
 }
 
 /// Write the user's chosen model into the manifest when this run's slot is the
@@ -11420,24 +12081,24 @@ fn apply_active_model_to_manifest(
 
 /// Inject the slot's per-user runtime settings into the engine subprocess. API
 /// keys come from Keychain; Qwen's optional workspace URL and web-search choice
-/// come from Launcher config. Missing values preserve the engine registry and
-/// root .env defaults.
+/// come from Launcher config. Missing values preserve the engine registry
+/// defaults.
 fn inject_model_runtime_env(command: &mut RunnerCommand, profile_id: &str, config_id: &str) {
-    let Ok(repo_root) = translation_engine_repo_root() else {
+    let Ok(resource_root) = translation_engine_resource_root() else {
         return;
     };
     if let Some((key_env, value)) =
-        crate::model_settings::resolve_credential_env(&repo_root, profile_id, config_id)
+        crate::model_settings::resolve_credential_env(&resource_root, profile_id, config_id)
     {
         command.env.push((key_env, value));
     }
     if let Some((key_env, value)) =
-        crate::model_settings::resolve_base_url_env(&repo_root, profile_id, config_id)
+        crate::model_settings::resolve_base_url_env(&resource_root, profile_id, config_id)
     {
         command.env.push((key_env, value));
     }
     if let Some((key_env, value)) =
-        crate::model_settings::resolve_web_search_env(&repo_root, profile_id, config_id)
+        crate::model_settings::resolve_web_search_env(&resource_root, profile_id, config_id)
     {
         command.env.push((key_env, value));
     }
@@ -11447,7 +12108,7 @@ fn build_translation_engine_command(
     child: &BookPipelineChildJob,
     manifest_path: &Path,
 ) -> Result<RunnerCommand, String> {
-    let repo_root = translation_engine_repo_root()?;
+    let resource_root = translation_engine_resource_root()?;
     let project_root = project_root_from_child(child)?;
     let attempts = child
         .stages
@@ -11468,7 +12129,7 @@ fn build_translation_engine_command(
             display_path(manifest_path),
         ],
         env: vec![("BIBLIOSMITH_PROGRESS_SCOPE".into(), child.id.clone())],
-        cwd: Some(repo_root),
+        cwd: Some(resource_root),
         output_dir: project_root,
         attempts,
         accepted_exit_codes: vec![0, 1],
@@ -11479,7 +12140,7 @@ fn build_translation_sample_command(
     child: &BookPipelineChildJob,
     manifest_path: &Path,
 ) -> Result<RunnerCommand, String> {
-    let repo_root = translation_engine_repo_root()?;
+    let resource_root = translation_engine_resource_root()?;
     let project_root = project_root_from_child(child)?;
     let attempts = child
         .artifacts
@@ -11499,7 +12160,7 @@ fn build_translation_sample_command(
             display_path(manifest_path),
         ],
         env: Vec::new(),
-        cwd: Some(repo_root),
+        cwd: Some(resource_root),
         output_dir: project_root,
         attempts,
         accepted_exit_codes: vec![0],
@@ -12000,7 +12661,7 @@ fn build_ocr_sample_command(
     manifest_path: &Path,
     sample_dir: &Path,
 ) -> Result<RunnerCommand, String> {
-    let root = book_ocr_conversion_root();
+    let root = book_ocr_conversion_root()?;
     let script = root.join("sample_compare.py");
     if !script.is_file() {
         return Err(format!(
@@ -12277,7 +12938,8 @@ fn build_zotero_attach_command(
     artifact_path: &Path,
     parent_item_key: &str,
 ) -> Result<RunnerCommand, String> {
-    let repo_root = local_reading_repo_root()?;
+    let resource_root = bundled_resource_root()?;
+    let scratch_dir = default_output_root()?.join("zotero-commands");
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: ZOTERO_ATTACH_COMMAND_LABEL.into(),
@@ -12297,8 +12959,8 @@ fn build_zotero_attach_command(
         // launcher reads back is the machine envelope, and a machine-facing
         // caller should not depend on tty detection to get it.
         env: vec![("ZSEARCH_FORMAT".into(), "json".into())],
-        cwd: Some(repo_root.clone()),
-        output_dir: repo_root,
+        cwd: Some(resource_root),
+        output_dir: scratch_dir,
         attempts: 1,
         accepted_exit_codes: ZOTERO_ATTACH_ACCEPTED_EXIT_CODES.into(),
     })
@@ -14833,25 +15495,24 @@ fn run_promote_stage(
     })
 }
 
-fn prepare_reading_builder(project_root: &Path) -> Result<PathBuf, String> {
-    let source_dir = local_reading_repo_root()?
+fn reading_builder_path_for_root(resource_root: &Path) -> Result<PathBuf, String> {
+    let source = resource_root
         .join("tools")
         .join("bibliosmith-launcher")
         .join("source")
-        .join("scripts");
-    let target_dir = project_root.join("scripts");
-    fs::create_dir_all(&target_dir).map_err(|err| err.to_string())?;
-    for file_name in ["build_epub.js", "run_python.js"] {
-        let source = source_dir.join(file_name);
-        if !source.is_file() {
-            return Err(format!(
-                "Reading builder dependency is missing at {}",
-                display_path(&source)
-            ));
-        }
-        fs::copy(&source, target_dir.join(file_name)).map_err(|err| err.to_string())?;
+        .join("scripts")
+        .join("build_epub.cjs");
+    if !source.is_file() {
+        return Err(format!(
+            "Reading builder dependency is missing at {}",
+            display_path(&source)
+        ));
     }
-    Ok(target_dir.join("build_epub.js"))
+    Ok(source)
+}
+
+fn prepare_reading_builder(_project_root: &Path) -> Result<PathBuf, String> {
+    reading_builder_path_for_root(&bundled_resource_root()?)
 }
 
 fn build_reading_command(
@@ -14869,7 +15530,10 @@ fn build_reading_command(
         kind: RunnerCommandKind::Process,
         label: READING_BUILD_COMMAND_LABEL.into(),
         program: PathBuf::from("node"),
-        args: vec![display_path(script_path)],
+        // Tauri re-signs sidecars with Hardened Runtime. This builder does not
+        // need a JIT, so keep the App, uv, and Node free of executable-memory
+        // entitlements instead of widening the whole bundle's permissions.
+        args: vec!["--jitless".into(), display_path(script_path)],
         env: Vec::new(),
         cwd: Some(project_root.clone()),
         output_dir: project_root,
@@ -14878,8 +15542,8 @@ fn build_reading_command(
     })
 }
 
-fn prepare_bilingual_builder(project_root: &Path) -> Result<PathBuf, String> {
-    let source = local_reading_repo_root()?
+fn prepare_bilingual_builder(_project_root: &Path) -> Result<PathBuf, String> {
+    let source = bundled_resource_root()?
         .join("tools")
         .join("bibliosmith-launcher")
         .join("source")
@@ -14891,11 +15555,7 @@ fn prepare_bilingual_builder(project_root: &Path) -> Result<PathBuf, String> {
             display_path(&source)
         ));
     }
-    let target_dir = project_root.join("scripts");
-    fs::create_dir_all(&target_dir).map_err(|err| err.to_string())?;
-    let target = target_dir.join("build_bilingual_epub.py");
-    fs::copy(&source, &target).map_err(|err| err.to_string())?;
-    Ok(target)
+    Ok(source)
 }
 
 fn build_bilingual_command(
@@ -14909,11 +15569,16 @@ fn build_bilingual_command(
         .find(|stage| stage.stage_id == "build_reading")
         .map(|stage| stage.attempt)
         .unwrap_or(0);
+    let resource_root = bundled_resource_root()?;
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: BILINGUAL_BUILD_COMMAND_LABEL.into(),
-        program: PathBuf::from("python3"),
+        program: PathBuf::from("uv"),
         args: vec![
+            "run".into(),
+            "--project".into(),
+            display_path(&resource_root),
+            "python".into(),
             display_path(script_path),
             "--book-root".into(),
             display_path(&project_root),
@@ -15226,30 +15891,25 @@ struct EpubCheckStageResult {
 }
 
 fn book_pipeline_epubcheck_jar_path() -> Result<PathBuf, String> {
-    let books_dir = local_reading_repo_root()?.join("books");
-    let epubchecker_dir = books_dir.join("node_modules").join("epubchecker");
-    let installed_package = epubchecker_dir.join("package.json");
-    let version = if installed_package.is_file() {
-        let json: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(&installed_package).map_err(|err| err.to_string())?,
-        )
-        .map_err(|err| err.to_string())?;
-        json.get("epubcheckVersion")
-            .and_then(serde_json::Value::as_str)
-            .filter(|version| !version.trim().is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| "epubchecker package.json has no epubcheckVersion.".to_string())?
+    let resource_root = bundled_resource_root()?;
+    let epubchecker_dir = if cfg!(debug_assertions) {
+        resource_root
+            .join("books")
+            .join("node_modules")
+            .join("epubchecker")
     } else {
-        let lock_path = books_dir.join("package-lock.json");
-        let json: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&lock_path).map_err(|err| err.to_string())?)
-                .map_err(|err| err.to_string())?;
-        json.pointer("/packages/node_modules~1epubchecker/version")
-            .and_then(serde_json::Value::as_str)
-            .filter(|version| !version.trim().is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| "books/package-lock.json has no epubchecker version.".to_string())?
+        resource_root.join("vendor").join("epubchecker")
     };
+    let installed_package = epubchecker_dir.join("package.json");
+    let json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&installed_package).map_err(|err| err.to_string())?,
+    )
+    .map_err(|err| err.to_string())?;
+    let version = json
+        .get("epubcheckVersion")
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| !version.trim().is_empty())
+        .ok_or_else(|| "epubchecker package.json has no epubcheckVersion.".to_string())?;
     Ok(epubchecker_dir
         .join("vendors")
         .join(format!("epubcheck-{version}"))
@@ -15264,8 +15924,16 @@ fn build_epubcheck_command(
     stage_id: &str,
 ) -> Result<RunnerCommand, String> {
     let project_root = project_root_from_child(child)?;
-    let jar_path = book_pipeline_epubcheck_jar_path()?;
     let fake_fixture = job.kind != "collection" && job.source.kind == "fake";
+    let jar_path = if fake_fixture {
+        bundled_resource_root()?
+            .join("vendor")
+            .join("epubchecker")
+            .join("fixtures")
+            .join("epubcheck.jar")
+    } else {
+        book_pipeline_epubcheck_jar_path()?
+    };
     if !fake_fixture && !jar_path.is_file() {
         return Err(format!(
             "EPUBCheck vendor jar is missing at {}",
@@ -15686,7 +16354,7 @@ fn build_digest_command(child: &BookPipelineChildJob) -> Result<RunnerCommand, S
             display_path(&project_root),
         ],
         env: Vec::new(),
-        cwd: Some(local_reading_repo_root()?),
+        cwd: Some(bundled_resource_root()?),
         output_dir: project_root,
         attempts,
         accepted_exit_codes: vec![0],

@@ -1,6 +1,6 @@
 """Fenced code blocks in the EPUB builder (issue #121).
 
-`build_epub.js` converts `chapters/final/*.md` with a line-based state machine.
+`build_epub.cjs` converts `chapters/final/*.md` with a line-based state machine.
 Before this suite it had no fence branch, so a fenced block was not merely
 flattened into a paragraph: its lines were fed to the heading, list and raw-HTML
 rules, and `# comment` became a real `<h1>` in the finished book. These tests
@@ -33,8 +33,8 @@ def build_book(chapter_markdown: str) -> tuple[str, str]:
         scripts.mkdir(parents=True)
         final.mkdir(parents=True)
         metadata.mkdir(parents=True)
-        shutil.copy(SOURCE_SCRIPTS / "build_epub.js", scripts / "build_epub.js")
-        shutil.copy(SOURCE_SCRIPTS / "run_python.js", scripts / "run_python.js")
+        shutil.copy(SOURCE_SCRIPTS / "build_epub.cjs", scripts / "build_epub.cjs")
+        shutil.copy(SOURCE_SCRIPTS / "run_python.cjs", scripts / "run_python.cjs")
         (final / "chapter_001.md").write_text(chapter_markdown, encoding="utf-8")
         metadata.joinpath("source_manifest.json").write_text(
             json.dumps({"source_file_name": "Code Fixture.epub", "target_language": "zh-Hans"}),
@@ -42,7 +42,8 @@ def build_book(chapter_markdown: str) -> tuple[str, str]:
         )
 
         completed = subprocess.run(
-            ["node", str(scripts / "build_epub.js")],
+            ["node", str(scripts / "build_epub.cjs")],
+            cwd=book_root,
             check=False,
             capture_output=True,
             text=True,
@@ -155,8 +156,8 @@ class EpubBuilderCodeBlockReviewTests(unittest.TestCase):
             scripts.mkdir(parents=True)
             final.mkdir(parents=True)
             metadata.mkdir(parents=True)
-            shutil.copy(SOURCE_SCRIPTS / "build_epub.js", scripts / "build_epub.js")
-            shutil.copy(SOURCE_SCRIPTS / "run_python.js", scripts / "run_python.js")
+            shutil.copy(SOURCE_SCRIPTS / "build_epub.cjs", scripts / "build_epub.cjs")
+            shutil.copy(SOURCE_SCRIPTS / "run_python.cjs", scripts / "run_python.cjs")
             (final / "chapter_001.md").write_text(
                 "```\n# code heading\n```\n\n# 真正的标题\n\n正文。\n", encoding="utf-8"
             )
@@ -165,7 +166,8 @@ class EpubBuilderCodeBlockReviewTests(unittest.TestCase):
                 encoding="utf-8",
             )
             completed = subprocess.run(
-                ["node", str(scripts / "build_epub.js")],
+                ["node", str(scripts / "build_epub.cjs")],
+                cwd=book_root,
                 check=False,
                 capture_output=True,
                 text=True,

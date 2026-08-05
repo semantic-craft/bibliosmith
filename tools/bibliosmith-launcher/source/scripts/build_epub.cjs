@@ -1,10 +1,10 @@
-// Launcher-owned builder copied into each local reading project at build time.
+// Launcher-owned builder executed from the App's read-only resource directory.
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { randomUUID } = require('crypto');
 
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(process.cwd());
 const finalDir = path.join(root, 'chapters', 'final');
 const frontmatterDir = path.join(root, 'frontmatter');
 const outDir = path.join(root, 'output');
@@ -410,7 +410,12 @@ with zipfile.ZipFile(out, "w") as zf:
         if path.is_file() and path.name != "mimetype":
             zf.write(path, path.relative_to(root).as_posix(), compress_type=zipfile.ZIP_DEFLATED)
 `;
-  const result = spawnSync(process.execPath, [path.join(__dirname, 'run_python.js'), '-c', code], { encoding: 'utf8' });
+  const result = spawnSync(process.execPath, [
+    '--jitless',
+    path.join(__dirname, 'run_python.cjs'),
+    '-c',
+    code,
+  ], { encoding: 'utf8' });
   if (result.status !== 0) {
     process.stderr.write(result.stderr || result.stdout);
     process.exit(result.status || 1);

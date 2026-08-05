@@ -2,14 +2,10 @@
 //!
 //! PaddleOCR (Baidu AI Studio) and MinerU both extract text from scanned or
 //! low-text PDFs; a book with a proper text layer needs neither. Keys live in
-//! the macOS Keychain, one account per service, and are injected into the
-//! conversion worker's subprocess env at run time. The worker's own repo-root
-//! `.env` lookup stays as the fallback — it only adopts `.env` values for
-//! variables not already set, so a Keychain key always wins.
+//! the operating system Keychain, one account per service, and are injected
+//! into the conversion worker's subprocess environment at run time.
 
 use serde::Serialize;
-
-use crate::book_pipeline::translation_engine_repo_root;
 
 const KEYCHAIN_SERVICE: &str = "com.bibliosmith.launcher.models";
 
@@ -19,9 +15,6 @@ const MINERU_ACCOUNT: &str = "ocr/mineru";
 /// The exact variables packages/ocr/scripts/zotero_llm_worker.py reads.
 const PADDLE_KEY_ENV: &str = "BAIDU_PADDLEOCR_TOKEN";
 const MINERU_KEY_ENV: &str = "MINERU_API_TOKEN";
-/// The worker accepts either MinerU spelling; both count as configured.
-const MINERU_KEY_ENV_ALT: &str = "MINERU_TOKEN";
-
 fn account_for(service: &str) -> Result<&'static str, String> {
     match service {
         "paddleocr" => Ok(PADDLE_ACCOUNT),
@@ -30,11 +23,20 @@ fn account_for(service: &str) -> Result<&'static str, String> {
     }
 }
 
+#[cfg(not(test))]
 fn keychain_read(acct: &str) -> Option<String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, acct)
         .ok()?
         .get_password()
         .ok()
+}
+
+// Unit tests must not prompt for, read, or serialize the developer's real
+// Keychain. Command-level tests exercise credential injection with explicit
+// environment pairs instead.
+#[cfg(test)]
+fn keychain_read(_acct: &str) -> Option<String> {
+    None
 }
 
 fn keychain_write(acct: &str, secret: &str) -> Result<(), String> {
@@ -54,7 +56,7 @@ fn keychain_delete(acct: &str) -> Result<(), String> {
 }
 
 /// The `(key_env, secret)` pairs to inject into OCR worker subprocesses.
-/// Empty when nothing is stored — the worker then falls back to `.env`.
+/// Empty when nothing is stored.
 pub fn resolve_credential_env() -> Vec<(String, String)> {
     let mut pairs = Vec::new();
     if let Some(secret) = keychain_read(PADDLE_ACCOUNT) {
@@ -64,35 +66,6 @@ pub fn resolve_credential_env() -> Vec<(String, String)> {
         pairs.push((MINERU_KEY_ENV.to_string(), secret));
     }
     pairs
-}
-
-/// Whether an `.env` file's text sets any of `keys` to a non-empty value.
-/// Mirrors the worker's own parser: `KEY=value` lines, comments ignored.
-fn env_file_declares(content: &str, keys: &[&str]) -> bool {
-    content.lines().any(|raw| {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            return false;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            return false;
-        };
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        keys.contains(&key.trim()) && !value.is_empty()
-    })
-}
-
-/// Shared with `zotero_settings`: both panels have to tell a person whether a
-/// credential is already coming from the repository-root `.env`, and the
-/// worker/CLI both read that file the same way.
-pub(crate) fn env_fallback_declares(keys: &[&str]) -> bool {
-    let Ok(repo_root) = translation_engine_repo_root() else {
-        return false;
-    };
-    let Ok(content) = std::fs::read_to_string(repo_root.join(".env")) else {
-        return false;
-    };
-    env_file_declares(&content, keys)
 }
 
 #[derive(Debug, Serialize)]
@@ -110,17 +83,11 @@ pub struct OcrCredentialsStatus {
     pub mineru: OcrServiceStatus,
 }
 
-fn service_status(account: &str, env_keys: &[&str]) -> OcrServiceStatus {
+fn service_status(account: &str) -> OcrServiceStatus {
     if keychain_read(account).is_some() {
         return OcrServiceStatus {
             configured: true,
             source: Some("keychain".into()),
-        };
-    }
-    if env_fallback_declares(env_keys) {
-        return OcrServiceStatus {
-            configured: true,
-            source: Some("env".into()),
         };
     }
     OcrServiceStatus {
@@ -141,8 +108,8 @@ pub struct OcrConnectionResult {
 #[tauri::command]
 pub fn get_ocr_credentials_status() -> OcrCredentialsStatus {
     OcrCredentialsStatus {
-        paddleocr: service_status(PADDLE_ACCOUNT, &[PADDLE_KEY_ENV]),
-        mineru: service_status(MINERU_ACCOUNT, &[MINERU_KEY_ENV, MINERU_KEY_ENV_ALT]),
+        paddleocr: service_status(PADDLE_ACCOUNT),
+        mineru: service_status(MINERU_ACCOUNT),
     }
 }
 
@@ -217,29 +184,6 @@ fn probe_auth(url: &str, key: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn env_file_detection_requires_a_non_empty_value() {
-        let content = "# comment\nBAIDU_PADDLEOCR_TOKEN=\nMINERU_TOKEN=abc123\n";
-        assert!(!env_file_declares(content, &["BAIDU_PADDLEOCR_TOKEN"]));
-        assert!(env_file_declares(
-            content,
-            &["MINERU_API_TOKEN", "MINERU_TOKEN"]
-        ));
-        assert!(!env_file_declares("", &["BAIDU_PADDLEOCR_TOKEN"]));
-    }
-
-    #[test]
-    fn env_file_detection_strips_quotes() {
-        assert!(env_file_declares(
-            "BAIDU_PADDLEOCR_TOKEN=\"tok\"\n",
-            &["BAIDU_PADDLEOCR_TOKEN"]
-        ));
-        assert!(!env_file_declares(
-            "BAIDU_PADDLEOCR_TOKEN=\"\"\n",
-            &["BAIDU_PADDLEOCR_TOKEN"]
-        ));
-    }
 
     #[test]
     fn unknown_services_are_rejected() {

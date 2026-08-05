@@ -9,7 +9,7 @@
 //! never in a file, so providers and supported billing routes stay distinct.
 //! The active selection, Qwen's optional Workspace ID, and its web-search
 //! preference are not secret and live in launcher config alongside the proxy
-//! and repo settings.
+//! and other non-secret app settings.
 //!
 //! At translate time the Rust runner reads the key from the Keychain and injects
 //! it into the engine subprocess under the slot's `key_env`, so the engine's
@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::book_pipeline::translation_engine_repo_root;
+use crate::book_pipeline::translation_engine_resource_root;
 
 const KEYCHAIN_SERVICE: &str = "com.bibliosmith.launcher.models";
 const QWEN_PROFILE_ID: &str = "qwen";
@@ -88,8 +88,8 @@ fn account(profile_id: &str, config_id: &str) -> String {
     format!("{profile_id}/{config_id}")
 }
 
-fn registry_path(repo_root: &Path) -> std::path::PathBuf {
-    repo_root
+fn registry_path(resource_root: &Path) -> std::path::PathBuf {
+    resource_root
         .join("packages")
         .join("translation-engine")
         .join("src")
@@ -97,8 +97,8 @@ fn registry_path(repo_root: &Path) -> std::path::PathBuf {
         .join("providers.toml")
 }
 
-fn load_slots(repo_root: &Path) -> Result<Vec<RegistrySlot>, String> {
-    let path = registry_path(repo_root);
+fn load_slots(resource_root: &Path) -> Result<Vec<RegistrySlot>, String> {
+    let path = registry_path(resource_root);
     let text = std::fs::read_to_string(&path)
         .map_err(|err| format!("Could not read {}: {err}", path.display()))?;
     let parsed: RegistryFile =
@@ -206,10 +206,9 @@ fn active_model_for_catalog(
 
 /// The selection to write back when the normalization above replaced the stored
 /// one, or None to leave the stored value alone. Pure, so the write-back rule is
-/// unit-testable without a launcher config. A slot that is merely absent — a
-/// repoRoot pointing at a worktree whose registry differs — normalizes to None
-/// and must never clear what the user chose; only a concrete replacement is
-/// persisted.
+/// unit-testable without a launcher config. A slot that is merely absent from
+/// the bundled registry normalizes to None and must never clear what the user
+/// chose; only a concrete replacement is persisted.
 fn active_model_migration(
     stored: Option<&ActiveModel>,
     normalized: Option<&ActiveModel>,
@@ -313,9 +312,9 @@ pub fn openai_compatible_endpoint(
 
 /// `openai_compatible_endpoint` against the real Keychain and launcher config.
 pub fn resolve_openai_compatible_endpoint(
-    repo_root: &Path,
+    resource_root: &Path,
 ) -> Result<OpenAiCompatibleEndpoint, String> {
-    let slots = load_slots(repo_root)?;
+    let slots = load_slots(resource_root)?;
     let stored = crate::read_active_model();
     let active = active_model_for_catalog(&slots, stored);
     openai_compatible_endpoint(&slots, active.as_ref(), keychain_read, || {
@@ -323,11 +322,17 @@ pub fn resolve_openai_compatible_endpoint(
     })
 }
 
+#[cfg(not(test))]
 fn keychain_read(acct: &str) -> Option<String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, acct)
         .ok()?
         .get_password()
         .ok()
+}
+
+#[cfg(test)]
+fn keychain_read(_acct: &str) -> Option<String> {
+    None
 }
 
 fn keychain_write(acct: &str, secret: &str) -> Result<(), String> {
@@ -347,34 +352,33 @@ fn keychain_delete(acct: &str) -> Result<(), String> {
 }
 
 /// Resolve the injection pair for the translate/sample runner using the real
-/// Keychain. Returns None (rather than erroring) whenever no key is stored, so
-/// the runner simply falls back to the engine's `.env` lookup.
+/// Keychain. Returns None (rather than erroring) whenever no key is stored.
 pub fn resolve_credential_env(
-    repo_root: &Path,
+    resource_root: &Path,
     profile_id: &str,
     config_id: &str,
 ) -> Option<(String, String)> {
-    let slots = load_slots(repo_root).ok()?;
+    let slots = load_slots(resource_root).ok()?;
     credential_env(&slots, profile_id, config_id, keychain_read)
 }
 
 pub fn resolve_base_url_env(
-    repo_root: &Path,
+    resource_root: &Path,
     profile_id: &str,
     config_id: &str,
 ) -> Option<(String, String)> {
-    let slots = load_slots(repo_root).ok()?;
+    let slots = load_slots(resource_root).ok()?;
     base_url_env(&slots, profile_id, config_id, |_| {
         crate::read_qwen_workspace_id()
     })
 }
 
 pub fn resolve_web_search_env(
-    repo_root: &Path,
+    resource_root: &Path,
     profile_id: &str,
     config_id: &str,
 ) -> Option<(String, String)> {
-    let slots = load_slots(repo_root).ok()?;
+    let slots = load_slots(resource_root).ok()?;
     web_search_env(&slots, profile_id, config_id, |_| {
         crate::read_qwen_web_search_enabled()
     })
@@ -384,8 +388,8 @@ pub fn resolve_web_search_env(
 
 #[tauri::command]
 pub fn get_model_catalog() -> Result<ModelCatalog, String> {
-    let repo_root = translation_engine_repo_root()?;
-    let slots = load_slots(&repo_root)?;
+    let resource_root = translation_engine_resource_root()?;
+    let slots = load_slots(&resource_root)?;
     let stored = crate::read_active_model();
     let active = active_model_for_catalog(&slots, stored.clone());
     // The normalization used to reach the settings UI and nowhere else: every
@@ -446,8 +450,8 @@ pub fn save_model_credential(
         return Err("API key is empty.".into());
     }
     // Reject an unknown slot rather than storing an orphan key.
-    let repo_root = translation_engine_repo_root()?;
-    let slots = load_slots(&repo_root)?;
+    let resource_root = translation_engine_resource_root()?;
+    let slots = load_slots(&resource_root)?;
     if find_slot(&slots, &profile_id, &config_id).is_none() {
         return Err(format!("Unknown provider slot {profile_id}/{config_id}."));
     }
@@ -469,8 +473,8 @@ pub fn set_active_model(
     if model.is_empty() {
         return Err("Model is empty.".into());
     }
-    let repo_root = translation_engine_repo_root()?;
-    let slots = load_slots(&repo_root)?;
+    let resource_root = translation_engine_resource_root()?;
+    let slots = load_slots(&resource_root)?;
     if find_slot(&slots, &profile_id, &config_id).is_none() {
         return Err(format!("Unknown provider slot {profile_id}/{config_id}."));
     }
@@ -491,8 +495,8 @@ pub fn test_model_connection(
     model: String,
     api_key: Option<String>,
 ) -> Result<ModelConnectionResult, String> {
-    let repo_root = translation_engine_repo_root()?;
-    let slots = load_slots(&repo_root)?;
+    let resource_root = translation_engine_resource_root()?;
+    let slots = load_slots(&resource_root)?;
     let slot = find_slot(&slots, &profile_id, &config_id)
         .ok_or_else(|| format!("Unknown provider slot {profile_id}/{config_id}."))?
         .clone();
@@ -728,9 +732,9 @@ mod tests {
     #[test]
     fn the_shipped_registry_parses_and_carries_the_expected_slots() {
         // This checks the source tree being compiled, not the user's persisted
-        // Launcher repoRoot (which may intentionally point at another worktree).
+        // installed application resources.
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let repo_root = manifest_dir
+        let resource_root = manifest_dir
             .ancestors()
             .find(|path| {
                 path.join("packages")
@@ -740,8 +744,8 @@ mod tests {
                     .join("providers.toml")
                     .is_file()
             })
-            .expect("source repo root");
-        let slots = load_slots(repo_root).expect("registry parses");
+            .expect("source resource root");
+        let slots = load_slots(resource_root).expect("registry parses");
         for (profile, config) in [
             ("deepseek", "deepseek-default"),
             ("kimi", "kimi-default"),
@@ -833,9 +837,9 @@ mod tests {
         assert!(active_model_migration(Some(&stored), normalized.as_ref()).is_none());
     }
 
-    // A repoRoot pointing at a worktree with a different registry makes an
-    // otherwise valid slot look absent. Clearing the selection there would lose
-    // the user's choice for a reason that has nothing to do with them.
+    // An app version with a different bundled registry can make an otherwise
+    // valid stored slot look absent. Clearing the selection there would lose the
+    // user's choice for a reason that has nothing to do with them.
     #[test]
     fn an_absent_slot_leaves_the_stored_selection_alone() {
         let stored = ActiveModel {

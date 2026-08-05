@@ -176,6 +176,8 @@ def load_dotenv(path: Path) -> None:
 
 
 def load_root_dotenv(start: Path = Path(__file__).resolve().parent) -> None:
+    if os.environ.get("BIBLIOSMITH_DISABLE_DOTENV") == "1":
+        return
     for candidate in (start.resolve(), *start.resolve().parents):
         if (candidate / "pyproject.toml").is_file() and (candidate / "packages").is_dir():
             load_dotenv(candidate / ".env")

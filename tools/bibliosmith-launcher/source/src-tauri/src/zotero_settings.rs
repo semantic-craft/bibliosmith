@@ -3,10 +3,8 @@
 //! Reading a library needs nothing: the conversion worker talks to the local
 //! Zotero SQLite. Putting a finished book *into* Zotero goes through the Web
 //! API, which needs a personal API key plus the library it belongs to. The
-//! three values live in the macOS Keychain, one account each, and are injected
-//! into the `zsearch` subprocess env at run time. `zotero_cli` loads the
-//! repository-root `.env` on startup and only adopts values for variables that
-//! are not already set, so a Keychain entry always wins over `.env`.
+//! three values live in the operating system Keychain, one account each, and
+//! are injected into the `zsearch` subprocess environment at run time.
 
 use serde::Serialize;
 
@@ -35,12 +33,18 @@ fn account_for(field: &str) -> Result<&'static str, String> {
         .ok_or_else(|| format!("Unknown Zotero credential field {field}."))
 }
 
+#[cfg(not(test))]
 fn keychain_read(acct: &str) -> Option<String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, acct)
         .ok()?
         .get_password()
         .ok()
         .filter(|secret| !secret.trim().is_empty())
+}
+
+#[cfg(test)]
+fn keychain_read(_acct: &str) -> Option<String> {
+    None
 }
 
 fn keychain_write(acct: &str, secret: &str) -> Result<(), String> {
@@ -100,9 +104,7 @@ fn normalized(field: &str, value: &str) -> Result<String, String> {
 }
 
 /// The `(key_env, value)` pairs to inject into a `zsearch` write subprocess.
-/// Empty when nothing is stored — the CLI then falls back to the repo-root
-/// `.env`, which is how a machine configured before this panel existed keeps
-/// working.
+/// Empty when nothing is stored.
 pub fn resolve_credential_env() -> Vec<(String, String)> {
     FIELDS
         .iter()
@@ -116,7 +118,7 @@ pub fn resolve_credential_env() -> Vec<(String, String)> {
 #[serde(rename_all = "camelCase")]
 pub struct ZoteroFieldStatus {
     pub configured: bool,
-    /// "keychain" or "env"; absent when not configured at all.
+    /// "keychain"; absent when not configured at all.
     pub source: Option<String>,
 }
 
@@ -128,17 +130,11 @@ pub struct ZoteroCredentialsStatus {
     pub library_type: ZoteroFieldStatus,
 }
 
-fn field_status(account: &str, key_env: &str) -> ZoteroFieldStatus {
+fn field_status(account: &str) -> ZoteroFieldStatus {
     if keychain_read(account).is_some() {
         return ZoteroFieldStatus {
             configured: true,
             source: Some("keychain".into()),
-        };
-    }
-    if crate::ocr_settings::env_fallback_declares(&[key_env]) {
-        return ZoteroFieldStatus {
-            configured: true,
-            source: Some("env".into()),
         };
     }
     ZoteroFieldStatus {
@@ -152,9 +148,9 @@ fn field_status(account: &str, key_env: &str) -> ZoteroFieldStatus {
 #[tauri::command]
 pub fn get_zotero_credentials_status() -> ZoteroCredentialsStatus {
     ZoteroCredentialsStatus {
-        api_key: field_status(API_KEY_ACCOUNT, API_KEY_ENV),
-        library_id: field_status(LIBRARY_ID_ACCOUNT, LIBRARY_ID_ENV),
-        library_type: field_status(LIBRARY_TYPE_ACCOUNT, LIBRARY_TYPE_ENV),
+        api_key: field_status(API_KEY_ACCOUNT),
+        library_id: field_status(LIBRARY_ID_ACCOUNT),
+        library_type: field_status(LIBRARY_TYPE_ACCOUNT),
     }
 }
 

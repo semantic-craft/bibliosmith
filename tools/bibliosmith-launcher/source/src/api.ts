@@ -9,7 +9,9 @@ import {
   BookPipelineCustomInstructions,
   BookPipelineJob,
   BookPipelinePreviewConfig,
+  BookPipelineProjectMigration,
   BookPipelineRouteItem,
+  BookPipelineShelfSelection,
   BookPipelineSource,
   BookPipelineState,
   BookPipelineOcrSampleReport,
@@ -20,15 +22,12 @@ import {
   DownloadProgress,
   EmbeddingConnectionResult,
   EmbeddingStatus,
-  LauncherState,
-  BiblioSmithUpdateInfo,
+  WorkspaceState,
   ModelCatalog,
   ModelConnectionResult,
   NetworkProxySettings,
   OcrConnectionResult,
   OcrCredentialsStatus,
-  NodeModulesStatus,
-  ProjectDocument,
   ProxyAutoDetectResult,
   ProxyTestResult,
   RuntimeStatus,
@@ -46,16 +45,12 @@ export function isTauriRuntime() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
 }
 
-function previewState(): LauncherState {
+function previewWorkspaceState(): WorkspaceState {
   return {
-    repoRoot: "BiblioSmith-PublicDomain-Translator",
-    repoReady: true,
-    repoStatus: "ready",
-    branch: "main",
-    localCommit: "preview",
-    localCommitShort: "preview",
-    remoteUrl: "origin",
-    dirty: false,
+    workspaceRoot: "Documents/BiblioSmith",
+    recommendedWorkspaceRoot: "Documents/BiblioSmith",
+    workspaceReady: true,
+    workspaceStatus: "ready",
     proxyConfigured: false,
     platform: "preview",
   };
@@ -498,116 +493,33 @@ function previewZoteroDiscovery(source: BookPipelineSource): BookPipelineZoteroD
   };
 }
 
-export function getLauncherState() {
+export function getWorkspaceState() {
   if (!isTauriRuntime()) {
-    return Promise.resolve(previewState());
+    return Promise.resolve(previewWorkspaceState());
   }
-  return invoke<LauncherState>("get_launcher_state");
+  return invoke<WorkspaceState>("get_workspace_state");
 }
 
-export function chooseRepoFolder() {
+export function createRecommendedWorkspace() {
   if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode.", repoRoot: "D:\\BiblioSmith", requiresDownload: false });
-  }
-  return invoke<ActionResult>("choose_repo_folder");
-}
-
-export function setRepoFolder(repoRoot: string) {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode.", repoRoot, requiresDownload: false });
-  }
-  return invoke<ActionResult>("set_repo_folder", { repoRoot });
-}
-
-export function checkBiblioSmithUpdates(locale = "en") {
-  if (!isTauriRuntime()) {
-    const commits = [
-      {
-        hash: "a1b2c3d",
-        date: "2025-05-25 10:15",
-        title: "新增书籍：《时间简史》全文初译",
-        summary: "添加《时间简史》第一版全文初译，包含第1-10章内容。",
-      },
-      {
-        hash: "d4e5f6a",
-        date: "2025-05-25 09:02",
-        title: "优化术语库匹配算法",
-        summary: "改进术语匹配逻辑，提高长句和复合句的识别准确率。",
-      },
-      {
-        hash: "b7c8d9e",
-        date: "2025-05-24 22:47",
-        title: "修复章节导出格式问题",
-        summary: "修复 Markdown 导出时标题层级丢失的问题。",
-      },
-      {
-        hash: "e0f1a2b",
-        date: "2025-05-24 18:33",
-        title: "更新贡献指南",
-        summary: "补充翻译规范说明，新增常见问题解答部分。",
-      },
-      {
-        hash: "c3d4e5f",
-        date: "2025-05-24 16:11",
-        title: "新增西班牙语翻译支持",
-        summary: "添加西班牙语语言包与基础术语库支持。",
-      },
-      {
-        hash: "f6a7b8c",
-        date: "2025-05-24 12:05",
-        title: "改进 Web 编辑器体验",
-        summary: "优化段落导航与快捷键提示，提升编辑效率。",
-      },
-      {
-        hash: "9d8c7bb",
-        date: "2025-05-23 23:19",
-        title: "修复图片引用路径问题",
-        summary: "修复部分书籍中图片相对路径失效的问题。",
-      },
-    ].map((commit) => ({
-      ...commit,
-      fullMessage: `${commit.title}\n\nZH:\n- ${commit.summary}\n\nEN:\n- Preview English summary for ${commit.hash}.\n\nJA:\n- ${commit.hash} のプレビュー概要。`,
-    }));
-
-    return Promise.resolve<BiblioSmithUpdateInfo>({
-      repoRoot: "BiblioSmith-PublicDomain-Translator",
-      currentCommit: "preview",
-      remoteRef: "origin/main",
-      behindCount: 7,
-      aheadCount: 0,
-      hasUpdate: true,
-      commits,
+    return Promise.resolve<WorkspaceState>({
+      ...previewWorkspaceState(),
+      workspaceReady: true,
+      workspaceStatus: "ready",
     });
   }
-  return invoke<BiblioSmithUpdateInfo>("check_bibliosmith_updates", { locale });
+  return invoke<WorkspaceState>("create_recommended_workspace");
 }
 
-export function prepareBiblioSmithProject(locale = "en") {
+export function chooseAndCreateWorkspace() {
   if (!isTauriRuntime()) {
-    return checkBiblioSmithUpdates(locale);
+    return Promise.resolve<WorkspaceState | null>({
+      ...previewWorkspaceState(),
+      workspaceReady: true,
+      workspaceStatus: "ready",
+    });
   }
-  return invoke<BiblioSmithUpdateInfo>("prepare_bibliosmith_project", { locale });
-}
-
-export function syncBiblioSmithProject(locale = "en") {
-  if (!isTauriRuntime()) {
-    return checkBiblioSmithUpdates(locale);
-  }
-  return invoke<BiblioSmithUpdateInfo>("sync_bibliosmith_project", { locale });
-}
-
-export function updateBiblioSmith() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("update_bibliosmith");
-}
-
-export function cancelBiblioSmithUpdate() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("cancel_bibliosmith_update");
+  return invoke<WorkspaceState | null>("choose_and_create_workspace");
 }
 
 export function getDiagnosticLogSettings() {
@@ -860,34 +772,6 @@ export function testOcrConnection(service: "paddleocr" | "mineru", apiKey?: stri
   });
 }
 
-export function getNodeModulesStatus() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<NodeModulesStatus>({
-      ready: true,
-      running: false,
-      autoInstall: true,
-      repoReady: true,
-      booksDir: "BiblioSmith/books",
-      nodeModulesDir: "BiblioSmith/books/node_modules",
-    });
-  }
-  return invoke<NodeModulesStatus>("get_node_modules_status");
-}
-
-export function setAutoInstallNodeModules(enabled: boolean) {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<NodeModulesStatus>({
-      ready: true,
-      running: false,
-      autoInstall: enabled,
-      repoReady: true,
-      booksDir: "BiblioSmith/books",
-      nodeModulesDir: "BiblioSmith/books/node_modules",
-    });
-  }
-  return invoke<NodeModulesStatus>("set_auto_install_node_modules", { enabled });
-}
-
 export function getRuntimeStatus() {
   if (!isTauriRuntime()) {
     return Promise.resolve<RuntimeStatus>({
@@ -923,20 +807,6 @@ export function startRuntimePrepare() {
   return invoke<ActionResult>("start_runtime_prepare");
 }
 
-export function startNodeModulesInstall() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("start_node_modules_install");
-}
-
-export function cancelNodeModulesInstall(removePartial = false) {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("cancel_node_modules_install", { removePartial });
-}
-
 export function exportLauncherLogs() {
   if (!isTauriRuntime()) {
     return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
@@ -953,50 +823,6 @@ export function recordFrontendActivity(level: string, message: string) {
   return invoke<void>("record_frontend_activity", { level, message });
 }
 
-export function readProjectDocument(kind: "readme" | "howto", locale: string) {
-  if (!isTauriRuntime()) {
-    const content = kind === "readme"
-      ? `# BiblioSmith 本地阅读翻译工作台
-
-<table align="center">
-  <tr>
-    <td align="center"><h3><a href="./README.zh-CN.md">简体中文</a></h3></td>
-    <td align="center"><h3><a href="./docs/guides/how-to-use-local-reading.zh-CN.md">How to use</a></h3></td>
-  </tr>
-</table>
-
-BiblioSmith 用于处理用户已经拥有的本地 EPUB、PDF、论文和书稿。
-
-## 快速开始
-
-- 打开 [How to use](./docs/guides/how-to-use-local-reading.zh-CN.md)
-- 从本地文件创建 \`books/local/\` 项目
-`
-      : `# How to use
-
-## 开始使用
-
-- 在 BiblioSmith Launcher 的流水线页选择本地 EPUB、PDF 或 Markdown 并新建任务。
-- 完成抽取、翻译、审校后，从 output/reading/ 打开产物。
-- 阅读 [README](./README.zh-CN.md)。
-`;
-    return Promise.resolve<ProjectDocument>({
-      kind,
-      path: `preview/${kind}.md`,
-      title: kind === "readme" ? "README" : "How to use",
-      content,
-    });
-  }
-  return invoke<ProjectDocument>("read_project_document", { kind, locale });
-}
-
-export function readProjectDocumentPath(relativePath: string, locale: string) {
-  if (!isTauriRuntime()) {
-    return readProjectDocument(relativePath.toLowerCase().includes("how-to-use") ? "howto" : "readme", locale);
-  }
-  return invoke<ProjectDocument>("read_project_document_path", { relativePath, locale });
-}
-
 export function minimizeMainWindow() {
   if (!isTauriRuntime()) return Promise.resolve();
   return invoke<void>("minimize_main_window");
@@ -1010,20 +836,6 @@ export function toggleMainWindowMaximized() {
 export function closeMainWindowToTray() {
   if (!isTauriRuntime()) return Promise.resolve();
   return invoke<void>("close_main_window_to_tray");
-}
-
-export function openRepoFolder() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("open_repo_folder");
-}
-
-export function openBooksFolder() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("open_books_folder");
 }
 
 export function getBookPipelineState() {
@@ -1195,9 +1007,21 @@ export function retryBookPipelineJob(jobId: string) {
   return invoke<BookPipelineJob>("retry_book_pipeline_job", { jobId });
 }
 
-export function deleteBookPipelineJob(jobId: string, childId?: string | null) {
+export function removeBooksFromShelf(selections: BookPipelineShelfSelection[]) {
   if (!isTauriRuntime()) {
-    previewBookPipelineJobs = previewBookPipelineJobs.filter((job) => job.id !== jobId);
+    const grouped = new Map<string, Set<string | null>>();
+    for (const selection of selections) {
+      const children = grouped.get(selection.jobId) ?? new Set<string | null>();
+      children.add(selection.childId ?? null);
+      grouped.set(selection.jobId, children);
+    }
+    previewBookPipelineJobs = previewBookPipelineJobs.flatMap((job) => {
+      const selectedChildren = grouped.get(job.id);
+      if (!selectedChildren) return [job];
+      if (selectedChildren.has(null)) return [];
+      const children = job.children.filter((child) => !selectedChildren.has(child.id));
+      return children.length === 0 ? [] : [{ ...job, children }];
+    });
     previewBookPipelineRevision += 1;
     return Promise.resolve<BookPipelineState>({
       schemaVersion: BOOK_PIPELINE_STATE_SCHEMA_VERSION,
@@ -1205,7 +1029,31 @@ export function deleteBookPipelineJob(jobId: string, childId?: string | null) {
       jobs: previewBookPipelineJobs,
     });
   }
-  return invoke<BookPipelineState>("delete_book_pipeline_job", {
+  return invoke<BookPipelineState>("remove_books_from_shelf", {
+    selections,
+    explicitApproval: true,
+  });
+}
+
+export function inspectBookPipelineProjectMigration(jobId: string, childId?: string | null) {
+  if (!isTauriRuntime()) {
+    return Promise.resolve<BookPipelineProjectMigration>({
+      required: false,
+      sourceRoot: "",
+      destinationRoot: "",
+    });
+  }
+  return invoke<BookPipelineProjectMigration>("inspect_book_pipeline_project_migration", {
+    jobId,
+    childId: childId ?? null,
+  });
+}
+
+export function migrateBookPipelineProject(jobId: string, childId?: string | null) {
+  if (!isTauriRuntime()) {
+    return getBookPipelineState();
+  }
+  return invoke<BookPipelineState>("migrate_book_pipeline_project", {
     jobId,
     childId: childId ?? null,
     explicitApproval: true,
@@ -1460,18 +1308,6 @@ function listenDownloadProgress(
     void recordFrontendActivity("warning", message).catch(() => undefined);
     return () => undefined;
   });
-}
-
-export function listenBiblioSmithProgress(
-  callback: (payload: DownloadProgress) => void,
-) {
-  return listenDownloadProgress("bibliosmith-project-progress", callback);
-}
-
-export function listenNodeModulesProgress(
-  callback: (payload: DownloadProgress) => void,
-) {
-  return listenDownloadProgress("node-modules-install-progress", callback);
 }
 
 export function listenRuntimeProgress(

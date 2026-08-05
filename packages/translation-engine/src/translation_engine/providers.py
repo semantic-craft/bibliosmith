@@ -547,6 +547,8 @@ def load_root_dotenv(
     environ: MutableMapping[str, str] | None = None,
 ) -> None:
     target = os.environ if environ is None else environ
+    if target.get("BIBLIOSMITH_DISABLE_DOTENV") == "1":
+        return
     root = repo_root or _discover_repo_root(Path(__file__).resolve())
     if root is None:
         return

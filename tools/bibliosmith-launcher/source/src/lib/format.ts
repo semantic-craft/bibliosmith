@@ -1,4 +1,4 @@
-import type { CommitInfo, DownloadProgress } from "../types";
+import type { DownloadProgress } from "../types";
 import type { Copy } from "../i18n";
 
 export function nowLabel() {
@@ -55,8 +55,4 @@ export const UNKNOWN_VALUE = "—";
 export function versionFromDate(date?: string) {
   if (!date) return UNKNOWN_VALUE;
   return `v${date.slice(0, 10).replaceAll("-", ".")}`;
-}
-
-export function commitDate(commit?: CommitInfo) {
-  return commit?.date?.slice(0, 16).replace("T", " ") || UNKNOWN_VALUE;
 }

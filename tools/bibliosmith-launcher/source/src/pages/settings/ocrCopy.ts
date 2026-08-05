@@ -4,9 +4,13 @@ export function ocrCopy(locale: string) {
   const zh = locale.startsWith("zh");
   return {
     title: zh ? "扫描 OCR" : "Scanned-book OCR",
+    modelPicker: zh ? "OCR 模型" : "OCR model",
+    modelPickerDescription: zh
+      ? "选择一个 OCR 服务；下方只显示这一项的配置。"
+      : "Choose one OCR service; only its configuration is shown below.",
     description: zh
-      ? "没有文字层的扫描 PDF 需要云端 OCR 提取文字；自带文字层的书不经过这里。密钥保存在系统钥匙串（Keychain）里，不写入任何文件；仓库根 .env 里已有的密钥继续有效，作为兜底。"
-      : "Scanned PDFs without a text layer need remote OCR to extract text; born-digital books skip this entirely. Keys are stored in the system Keychain, never in a file; a key already in the repository-root .env keeps working as the fallback.",
+      ? "没有文字层的扫描 PDF 需要云端 OCR 提取文字；自带文字层的书不经过这里。密钥只保存在系统钥匙串（Keychain）里，不写入书库或普通配置文件。"
+      : "Scanned PDFs without a text layer need remote OCR to extract text; born-digital books skip this entirely. Keys are stored only in the system Keychain, never in the library or ordinary config files.",
     paddleName: zh ? "PaddleOCR（百度飞桨）" : "PaddleOCR (Baidu)",
     paddleHint: zh ? "扫描书的主力 OCR 路线" : "The main OCR route for scanned books",
     mineruName: zh ? "MinerU 精准解析" : "MinerU Precision Extract",
@@ -20,7 +24,6 @@ export function ocrCopy(locale: string) {
     test: zh ? "测试连接" : "Test connection",
     testing: zh ? "测试中…" : "Testing…",
     configuredKeychain: zh ? "已配置（钥匙串）" : "Key stored (Keychain)",
-    configuredEnv: zh ? "已配置（.env 兜底）" : "Key found (.env fallback)",
     notConfigured: zh ? "未配置" : "No key yet",
     getKey: zh ? "获取密钥 ↗" : "Get a key ↗",
     saved: zh ? "已保存" : "Saved",

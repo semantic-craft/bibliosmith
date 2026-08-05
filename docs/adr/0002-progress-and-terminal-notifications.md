@@ -31,10 +31,9 @@ source titles and paths, logs, errors, artifacts, private text, credentials, and
 the configured endpoint. Delivery failure is recorded as a safe delivery status
 and does not rewrite the pipeline outcome.
 
-`BOOK_PIPELINE_WEBHOOK_URL` is optional and remains environment-only. The GUI
-uses the process environment first, then reads only that named value from the
-repository-root `.env`; it does not load or log the other credentials. With no
-configured endpoint, running the pipeline has no notification side effect.
+`BOOK_PIPELINE_WEBHOOK_URL` is optional and remains process-environment-only.
+The GUI does not read a checkout or workspace `.env`. With no configured
+endpoint, running the pipeline has no notification side effect.
 
 ## Deferred follow-up capabilities
 

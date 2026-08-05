@@ -11,7 +11,10 @@ use std::{
     net::{IpAddr, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Output, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -21,17 +24,15 @@ use tauri::{
     Emitter, Manager, WindowEvent,
 };
 
+mod app_paths;
 mod book_pipeline;
 mod embedding_settings;
 mod model_settings;
 mod ocr_settings;
 mod zotero_settings;
 
-const BIBLIOSMITH_HOME_ENV: &str = "BIBLIOSMITH_HOME";
 const BIBLIOSMITH_PYTHON_ENV: &str = "BIBLIOSMITH_PYTHON";
 const BIBLIOSMITH_JAVA_ENV: &str = "BIBLIOSMITH_JAVA";
-const BIBLIOSMITH_PROGRESS_EVENT: &str = "bibliosmith-project-progress";
-const NODE_MODULES_PROGRESS_EVENT: &str = "node-modules-install-progress";
 const RUNTIME_PROGRESS_EVENT: &str = "runtime-install-progress";
 const TRAY_SHOW_ID: &str = "tray_show";
 const TRAY_HIDE_ID: &str = "tray_hide";
@@ -39,17 +40,9 @@ const TRAY_QUIT_ID: &str = "tray_quit";
 const LAUNCHER_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const LAUNCHER_LOG_BACKUP_COUNT: usize = 0;
 const LAUNCHER_LOG_LEGACY_EXPORT_BACKUP_SCAN_COUNT: usize = 5;
-#[cfg(test)]
-const GIT_LOW_SPEED_LIMIT_BYTES: &str = "1024";
-#[cfg(test)]
-const GIT_LOW_SPEED_TIME_SECONDS: &str = "60";
 const PROXY_TEST_TIMEOUT_SECONDS: u64 = 8;
 const PROXY_PORT_PROBE_TIMEOUT_MS: u64 = 260;
 const GITHUB_CONNECTIVITY_TEST_URL: &str = "https://api.github.com/";
-const NPM_PRIMARY_REGISTRY: &str = "https://registry.npmjs.org/";
-const NPM_CN_REGISTRY: &str = "https://registry.npmmirror.com/";
-const NPM_INSTALL_TIMEOUT_SECONDS: u64 = 15 * 60;
-const EPUBCHECK_RELEASE_DOWNLOAD_BASE: &str = "https://github.com/w3c/epubcheck/releases/download";
 const PYTHON_RUNTIME_VERSION: &str = "3.12.10";
 const PYTHON_RUNTIME_DIR_NAME: &str = "python-3.12.10-embed-amd64";
 const PYTHON_RUNTIME_ARCHIVE: &str = "python-3.12.10-embed-amd64.zip";
@@ -62,32 +55,59 @@ const PYTHON_RUNTIME_URLS: &[&str] = &[
     "https://registry.npmmirror.com/-/binary/python/3.12.10/python-3.12.10-embed-amd64.zip",
 ];
 const JAVA_RUNTIME_VERSION: &str = "17.0.19";
+const JAVA_RUNTIME_SHA256S: [&str; 3] = [
+    "D6D0802E9BB5DA42A61E4891463CDE880F00A7BF5FE2BD41A4FF9260E52C4EBB",
+    "6A2A6998DCCD031A3AA4F10138152B8B4D32859959226FE1FF2BDB1995B5B23B",
+    "A9819DBC00814A849723608D73F8CB8FAE87D5CEF0B322B87277BF9DBED35420",
+];
+#[cfg(target_os = "windows")]
 const JAVA_RUNTIME_DIR_NAME: &str = "zulu17.66.19-ca-jre17.0.19-win_x64";
+#[cfg(target_os = "windows")]
 const JAVA_RUNTIME_ARCHIVE: &str = "zulu17.66.19-ca-jre17.0.19-win_x64.zip";
-const JAVA_RUNTIME_SHA256: &str =
-    "D6D0802E9BB5DA42A61E4891463CDE880F00A7BF5FE2BD41A4FF9260E52C4EBB";
+#[cfg(target_os = "windows")]
+const JAVA_RUNTIME_SHA256: &str = JAVA_RUNTIME_SHA256S[0];
+#[cfg(target_os = "windows")]
 const JAVA_RUNTIME_SIZE_BYTES: u64 = 44_097_076;
+#[cfg(target_os = "windows")]
 const JAVA_RUNTIME_URLS: &[&str] = &[
     "https://cdn.azul.com/zulu/bin/zulu17.66.19-ca-jre17.0.19-win_x64.zip",
     "https://static.azul.com/zulu/bin/zulu17.66.19-ca-jre17.0.19-win_x64.zip",
 ];
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const JAVA_RUNTIME_DIR_NAME: &str = "zulu17.66.19-ca-jre17.0.19-macosx_aarch64";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const JAVA_RUNTIME_ARCHIVE: &str = "zulu17.66.19-ca-jre17.0.19-macosx_aarch64.zip";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const JAVA_RUNTIME_SHA256: &str = JAVA_RUNTIME_SHA256S[1];
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const JAVA_RUNTIME_SIZE_BYTES: u64 = 43_270_182;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const JAVA_RUNTIME_URLS: &[&str] = &[
+    "https://cdn.azul.com/zulu/bin/zulu17.66.19-ca-jre17.0.19-macosx_aarch64.zip",
+    "https://static.azul.com/zulu/bin/zulu17.66.19-ca-jre17.0.19-macosx_aarch64.zip",
+];
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const JAVA_RUNTIME_DIR_NAME: &str = "zulu17.66.19-ca-jre17.0.19-macosx_x64";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const JAVA_RUNTIME_ARCHIVE: &str = "zulu17.66.19-ca-jre17.0.19-macosx_x64.zip";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const JAVA_RUNTIME_SHA256: &str = JAVA_RUNTIME_SHA256S[2];
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const JAVA_RUNTIME_SIZE_BYTES: u64 = 44_287_760;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const JAVA_RUNTIME_URLS: &[&str] = &[
+    "https://cdn.azul.com/zulu/bin/zulu17.66.19-ca-jre17.0.19-macosx_x64.zip",
+    "https://static.azul.com/zulu/bin/zulu17.66.19-ca-jre17.0.19-macosx_x64.zip",
+];
 const RUNTIME_HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 12;
 const RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS: u64 = 180;
 const RUNTIME_PROBE_TIMEOUT_SECONDS: u64 = 6;
-static BIBLIOSMITH_UPDATE_RUNNING: AtomicBool = AtomicBool::new(false);
-static BIBLIOSMITH_UPDATE_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
-static NODE_MODULES_INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
-static NODE_MODULES_INSTALL_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
-static NODE_MODULES_INSTALL_REMOVE_PARTIAL: AtomicBool = AtomicBool::new(false);
 static RUNTIME_PREPARE_RUNNING: AtomicBool = AtomicBool::new(false);
+static LAUNCHER_CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 fn launcher_log_path() -> Result<PathBuf, String> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::config_local_dir)
-        .ok_or_else(|| "无法定位用户本地数据目录。".to_string())?;
-    Ok(base
-        .join("BiblioSmith")
-        .join("launcher")
+    Ok(app_paths::current()?
+        .support_root()
         .join("logs")
         .join("bibliosmith-launcher.log"))
 }
@@ -200,10 +220,6 @@ fn diagnostic_logging_enabled_from_config(config: &LauncherConfig) -> bool {
     config.save_logs.unwrap_or(true)
 }
 
-fn auto_install_node_modules_enabled_from_config(config: &LauncherConfig) -> bool {
-    config.auto_install_node_modules.unwrap_or(true)
-}
-
 pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -221,43 +237,6 @@ where
     })
     .await
     .map_err(|err| format!("后台任务执行失败：{err}"))?
-}
-
-struct BiblioSmithUpdateGuard;
-
-impl BiblioSmithUpdateGuard {
-    fn try_acquire() -> Result<Self, String> {
-        BIBLIOSMITH_UPDATE_RUNNING
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .map(|_| BiblioSmithUpdateGuard)
-            .map_err(|_| "BiblioSmith 项目正在后台更新，请等待当前更新完成。".to_string())
-    }
-}
-
-impl Drop for BiblioSmithUpdateGuard {
-    fn drop(&mut self) {
-        BIBLIOSMITH_UPDATE_CANCEL_REQUESTED.store(false, Ordering::Release);
-        BIBLIOSMITH_UPDATE_RUNNING.store(false, Ordering::Release);
-    }
-}
-
-struct NodeModulesInstallGuard;
-
-impl NodeModulesInstallGuard {
-    fn try_acquire() -> Result<Self, String> {
-        NODE_MODULES_INSTALL_RUNNING
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .map(|_| NodeModulesInstallGuard)
-            .map_err(|_| "EPUB 构建依赖正在后台安装，请等待当前任务完成。".to_string())
-    }
-}
-
-impl Drop for NodeModulesInstallGuard {
-    fn drop(&mut self) {
-        NODE_MODULES_INSTALL_CANCEL_REQUESTED.store(false, Ordering::Release);
-        NODE_MODULES_INSTALL_REMOVE_PARTIAL.store(false, Ordering::Release);
-        NODE_MODULES_INSTALL_RUNNING.store(false, Ordering::Release);
-    }
 }
 
 struct RuntimePrepareGuard;
@@ -278,88 +257,19 @@ impl Drop for RuntimePrepareGuard {
 }
 
 #[derive(Clone)]
-struct BiblioSmithProgressEmitter {
-    app: tauri::AppHandle,
-    locale: Option<String>,
-}
-
-#[derive(Clone)]
-struct NodeModulesProgressEmitter {
-    app: tauri::AppHandle,
-}
-
-#[derive(Clone)]
 struct RuntimeProgressEmitter {
     app: tauri::AppHandle,
 }
 
-// Pull and Http11 are never constructed: these enums enumerate the phases and
-// HTTP versions the helpers below know how to map, and the current tests only
-// exercise a subset. Kept rather than trimmed to the tested subset so the
-// mapping each helper implements stays readable as a whole; allowed explicitly
-// so `-D warnings` does not have to be relaxed for the whole crate.
-#[cfg(test)]
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-enum GitProgressPhase {
-    Clone,
-    Fetch,
-    Pull,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
-enum GitHttpMode {
-    Http2,
-    Http11,
-}
-
-#[cfg(test)]
-impl GitHttpMode {
-    fn value(self) -> &'static str {
-        match self {
-            GitHttpMode::Http2 => "HTTP/2",
-            GitHttpMode::Http11 => "HTTP/1.1",
-        }
-    }
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LauncherState {
-    repo_root: String,
-    repo_ready: bool,
-    repo_status: String,
-    branch: String,
-    local_commit: String,
-    local_commit_short: String,
-    remote_url: String,
-    dirty: bool,
+struct WorkspaceState {
+    workspace_root: String,
+    recommended_workspace_root: String,
+    workspace_ready: bool,
+    workspace_status: app_paths::WorkspaceStatus,
     proxy_configured: bool,
     platform: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct CommitInfo {
-    hash: String,
-    date: String,
-    title: String,
-    summary: String,
-    full_message: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BiblioSmithUpdateInfo {
-    repo_root: String,
-    current_commit: String,
-    remote_ref: String,
-    behind_count: u32,
-    ahead_count: u32,
-    has_update: bool,
-    commits: Vec<CommitInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -367,26 +277,15 @@ struct BiblioSmithUpdateInfo {
 struct ActionResult {
     ok: bool,
     message: String,
-    repo_root: Option<String>,
     requires_download: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectDocument {
-    kind: String,
-    path: String,
-    title: String,
-    content: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct LauncherConfig {
-    repo_root: Option<String>,
+    workspace_root: Option<String>,
     save_logs: Option<bool>,
     proxy: Option<NetworkProxySettings>,
-    auto_install_node_modules: Option<bool>,
     active_model: Option<model_settings::ActiveModel>,
     qwen_workspace_id: Option<String>,
     qwen_web_search_enabled: Option<bool>,
@@ -399,9 +298,7 @@ pub(crate) fn read_active_model() -> Option<model_settings::ActiveModel> {
 pub(crate) fn write_active_model(
     active_model: Option<model_settings::ActiveModel>,
 ) -> Result<(), String> {
-    let mut config = read_launcher_config().unwrap_or_default();
-    config.active_model = active_model;
-    write_launcher_config_file(&config)
+    update_launcher_config(|config| config.active_model = active_model)
 }
 
 pub(crate) fn read_qwen_workspace_id() -> Option<String> {
@@ -418,10 +315,10 @@ pub(crate) fn write_qwen_settings(
     workspace_id: Option<String>,
     web_search_enabled: bool,
 ) -> Result<(), String> {
-    let mut config = read_launcher_config().unwrap_or_default();
-    config.qwen_workspace_id = workspace_id;
-    config.qwen_web_search_enabled = Some(web_search_enabled);
-    write_launcher_config_file(&config)
+    update_launcher_config(|config| {
+        config.qwen_workspace_id = workspace_id;
+        config.qwen_web_search_enabled = Some(web_search_enabled);
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -465,17 +362,6 @@ struct ProxyAutoDetectResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NodeModulesStatus {
-    ready: bool,
-    running: bool,
-    auto_install: bool,
-    repo_ready: bool,
-    books_dir: String,
-    node_modules_dir: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct RuntimeToolStatus {
     ready: bool,
     private_ready: bool,
@@ -514,13 +400,12 @@ struct DiagnosticExportContext {
     launcher_version: String,
     os: String,
     arch: String,
-    repo_root: String,
-    repo_status: String,
+    workspace_root: String,
+    workspace_status: app_paths::WorkspaceStatus,
     save_logs: bool,
     log_dir: String,
     log_max_bytes: u64,
     log_backup_count: usize,
-    bibliosmith_home_set: bool,
     proxy_configured: bool,
 }
 
@@ -577,269 +462,55 @@ struct RuntimePackage {
 }
 
 #[tauri::command]
-async fn get_launcher_state() -> Result<LauncherState, String> {
-    run_blocking(collect_launcher_state).await
+async fn get_workspace_state() -> Result<WorkspaceState, String> {
+    run_blocking(collect_workspace_state).await
 }
 
-fn collect_launcher_state() -> Result<LauncherState, String> {
-    let repo_root = configured_or_default_repo_root()?;
-    let repo_status = repo_status_for_path(&repo_root);
-    let repo_ready = repo_status == "ready";
-    let branch = if repo_ready {
-        git_output(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
-            .map(|value| value.trim().to_string())
-            .unwrap_or_else(|_| "local".into())
-    } else {
-        "not-ready".into()
-    };
-    let local_commit = if repo_ready {
-        git_output(&repo_root, &["rev-parse", "HEAD"])
-            .map(|value| value.trim().to_string())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let local_commit_short = if repo_ready {
-        git_output(&repo_root, &["rev-parse", "--short", "HEAD"])
-            .map(|value| value.trim().to_string())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let remote_url = if repo_ready {
-        git_output(&repo_root, &["remote", "get-url", "origin"])
-            .map(|value| value.trim().to_string())
-            .unwrap_or_else(|_| "local-git".into())
-    } else {
-        "local-git".into()
-    };
-    let dirty = repo_ready
-        && git_output(&repo_root, &["status", "--porcelain"])
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
-    let proxy_configured = is_proxy_configured();
-    let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
+fn collect_workspace_state() -> Result<WorkspaceState, String> {
+    let paths = app_paths::current()?;
+    let config = read_launcher_config();
+    Ok(collect_workspace_state_from(&paths, config.as_ref()))
+}
 
-    Ok(LauncherState {
-        repo_root: display_path(&repo_root),
-        repo_ready,
-        repo_status,
-        branch: branch.trim().to_string(),
-        local_commit: local_commit.trim().to_string(),
-        local_commit_short: local_commit_short.trim().to_string(),
-        remote_url: remote_url.trim().to_string(),
-        dirty,
-        proxy_configured,
-        platform,
-    })
+fn collect_workspace_state_from(
+    paths: &app_paths::AppPaths,
+    config: Option<&LauncherConfig>,
+) -> WorkspaceState {
+    let recommended = paths.recommended_workspace_root();
+    let workspace_root =
+        configured_workspace_root_from_config(config).unwrap_or_else(|| recommended.clone());
+    let workspace_status = app_paths::workspace_status(&workspace_root);
+    WorkspaceState {
+        workspace_root: display_path(&workspace_root),
+        recommended_workspace_root: display_path(&recommended),
+        workspace_ready: workspace_status == app_paths::WorkspaceStatus::Ready,
+        workspace_status,
+        proxy_configured: is_proxy_configured(),
+        platform: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+    }
+}
+
+fn initialize_workspace_at(workspace_root: &Path) -> Result<WorkspaceState, String> {
+    app_paths::create_workspace(workspace_root)?;
+    write_workspace_root(workspace_root)?;
+    collect_workspace_state()
 }
 
 #[tauri::command]
-fn choose_repo_folder() -> Result<ActionResult, String> {
+fn create_recommended_workspace() -> Result<WorkspaceState, String> {
+    let workspace_root = app_paths::current()?.recommended_workspace_root();
+    initialize_workspace_at(&workspace_root)
+}
+
+#[tauri::command]
+fn choose_and_create_workspace() -> Result<Option<WorkspaceState>, String> {
     let Some(folder) = rfd::FileDialog::new()
-        .set_title("选择 BiblioSmith 项目目录")
+        .set_title("选择 BiblioSmith 书库位置")
         .pick_folder()
     else {
-        return Ok(ActionResult {
-            ok: false,
-            message: "已取消选择 BiblioSmith 项目目录。".into(),
-            repo_root: None,
-            requires_download: None,
-        });
+        return Ok(None);
     };
-
-    let (repo_root, requires_download) = if let Some(existing_repo) = repo_root_from_path(&folder) {
-        (existing_repo, false)
-    } else if is_dir_empty(&folder) {
-        (folder, true)
-    } else {
-        return Err(format!(
-            "选择的目录不是 BiblioSmith 项目，且目录里已有其他文件。请选择空目录，或选择包含 AGENTS.md、tools/create_local_book_project.py 和 books/local/ 的 BiblioSmith 项目目录。当前选择：{}",
-            folder.display()
-        ));
-    };
-
-    Ok(ActionResult {
-        ok: true,
-        message: format!("已选择 BiblioSmith 项目目录：{}", repo_root.display()),
-        repo_root: Some(display_path(&repo_root)),
-        requires_download: Some(requires_download),
-    })
-}
-
-#[tauri::command]
-fn set_repo_folder(repo_root: String) -> Result<ActionResult, String> {
-    let repo_root = PathBuf::from(repo_root);
-    if let Some(existing_repo) = active_repo_root_from_configured_path(&repo_root) {
-        write_launcher_config(&existing_repo)?;
-        return Ok(ActionResult {
-            ok: true,
-            message: format!(
-                "已设置 BiblioSmith 项目目录：{}",
-                display_path(&existing_repo)
-            ),
-            repo_root: Some(display_path(&existing_repo)),
-            requires_download: Some(false),
-        });
-    }
-    if !is_dir_empty(&repo_root) {
-        return Err(format!(
-            "选择的目录不是 BiblioSmith 项目，且目录里已有其他文件。请选择空目录，或选择包含 AGENTS.md、tools/create_local_book_project.py 和 books/local/ 的 BiblioSmith 项目目录。当前选择：{}",
-            display_path(&repo_root)
-        ));
-    }
-    write_launcher_config(&repo_root)?;
-    Ok(ActionResult {
-        ok: true,
-        message: format!("已设置 BiblioSmith 项目目录：{}", display_path(&repo_root)),
-        repo_root: Some(display_path(&repo_root)),
-        requires_download: Some(true),
-    })
-}
-
-#[tauri::command]
-async fn check_bibliosmith_updates(
-    locale: Option<String>,
-) -> Result<BiblioSmithUpdateInfo, String> {
-    run_blocking(move || {
-        let repo_root = active_bibliosmith_repo_root()?;
-        if let Ok(_guard) = BiblioSmithUpdateGuard::try_acquire() {
-            bibliosmith_update_info_best_effort(&repo_root, false, locale.as_deref())
-        } else {
-            bibliosmith_update_info_best_effort(&repo_root, false, locale.as_deref())
-        }
-    })
-    .await
-}
-
-#[tauri::command]
-async fn update_bibliosmith(app: tauri::AppHandle) -> Result<ActionResult, String> {
-    run_blocking(move || {
-        let repo_root = active_bibliosmith_repo_root()?;
-        append_launcher_log(
-            "INFO",
-            format!(
-                "update_bibliosmith requested repo_root={}",
-                display_path(&repo_root)
-            ),
-        );
-        let _guard = BiblioSmithUpdateGuard::try_acquire()?;
-        let progress = BiblioSmithProgressEmitter::new(app, None);
-        progress.emit_key(100, "complete");
-        Ok(ActionResult {
-            ok: true,
-            message: "BiblioSmith 内容由本地 git 仓库管理，请直接在仓库中 commit/pull。".into(),
-            repo_root: None,
-            requires_download: None,
-        })
-    })
-    .await
-}
-
-#[tauri::command]
-async fn prepare_bibliosmith_project(
-    app: tauri::AppHandle,
-    locale: Option<String>,
-) -> Result<BiblioSmithUpdateInfo, String> {
-    run_blocking(move || {
-        let repo_root = configured_or_default_repo_root()?;
-        append_launcher_log(
-            "INFO",
-            format!(
-                "prepare_bibliosmith_project requested configured_root={} locale={:?}",
-                display_path(&repo_root),
-                locale
-            ),
-        );
-        let _guard = match BiblioSmithUpdateGuard::try_acquire() {
-            Ok(guard) => guard,
-            Err(error) => {
-                if is_bibliosmith_repo(&repo_root) {
-                    return bibliosmith_update_info_best_effort(
-                        &repo_root,
-                        false,
-                        locale.as_deref(),
-                    );
-                }
-                return Err(error);
-            }
-        };
-        BIBLIOSMITH_UPDATE_CANCEL_REQUESTED.store(false, Ordering::Release);
-        let progress = BiblioSmithProgressEmitter::new(app, locale.clone());
-        progress.emit_key(5, "prepare_start");
-        ensure_bibliosmith_project_exists(&repo_root, Some(&progress))?;
-        let update_result: Result<(), String> = Ok(());
-        progress.emit_key(96, "read_changes");
-        let info = bibliosmith_update_info_best_effort(&repo_root, false, locale.as_deref());
-        if update_result.is_ok() && info.is_ok() {
-            progress.emit_key(100, "complete");
-        }
-        match (update_result, info) {
-            (Ok(_), Ok(info)) => Ok(info),
-            (Err(update_error), _) => Err(update_error),
-            (Ok(_), Err(info_error)) => Err(info_error),
-        }
-    })
-    .await
-}
-
-#[tauri::command]
-async fn sync_bibliosmith_project(
-    app: tauri::AppHandle,
-    locale: Option<String>,
-) -> Result<BiblioSmithUpdateInfo, String> {
-    run_blocking(move || {
-        let repo_root = configured_or_default_repo_root()?;
-        append_launcher_log(
-            "INFO",
-            format!(
-                "sync_bibliosmith_project requested configured_root={} locale={:?}",
-                display_path(&repo_root),
-                locale
-            ),
-        );
-        let _guard = match BiblioSmithUpdateGuard::try_acquire() {
-            Ok(guard) => guard,
-            Err(error) => {
-                if is_bibliosmith_repo(&repo_root) {
-                    return bibliosmith_update_info_best_effort(
-                        &repo_root,
-                        false,
-                        locale.as_deref(),
-                    );
-                }
-                return Err(error);
-            }
-        };
-        BIBLIOSMITH_UPDATE_CANCEL_REQUESTED.store(false, Ordering::Release);
-        let progress = BiblioSmithProgressEmitter::new(app, locale.clone());
-        progress.emit_key(5, "sync_start");
-        ensure_bibliosmith_project_exists(&repo_root, Some(&progress))?;
-        let update_result: Result<(), String> = Ok(());
-        progress.emit_key(96, "read_changes");
-        let info = bibliosmith_update_info_best_effort(&repo_root, false, locale.as_deref());
-        if update_result.is_ok() && info.is_ok() {
-            progress.emit_key(100, "complete");
-        }
-        match (update_result, info) {
-            (Ok(_), Ok(info)) => Ok(info),
-            (Err(update_error), _) => Err(update_error),
-            (Ok(_), Err(info_error)) => Err(info_error),
-        }
-    })
-    .await
-}
-
-#[tauri::command]
-fn cancel_bibliosmith_update() -> Result<ActionResult, String> {
-    append_launcher_log("WARN", "cancel_bibliosmith_update requested");
-    BIBLIOSMITH_UPDATE_CANCEL_REQUESTED.store(true, Ordering::Release);
-    Ok(ActionResult {
-        ok: true,
-        message: "正在停止 BiblioSmith 准备/同步。临时下载目录会在下次重试时自动整理。".into(),
-        repo_root: None,
-        requires_download: None,
-    })
+    initialize_workspace_at(&folder).map(Some)
 }
 
 #[tauri::command]
@@ -951,17 +622,6 @@ async fn auto_detect_proxy_settings(force: Option<bool>) -> Result<ProxyAutoDete
 }
 
 #[tauri::command]
-fn get_node_modules_status() -> Result<NodeModulesStatus, String> {
-    collect_node_modules_status()
-}
-
-#[tauri::command]
-fn set_auto_install_node_modules(enabled: bool) -> Result<NodeModulesStatus, String> {
-    write_auto_install_node_modules_config(enabled)?;
-    collect_node_modules_status()
-}
-
-#[tauri::command]
 fn get_runtime_status() -> Result<RuntimeStatus, String> {
     collect_runtime_status()
 }
@@ -985,7 +645,6 @@ fn start_runtime_prepare(app: tauri::AppHandle) -> Result<ActionResult, String> 
         return Ok(ActionResult {
             ok: true,
             message: "检测到可用 Python / Java 运行环境，直接进入 Launcher。".into(),
-            repo_root: None,
             requires_download: Some(false),
         });
     }
@@ -997,7 +656,6 @@ fn start_runtime_prepare(app: tauri::AppHandle) -> Result<ActionResult, String> 
         return Ok(ActionResult {
             ok: true,
             message: "Python / Java 运行环境正在准备中...".into(),
-            repo_root: None,
             requires_download: Some(true),
         });
     }
@@ -1044,110 +702,7 @@ fn start_runtime_prepare(app: tauri::AppHandle) -> Result<ActionResult, String> 
     Ok(ActionResult {
         ok: true,
         message: "正在准备缺失的 Python / Java 运行环境...".into(),
-        repo_root: None,
         requires_download: Some(true),
-    })
-}
-
-#[tauri::command]
-fn start_node_modules_install(app: tauri::AppHandle) -> Result<ActionResult, String> {
-    let repo_root = active_bibliosmith_repo_root()?;
-    if books_node_modules_ready(&repo_root) {
-        return Ok(ActionResult {
-            ok: true,
-            message: "EPUB 构建依赖已准备完成。".into(),
-            repo_root: None,
-            requires_download: None,
-        });
-    }
-    let guard = NodeModulesInstallGuard::try_acquire()?;
-    NODE_MODULES_INSTALL_CANCEL_REQUESTED.store(false, Ordering::Release);
-    NODE_MODULES_INSTALL_REMOVE_PARTIAL.store(false, Ordering::Release);
-    let emitter = NodeModulesProgressEmitter::new(app);
-    emitter.emit(
-        1.0,
-        0,
-        0,
-        "正在后台安装 EPUB 构建依赖...".into(),
-        Some("downloading"),
-    );
-    thread::spawn(move || {
-        let _guard = guard;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ensure_books_node_modules(&repo_root, Some(&emitter))
-        }))
-        .map_err(|payload| {
-            format!(
-                "EPUB 构建依赖安装线程异常：{}",
-                panic_payload_to_string(payload.as_ref())
-            )
-        })
-        .and_then(|result| result);
-        match result {
-            Ok(()) => {
-                append_launcher_log(
-                    "INFO",
-                    format!(
-                        "books/node_modules install completed repo_root={}",
-                        display_path(&repo_root)
-                    ),
-                );
-                emitter.emit(
-                    100.0,
-                    100,
-                    100,
-                    "EPUB 构建依赖已准备完成。".into(),
-                    Some("success"),
-                );
-            }
-            Err(error) if NODE_MODULES_INSTALL_CANCEL_REQUESTED.load(Ordering::Acquire) => {
-                let remove_partial = NODE_MODULES_INSTALL_REMOVE_PARTIAL.load(Ordering::Acquire);
-                if remove_partial {
-                    if let Err(clean_error) = remove_node_modules_dir_safely(&repo_root) {
-                        append_launcher_log(
-                            "WARN",
-                            format!("remove partial node_modules failed: {clean_error}"),
-                        );
-                    }
-                }
-                emitter.emit(
-                    0.0,
-                    0,
-                    100,
-                    "EPUB 构建依赖安装已停止，可重试。".into(),
-                    Some("stopped"),
-                );
-                append_launcher_log("WARN", format!("node_modules install stopped: {error}"));
-            }
-            Err(error) => {
-                let message = format!("EPUB 构建依赖安装失败：{error}。后续可让 AI 继续补充安装。");
-                emitter.emit(0.0, 0, 100, message.clone(), Some("failed"));
-                append_launcher_log("ERROR", message);
-            }
-        }
-    });
-    Ok(ActionResult {
-        ok: true,
-        message: "正在后台安装 EPUB 构建依赖，不影响继续使用 Launcher。".into(),
-        repo_root: None,
-        requires_download: None,
-    })
-}
-
-#[tauri::command]
-fn cancel_node_modules_install(remove_partial: Option<bool>) -> Result<ActionResult, String> {
-    let remove_partial = remove_partial.unwrap_or(false);
-    NODE_MODULES_INSTALL_REMOVE_PARTIAL.store(remove_partial, Ordering::Release);
-    NODE_MODULES_INSTALL_CANCEL_REQUESTED.store(true, Ordering::Release);
-    Ok(ActionResult {
-        ok: true,
-        message: if remove_partial {
-            "正在取消 EPUB 构建依赖安装，并清理未完成的 node_modules。".into()
-        } else {
-            "正在停止 EPUB 构建依赖安装，可稍后重试。".into()
-        },
-        repo_root: None,
-        requires_download: None,
     })
 }
 
@@ -1160,7 +715,6 @@ fn export_launcher_logs() -> Result<ActionResult, String> {
         return Ok(ActionResult {
             ok: false,
             message: "已取消导出 LOG。".into(),
-            repo_root: None,
             requires_download: None,
         });
     };
@@ -1178,7 +732,6 @@ fn export_launcher_logs() -> Result<ActionResult, String> {
     Ok(ActionResult {
         ok: true,
         message: format!("已导出 LOG：{}", display_path(&export_dir)),
-        repo_root: None,
         requires_download: None,
     })
 }
@@ -1193,31 +746,6 @@ fn record_frontend_activity(level: String, message: String) -> Result<(), String
     };
     append_launcher_log(normalized_level, message);
     Ok(())
-}
-
-#[tauri::command]
-fn read_project_document(kind: String, locale: String) -> Result<ProjectDocument, String> {
-    let repo_root = active_bibliosmith_repo_root()?;
-    let relative_path = project_document_candidates(&kind, &locale)
-        .into_iter()
-        .find(|path| repo_root.join(path).is_file())
-        .ok_or_else(|| format!("没有找到 {kind} 文档。请确认 BiblioSmith 项目已准备完成。"))?;
-    read_project_document_file(&repo_root, &relative_path, &kind)
-}
-
-#[tauri::command]
-fn read_project_document_path(
-    relative_path: String,
-    locale: String,
-) -> Result<ProjectDocument, String> {
-    let repo_root = active_bibliosmith_repo_root()?;
-    let safe_path = safe_project_relative_path(&relative_path)?;
-    let full_path = repo_root.join(&safe_path);
-    if !full_path.is_file() {
-        return read_project_document(document_kind_from_path(&safe_path), locale);
-    }
-    let kind = document_kind_from_path(&safe_path);
-    read_project_document_file(&repo_root, &safe_path, &kind)
 }
 
 #[tauri::command]
@@ -1249,264 +777,6 @@ fn close_main_window_to_tray(app: tauri::AppHandle) -> Result<(), String> {
         .get_webview_window("main")
         .ok_or_else(|| "无法定位 BiblioSmith Launcher 主窗口。".to_string())?;
     window.hide().map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn open_repo_folder() -> Result<ActionResult, String> {
-    let repo_root = configured_or_default_repo_root()?;
-    let target = if repo_root.exists() {
-        repo_root.clone()
-    } else {
-        nearest_existing_path(&repo_root)
-    };
-    open::that(&target).map_err(|err| err.to_string())?;
-    Ok(ActionResult {
-        ok: true,
-        message: format!("已打开：{}", display_path(&target)),
-        repo_root: None,
-        requires_download: None,
-    })
-}
-
-fn nearest_existing_path(path: &Path) -> PathBuf {
-    path.ancestors()
-        .find(|ancestor| ancestor.exists())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| path.to_path_buf())
-}
-
-#[tauri::command]
-fn open_books_folder() -> Result<ActionResult, String> {
-    let repo_root = active_bibliosmith_repo_root()?;
-    let preferred = repo_root.join("books").join("zh-Hans");
-    let target = if preferred.exists() {
-        preferred
-    } else {
-        repo_root.join("books")
-    };
-    open::that(&target).map_err(|err| err.to_string())?;
-    Ok(ActionResult {
-        ok: true,
-        message: format!("已打开：{}", display_path(&target)),
-        repo_root: None,
-        requires_download: None,
-    })
-}
-
-#[cfg(test)]
-fn git_transfer_args(args: &[&str]) -> Vec<String> {
-    git_transfer_args_for_mode(args, GitHttpMode::Http2)
-}
-
-#[cfg(test)]
-fn git_transfer_args_for_mode(args: &[&str], http_mode: GitHttpMode) -> Vec<String> {
-    let mut git_args = vec![
-        "-c".to_string(),
-        format!("http.version={}", http_mode.value()),
-        "-c".to_string(),
-        format!("http.lowSpeedLimit={GIT_LOW_SPEED_LIMIT_BYTES}"),
-        "-c".to_string(),
-        format!("http.lowSpeedTime={GIT_LOW_SPEED_TIME_SECONDS}"),
-        "-c".to_string(),
-        "http.postBuffer=524288000".to_string(),
-    ];
-    if let Some(proxy_url) = configured_proxy_url_best_effort() {
-        git_args.push("-c".to_string());
-        git_args.push(format!("http.proxy={proxy_url}"));
-    }
-    git_args.extend(args.iter().map(|arg| (*arg).to_string()));
-    git_args
-}
-
-// Only terminate_process_tree's Windows branch calls this, so it is dead code
-// on the macOS build CI lints; the unit test below covers it on every platform.
-#[cfg(any(target_os = "windows", test))]
-fn taskkill_tree_args(pid: u32) -> Vec<String> {
-    vec![
-        "/PID".to_string(),
-        pid.to_string(),
-        "/T".to_string(),
-        "/F".to_string(),
-    ]
-}
-
-fn terminate_process_tree(child: &mut std::process::Child, reason: &str) {
-    let pid = child.id();
-    append_launcher_log(
-        "WARN",
-        format!("terminating process tree pid={pid} reason={reason}"),
-    );
-
-    #[cfg(target_os = "windows")]
-    {
-        let taskkill_args = taskkill_tree_args(pid);
-        let mut command = Command::new("taskkill");
-        command
-            .args(&taskkill_args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        command.creation_flags(0x08000000);
-        match command.output() {
-            Ok(output) => {
-                append_launcher_log(
-                    "WARN",
-                    format!(
-                        "taskkill completed pid={pid} reason={reason} status={} stdout={} stderr={}",
-                        output.status,
-                        String::from_utf8_lossy(&output.stdout).trim(),
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ),
-                );
-            }
-            Err(error) => {
-                append_launcher_log(
-                    "ERROR",
-                    format!("taskkill failed pid={pid} reason={reason}: {error}"),
-                );
-                let _ = child.kill();
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = child.kill();
-    }
-}
-
-fn git_output(repo_root: &Path, args: &[&str]) -> Result<String, String> {
-    append_launcher_log(
-        "DEBUG",
-        format!("git start cwd={} args={args:?}", display_path(repo_root)),
-    );
-    let mut command = Command::new("git");
-    command.args(args).current_dir(repo_root);
-    apply_network_env(&mut command, Some(repo_root));
-    #[cfg(target_os = "windows")]
-    command.creation_flags(0x08000000);
-    let output = command.output().map_err(|err| {
-        let message = format!(
-            "无法执行 git：{err}。请确认已安装 Git，或重新运行 BiblioSmith Launcher 安装包。"
-        );
-        append_launcher_log(
-            "ERROR",
-            format!(
-                "git spawn failed cwd={} args={args:?}: {message}",
-                display_path(repo_root)
-            ),
-        );
-        message
-    })?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        append_launcher_log(
-            "DEBUG",
-            format!(
-                "git ok cwd={} args={args:?} stdout={stdout}",
-                display_path(repo_root)
-            ),
-        );
-        Ok(stdout)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
-            format!("git {args:?} 执行失败")
-        } else {
-            stderr
-        };
-        append_launcher_log(
-            "ERROR",
-            format!(
-                "git failed cwd={} args={args:?}: {message}",
-                display_path(repo_root)
-            ),
-        );
-        Err(message)
-    }
-}
-
-#[cfg(test)]
-fn should_retry_git_transfer(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    !lower.contains("已停止")
-        && (lower.contains("curl 18")
-            || lower.contains("early eof")
-            || lower.contains("invalid index-pack")
-            || lower.contains("unexpected disconnect")
-            || lower.contains("rpc failed")
-            || lower.contains("http/2")
-            || lower.contains("http2")
-            || lower.contains("stream")
-            || lower.contains("connection")
-            || lower.contains("timed out")
-            || lower.contains("timeout")
-            || lower.contains("operation too slow"))
-}
-
-#[cfg(test)]
-fn git_progress_fragments_from_chunk(pending: &mut String, chunk: &str) -> Vec<String> {
-    let mut fragments = Vec::new();
-    for character in chunk.chars() {
-        if character == '\r' || character == '\n' {
-            if !pending.trim().is_empty() {
-                fragments.push(pending.trim().to_string());
-            }
-            pending.clear();
-        } else {
-            pending.push(character);
-        }
-    }
-    fragments
-}
-
-fn ensure_bibliosmith_project_exists(
-    repo_root: &Path,
-    _progress: Option<&BiblioSmithProgressEmitter>,
-) -> Result<bool, String> {
-    append_launcher_log(
-        "INFO",
-        format!(
-            "ensure_bibliosmith_project_exists repo_root={} status={}",
-            display_path(repo_root),
-            repo_status_for_path(repo_root)
-        ),
-    );
-    if is_bibliosmith_repo(repo_root) {
-        write_launcher_config(repo_root)?;
-        return Ok(false);
-    }
-
-    if repo_root.exists() && !is_dir_empty(repo_root) {
-        return Err(format!(
-            "BiblioSmith 项目目录已存在但不是有效项目：{}。请在设置里选择一个空目录，或选择已有 BiblioSmith 项目目录。",
-            display_path(repo_root)
-        ));
-    }
-
-    Err(format!(
-        "Launcher 已不再自动下载 BiblioSmith 内容：{}。请在设置里选择本地 bibliosmith 仓库目录。",
-        display_path(repo_root)
-    ))
-}
-
-fn download_progress_detail(downloaded: u64, total: u64, elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs_f64().max(0.1);
-    let speed_bytes_per_second = downloaded as f64 / seconds;
-    if total > 0 {
-        let percent = ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
-        format!(
-            "{percent:.2}% ({} / {}, {}/s)",
-            format_kb(downloaded as f64),
-            format_kb(total as f64),
-            format_kb(speed_bytes_per_second)
-        )
-    } else {
-        format!(
-            "{} ({}/s)",
-            format_kb(downloaded as f64),
-            format_kb(speed_bytes_per_second)
-        )
-    }
 }
 
 fn format_kb(bytes: f64) -> String {
@@ -1711,170 +981,10 @@ fn safe_archive_entry_relative_path(name: &str) -> Result<PathBuf, String> {
     }
     if !has_relative {
         return Err(format!(
-            "BiblioSmith archive 条目路径缺少仓库内相对路径：{name}"
+            "BiblioSmith archive 条目路径缺少可解压的相对路径：{name}"
         ));
     }
     Ok(relative)
-}
-
-fn ensure_books_node_modules(
-    repo_root: &Path,
-    progress: Option<&NodeModulesProgressEmitter>,
-) -> Result<(), String> {
-    let books_dir = repo_root.join("books");
-    let package_json = books_dir.join("package.json");
-    let package_lock = books_dir.join("package-lock.json");
-    if !package_json.is_file() {
-        append_launcher_log(
-            "WARN",
-            format!(
-                "skip npm install because books/package.json is missing repo_root={}",
-                display_path(repo_root)
-            ),
-        );
-        return Ok(());
-    }
-    if books_node_modules_ready(repo_root) {
-        append_launcher_log(
-            "INFO",
-            format!(
-                "books/node_modules already ready repo_root={}",
-                display_path(repo_root)
-            ),
-        );
-        if let Some(emitter) = progress {
-            emitter.emit(
-                100.0,
-                100,
-                100,
-                "EPUB 构建依赖已准备完成。".into(),
-                Some("success"),
-            );
-        }
-        return Ok(());
-    }
-    if let Some(emitter) = progress {
-        emitter.emit(
-            1.0,
-            0,
-            estimate_node_modules_total_bytes(&books_dir),
-            "正在后台安装 EPUB 构建依赖...".into(),
-            Some("downloading"),
-        );
-    }
-    if books_node_modules_package_installed(repo_root) {
-        append_launcher_log(
-            "INFO",
-            format!(
-                "books/node_modules package already exists; preparing epubcheck vendor only repo_root={}",
-                display_path(repo_root)
-            ),
-        );
-        if let Some(emitter) = progress {
-            emitter.emit(
-                68.0,
-                0,
-                estimate_node_modules_total_bytes(&books_dir),
-                "node_modules 已存在，正在补齐 EPUB 校验工具...".into(),
-                Some("downloading"),
-            );
-        }
-        return ensure_epubchecker_vendor(&books_dir, progress);
-    }
-    let primary = run_npm_install(
-        repo_root,
-        &books_dir,
-        &package_lock,
-        NPM_PRIMARY_REGISTRY,
-        progress,
-    );
-    match primary {
-        Ok(_) => Ok(()),
-        Err(primary_error) => {
-            if NODE_MODULES_INSTALL_CANCEL_REQUESTED.load(Ordering::Acquire) {
-                return Err(primary_error);
-            }
-            append_launcher_log(
-                "WARN",
-                format!(
-                    "npm install with primary registry failed, retrying CN mirror: {primary_error}"
-                ),
-            );
-            if let Some(emitter) = progress {
-                emitter.emit(
-                    48.0,
-                    0,
-                    estimate_node_modules_total_bytes(&books_dir),
-                    "默认 npm registry 失败，正在切换国内镜像重试...".into(),
-                    Some("downloading"),
-                );
-            }
-            run_npm_install(repo_root, &books_dir, &package_lock, NPM_CN_REGISTRY, progress).map_err(|mirror_error| {
-                format!(
-                    "BiblioSmith 项目已下载，但 books/node_modules 自动安装失败。默认 registry：{primary_error}；国内镜像重试：{mirror_error}"
-                )
-            })
-        }
-    }?;
-    ensure_epubchecker_vendor(&books_dir, progress)
-}
-
-fn run_npm_install(
-    repo_root: &Path,
-    books_dir: &Path,
-    package_lock: &Path,
-    registry: &str,
-    progress: Option<&NodeModulesProgressEmitter>,
-) -> Result<(), String> {
-    let args = npm_install_args(package_lock, registry);
-    command_output_with_timeout_and_node_progress(
-        books_dir,
-        Some(repo_root),
-        npm_program(),
-        &args,
-        Duration::from_secs(NPM_INSTALL_TIMEOUT_SECONDS),
-        "npm install",
-        progress,
-    )?;
-    Ok(())
-}
-
-fn npm_install_args(package_lock: &Path, registry: &str) -> Vec<String> {
-    let mut args = if package_lock.is_file() {
-        vec!["ci".to_string()]
-    } else {
-        vec!["install".to_string()]
-    };
-    args.extend([
-        "--omit=dev".to_string(),
-        "--ignore-scripts".to_string(),
-        "--no-audit".to_string(),
-        "--fund=false".to_string(),
-        format!("--registry={registry}"),
-        "--replace-registry-host=always".to_string(),
-        "--fetch-retries=3".to_string(),
-        "--fetch-retry-mintimeout=10000".to_string(),
-        "--fetch-retry-maxtimeout=60000".to_string(),
-    ]);
-    args
-}
-
-fn collect_node_modules_status() -> Result<NodeModulesStatus, String> {
-    let repo_root = configured_or_default_repo_root()?;
-    let repo_ready = is_bibliosmith_repo(&repo_root);
-    let books_dir = repo_root.join("books");
-    let node_modules_dir = books_dir.join("node_modules");
-    Ok(NodeModulesStatus {
-        ready: repo_ready && books_node_modules_ready(&repo_root),
-        running: NODE_MODULES_INSTALL_RUNNING.load(Ordering::Acquire),
-        auto_install: read_launcher_config()
-            .as_ref()
-            .map(auto_install_node_modules_enabled_from_config)
-            .unwrap_or(true),
-        repo_ready,
-        books_dir: display_path(&books_dir),
-        node_modules_dir: display_path(&node_modules_dir),
-    })
 }
 
 fn runtime_packages() -> [RuntimePackage; 2] {
@@ -1902,7 +1012,10 @@ fn runtime_packages() -> [RuntimePackage; 2] {
 
 fn collect_runtime_status() -> Result<RuntimeStatus, String> {
     let root = runtime_root()?;
+    #[cfg(target_os = "windows")]
     let python = collect_runtime_tool_status(runtime_packages()[0], &root);
+    #[cfg(not(target_os = "windows"))]
+    let python = collect_bundled_uv_python_status();
     let java = collect_runtime_tool_status(runtime_packages()[1], &root);
     let private_ready = python.private_ready && java.private_ready;
     let status = RuntimeStatus {
@@ -1917,6 +1030,33 @@ fn collect_runtime_status() -> Result<RuntimeStatus, String> {
         set_process_runtime_envs_from_status(&status);
     }
     Ok(status)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn collect_bundled_uv_python_status() -> RuntimeToolStatus {
+    let bundled = app_paths::current()
+        .ok()
+        .map(|paths| paths.runtime_bin_root().join("uv"));
+    let development = cfg!(debug_assertions)
+        .then(|| command_first_stdout_path("which", &["uv"]))
+        .flatten();
+    let path = bundled
+        .filter(|path| path.is_file())
+        .or(development)
+        .map(|path| display_path(&path));
+    let ready = path.is_some();
+    RuntimeToolStatus {
+        ready,
+        private_ready: ready,
+        version: "managed by bundled uv".into(),
+        source: ready.then(|| "bundled_uv".into()),
+        path,
+        message: if ready {
+            "Python 由 BiblioSmith 随包 uv 管理。".into()
+        } else {
+            "BiblioSmith 随包 uv 缺失，无法管理 Python。".into()
+        },
+    }
 }
 
 fn collect_runtime_tool_status(package: RuntimePackage, root: &Path) -> RuntimeToolStatus {
@@ -1995,10 +1135,7 @@ fn runtime_tool_log_summary(status: &RuntimeToolStatus) -> String {
 }
 
 fn runtime_root() -> Result<PathBuf, String> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::config_local_dir)
-        .ok_or_else(|| "无法定位用户本地数据目录。".to_string())?;
-    Ok(base.join("BiblioSmith").join("runtimes"))
+    Ok(app_paths::current()?.support_root().join("runtimes"))
 }
 
 fn runtime_install_dir_from_root(root: &Path, package: RuntimePackage) -> PathBuf {
@@ -2006,8 +1143,8 @@ fn runtime_install_dir_from_root(root: &Path, package: RuntimePackage) -> PathBu
         .join(package.install_dir_name)
 }
 
-fn runtime_downloads_dir_from_root(root: &Path) -> PathBuf {
-    root.join("downloads")
+fn runtime_downloads_dir_for(paths: &app_paths::AppPaths) -> PathBuf {
+    paths.cache_root().join("runtimes").join("downloads")
 }
 
 fn runtime_private_executable_from_root(root: &Path, package: RuntimePackage) -> Option<PathBuf> {
@@ -2054,7 +1191,7 @@ pub(crate) fn managed_java_executable() -> Option<PathBuf> {
 }
 
 /// The Python counterpart, for the bilingual builder the runner spawns directly.
-/// `run_python.js` already honours `BIBLIOSMITH_PYTHON`; the Rust side has to
+/// `run_python.cjs` already honours `BIBLIOSMITH_PYTHON`; the Rust side has to
 /// agree, or "运行时准备" reports green while the stage runs a different
 /// interpreter.
 pub(crate) fn managed_python_executable() -> Option<PathBuf> {
@@ -2389,14 +1526,20 @@ fn prepare_private_runtimes(
     _app: &tauri::AppHandle,
     progress: Option<&RuntimeProgressEmitter>,
 ) -> Result<(), String> {
+    let paths = app_paths::current()?;
     let root = runtime_root()?;
+    let downloads_dir = runtime_downloads_dir_for(&paths);
     fs::create_dir_all(&root).map_err(|err| err.to_string())?;
+    fs::create_dir_all(&downloads_dir).map_err(|err| err.to_string())?;
     append_launcher_log(
         "INFO",
         format!("runtime prepare private root={}", display_path(&root)),
     );
     let packages = runtime_packages();
     for (index, package) in packages.iter().enumerate() {
+        if package.kind == RuntimeKind::Python && !cfg!(target_os = "windows") {
+            continue;
+        }
         if let Some(executable) = runtime_resolved_executable(*package) {
             append_launcher_log(
                 "INFO",
@@ -2418,7 +1561,7 @@ fn prepare_private_runtimes(
             }
             continue;
         }
-        prepare_runtime_package(&root, *package, progress, index)?;
+        prepare_runtime_package(&root, &downloads_dir, *package, progress, index)?;
     }
     if collect_runtime_status()?.ready {
         append_launcher_log("INFO", "runtime prepare private runtimes verified ready");
@@ -2434,6 +1577,7 @@ fn prepare_private_runtimes(
 
 fn prepare_runtime_package(
     root: &Path,
+    downloads_dir: &Path,
     package: RuntimePackage,
     progress: Option<&RuntimeProgressEmitter>,
     index: usize,
@@ -2441,8 +1585,7 @@ fn prepare_runtime_package(
     let start = if index == 0 { 2.0 } else { 47.0 };
     let download_end = if index == 0 { 38.0 } else { 83.0 };
     let extract_end = if index == 0 { 45.0 } else { 92.0 };
-    let downloads_dir = runtime_downloads_dir_from_root(root);
-    fs::create_dir_all(&downloads_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(downloads_dir).map_err(|err| err.to_string())?;
     let archive = downloads_dir.join(package.archive_name);
     let mut last_error = String::new();
     append_launcher_log(
@@ -2723,486 +1866,6 @@ fn format_runtime_percent(value: f64) -> String {
     format!("{:.2}%", clamp_progress_percent(value))
 }
 
-fn books_node_modules_ready(repo_root: &Path) -> bool {
-    epubchecker_vendor_jar_path(&repo_root.join("books")).is_some_and(|path| path.is_file())
-}
-
-fn books_node_modules_package_installed(repo_root: &Path) -> bool {
-    repo_root
-        .join("books")
-        .join("node_modules")
-        .join("epubchecker")
-        .join("package.json")
-        .is_file()
-}
-
-fn ensure_epubchecker_vendor(
-    books_dir: &Path,
-    progress: Option<&NodeModulesProgressEmitter>,
-) -> Result<(), String> {
-    let epubchecker_dir = books_dir.join("node_modules").join("epubchecker");
-    if !epubchecker_dir.join("package.json").is_file() {
-        return Err("npm 已完成但未找到 epubchecker 依赖。".into());
-    }
-    let version = epubchecker_epubcheck_version(&epubchecker_dir)?;
-    let jar = epubchecker_vendor_jar_path(books_dir)
-        .ok_or_else(|| "无法解析 epubcheck vendor jar 路径。".to_string())?;
-    if jar.is_file() {
-        append_launcher_log(
-            "INFO",
-            format!("epubcheck vendor already ready jar={}", display_path(&jar)),
-        );
-        return Ok(());
-    }
-
-    let vendors_dir = epubchecker_dir.join("vendors");
-    let archive_file = epubchecker_dir.join(format!("epubcheck-{version}.zip"));
-    let url = epubcheck_download_url(&version);
-    if let Some(emitter) = progress {
-        emitter.emit(
-            72.0,
-            0,
-            estimate_node_modules_total_bytes(books_dir),
-            format!("正在下载 EPUB 校验工具 epubcheck {version}..."),
-            Some("downloading"),
-        );
-    }
-    download_epubcheck_archive_file(&version, &url, &archive_file, progress)?;
-    if NODE_MODULES_INSTALL_CANCEL_REQUESTED.load(Ordering::Acquire) {
-        return Err("EPUB 构建依赖安装已停止。".into());
-    }
-    if let Some(emitter) = progress {
-        let size = file_size(&archive_file);
-        emitter.emit(
-            92.0,
-            size,
-            size,
-            format!("正在解压 EPUB 校验工具 epubcheck {version}..."),
-            Some("downloading"),
-        );
-    }
-    if vendors_dir.exists() {
-        fs::remove_dir_all(&vendors_dir).map_err(|err| err.to_string())?;
-    }
-    fs::create_dir_all(&vendors_dir).map_err(|err| err.to_string())?;
-    extract_zip_archive(&archive_file, &vendors_dir)?;
-    let _ = fs::remove_file(&archive_file);
-    if !jar.is_file() {
-        return Err(format!(
-            "epubcheck 下载解压后未找到校验工具：{}",
-            display_path(&jar)
-        ));
-    }
-    if let Some(emitter) = progress {
-        emitter.emit(
-            98.0,
-            file_size(&jar),
-            file_size(&jar),
-            format!("EPUB 校验工具 epubcheck {version} 已准备完成。"),
-            Some("downloading"),
-        );
-    }
-    append_launcher_log(
-        "INFO",
-        format!("epubcheck vendor prepared jar={}", display_path(&jar)),
-    );
-    Ok(())
-}
-
-fn epubchecker_vendor_jar_path(books_dir: &Path) -> Option<PathBuf> {
-    let epubchecker_dir = books_dir.join("node_modules").join("epubchecker");
-    let version = epubchecker_epubcheck_version(&epubchecker_dir).ok()?;
-    Some(
-        epubchecker_dir
-            .join("vendors")
-            .join(format!("epubcheck-{version}"))
-            .join("epubcheck.jar"),
-    )
-}
-
-fn epubchecker_epubcheck_version(epubchecker_dir: &Path) -> Result<String, String> {
-    let text = fs::read_to_string(epubchecker_dir.join("package.json"))
-        .map_err(|err| format!("无法读取 epubchecker package.json：{err}"))?;
-    let json: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|err| format!("无法解析 epubchecker package.json：{err}"))?;
-    json.get("epubcheckVersion")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "epubchecker package.json 缺少 epubcheckVersion。".into())
-}
-
-fn epubcheck_download_url(version: &str) -> String {
-    format!("{EPUBCHECK_RELEASE_DOWNLOAD_BASE}/v{version}/epubcheck-{version}.zip")
-}
-
-fn download_epubcheck_archive_file(
-    version: &str,
-    url: &str,
-    destination: &Path,
-    progress: Option<&NodeModulesProgressEmitter>,
-) -> Result<(), String> {
-    append_launcher_log("INFO", format!("downloading epubcheck archive url={url}"));
-    let client = http_blocking_client()?;
-    let mut response = client
-        .get(url)
-        .header("User-Agent", "BiblioSmith-Launcher")
-        .send()
-        .map_err(|err| {
-            format!("下载 epubcheck {version} 失败：{err}。请检查网络、VPN 或代理设置。")
-        })?
-        .error_for_status()
-        .map_err(|err| {
-            format!("下载 epubcheck {version} 失败：{err}。请检查网络、VPN 或代理设置。")
-        })?;
-    let total = response.content_length().unwrap_or_default();
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-    let mut file = fs::File::create(destination).map_err(|err| err.to_string())?;
-    let mut downloaded = 0_u64;
-    let started_at = Instant::now();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        if NODE_MODULES_INSTALL_CANCEL_REQUESTED.load(Ordering::Acquire) {
-            return Err("EPUB 构建依赖安装已停止。".into());
-        }
-        let size = response
-            .read(&mut buffer)
-            .map_err(|err| format!("读取 epubcheck {version} 下载数据失败：{err}"))?;
-        if size == 0 {
-            break;
-        }
-        file.write_all(&buffer[..size])
-            .map_err(|err| format!("写入 epubcheck {version} 下载文件失败：{err}"))?;
-        downloaded += size as u64;
-        if let Some(emitter) = progress {
-            let raw_percent = if total > 0 {
-                ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
-            } else {
-                1.0
-            };
-            emitter.emit(
-                scale_percent(raw_percent, 72, 92),
-                downloaded,
-                total,
-                format!(
-                    "正在下载 EPUB 校验工具 epubcheck {version}... {}",
-                    download_progress_detail(downloaded, total, started_at.elapsed())
-                ),
-                Some("downloading"),
-            );
-        }
-    }
-    file.flush()
-        .map_err(|err| format!("写入 epubcheck {version} 下载文件失败：{err}"))?;
-    if downloaded == 0 {
-        return Err(format!("epubcheck {version} 下载结果为空。"));
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct NodeModulesInstallSnapshot {
-    files: u64,
-    bytes: u64,
-}
-
-fn node_modules_snapshot(books_dir: &Path) -> NodeModulesInstallSnapshot {
-    let node_modules_dir = books_dir.join("node_modules");
-    let mut snapshot = NodeModulesInstallSnapshot::default();
-    accumulate_node_modules_snapshot(&node_modules_dir, &mut snapshot);
-    snapshot
-}
-
-fn accumulate_node_modules_snapshot(path: &Path, snapshot: &mut NodeModulesInstallSnapshot) {
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if metadata.is_dir() {
-            accumulate_node_modules_snapshot(&entry_path, snapshot);
-        } else if metadata.is_file() {
-            snapshot.files = snapshot.files.saturating_add(1);
-            snapshot.bytes = snapshot.bytes.saturating_add(metadata.len());
-        }
-    }
-}
-
-fn estimate_node_modules_total_files(books_dir: &Path) -> u64 {
-    if let Some(count) = package_lock_package_count(&books_dir.join("package-lock.json")) {
-        return (count.saturating_mul(180)).clamp(800, 12000);
-    }
-    3000
-}
-
-fn package_lock_package_count(path: &Path) -> Option<u64> {
-    let text = fs::read_to_string(path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let count = json.get("packages")?.as_object()?.len() as u64;
-    Some(count.max(1))
-}
-
-fn estimate_node_modules_total_bytes(_books_dir: &Path) -> u64 {
-    40 * 1024 * 1024
-}
-
-fn node_modules_progress_percent(files: u64, total_files: u64) -> f64 {
-    if total_files == 0 {
-        return 1.0;
-    }
-    clamp_progress_percent(((files as f64 / total_files as f64) * 95.0).clamp(1.0, 98.0))
-}
-
-fn node_modules_progress_detail(
-    current_files: u64,
-    total_files: u64,
-    current_bytes: u64,
-    bytes_per_second: u64,
-) -> String {
-    format!(
-        "({current_files}/{total_files}), {} | {}/s",
-        format_kb(current_bytes as f64),
-        format_kb(bytes_per_second as f64)
-    )
-}
-
-fn remove_node_modules_dir_safely(repo_root: &Path) -> Result<(), String> {
-    let node_modules = repo_root.join("books").join("node_modules");
-    if !node_modules.exists() {
-        return Ok(());
-    }
-    let repo_root = repo_root.canonicalize().map_err(|err| err.to_string())?;
-    let node_modules = node_modules.canonicalize().map_err(|err| err.to_string())?;
-    let expected = repo_root.join("books").join("node_modules");
-    if node_modules != expected || !node_modules.starts_with(&repo_root) {
-        return Err(format!(
-            "拒绝清理非预期 node_modules 路径：{}",
-            display_path(&node_modules)
-        ));
-    }
-    fs::remove_dir_all(&node_modules).map_err(|err| err.to_string())
-}
-
-fn npm_program() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "npm.cmd"
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        "npm"
-    }
-}
-
-fn command_output_with_timeout_and_node_progress(
-    cwd: &Path,
-    repo_root: Option<&Path>,
-    program: &str,
-    args: &[String],
-    timeout: Duration,
-    label: &str,
-    progress: Option<&NodeModulesProgressEmitter>,
-) -> Result<String, String> {
-    append_launcher_log(
-        "INFO",
-        format!(
-            "{label} start cwd={} program={} args={args:?} timeout_ms={} with_node_progress=true",
-            display_path(cwd),
-            program,
-            timeout.as_millis()
-        ),
-    );
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    apply_network_env(&mut command, repo_root);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(0x08000000);
-
-    let mut child = command.spawn().map_err(|err| {
-        format!("无法执行 {program}：{err}。请确认已安装 Node.js/npm，或重新运行 BiblioSmith Launcher 安装包。")
-    })?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| format!("无法读取 {label} 输出。"))?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| format!("无法读取 {label} 错误输出。"))?;
-    let stdout_handle = thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
-    });
-    let stderr_handle = thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
-    });
-
-    let started_at = Instant::now();
-    let mut last_emit_at = Instant::now() - Duration::from_secs(2);
-    let mut last_snapshot_at = started_at;
-    let mut last_snapshot = NodeModulesInstallSnapshot::default();
-    let total_files = estimate_node_modules_total_files(cwd);
-    let total_bytes = estimate_node_modules_total_bytes(cwd);
-    let mut timed_out = false;
-    let mut cancelled = false;
-    let status = loop {
-        if NODE_MODULES_INSTALL_CANCEL_REQUESTED.load(Ordering::Acquire) {
-            terminate_process_tree(&mut child, "node modules cancel");
-            cancelled = true;
-        } else if !timed_out && started_at.elapsed() >= timeout {
-            terminate_process_tree(&mut child, "timeout");
-            timed_out = true;
-        }
-        if let Some(emitter) = progress {
-            if last_emit_at.elapsed() >= Duration::from_millis(700) {
-                let snapshot = node_modules_snapshot(cwd);
-                let elapsed = last_snapshot_at.elapsed().as_secs_f64().max(0.001);
-                let byte_delta = snapshot.bytes.saturating_sub(last_snapshot.bytes);
-                let bytes_per_second = (byte_delta as f64 / elapsed).round() as u64;
-                let detail = node_modules_progress_detail(
-                    snapshot.files,
-                    total_files,
-                    snapshot.bytes,
-                    bytes_per_second,
-                );
-                let percent = node_modules_progress_percent(snapshot.files, total_files);
-                emitter.emit(
-                    percent,
-                    snapshot.bytes,
-                    total_bytes.max(snapshot.bytes),
-                    format!("正在后台安装 EPUB 构建依赖... {detail}"),
-                    Some("downloading"),
-                );
-                last_emit_at = Instant::now();
-                last_snapshot_at = last_emit_at;
-                last_snapshot = snapshot;
-            }
-        }
-        match child.try_wait().map_err(|err| err.to_string())? {
-            Some(status) => break status,
-            None => {
-                if cancelled {
-                    thread::sleep(Duration::from_millis(100));
-                } else {
-                    thread::sleep(Duration::from_millis(200));
-                }
-            }
-        }
-    };
-    let stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
-    if cancelled {
-        return Err(format!("{label} 已停止。"));
-    }
-    if timed_out {
-        return Err(format!("{label} 超时。"));
-    }
-    if status.success() {
-        append_launcher_log(
-            "INFO",
-            format!(
-                "{label} ok cwd={} stdout={}",
-                display_path(cwd),
-                stdout.trim()
-            ),
-        );
-        if let Some(emitter) = progress {
-            let snapshot = node_modules_snapshot(cwd);
-            emitter.emit(
-                99.0,
-                snapshot.bytes,
-                total_bytes.max(snapshot.bytes),
-                "正在确认 EPUB 构建依赖...".into(),
-                Some("downloading"),
-            );
-        }
-        Ok(stdout)
-    } else {
-        let stderr = stderr.trim().to_string();
-        let message = if stderr.is_empty() {
-            format!("{label} 执行失败：{status}")
-        } else {
-            stderr
-        };
-        append_launcher_log(
-            "ERROR",
-            format!(
-                "{label} failed cwd={} status={status}: {message}",
-                display_path(cwd)
-            ),
-        );
-        Err(message)
-    }
-}
-
-impl BiblioSmithProgressEmitter {
-    fn new(app: tauri::AppHandle, locale: Option<String>) -> Self {
-        Self { app, locale }
-    }
-
-    fn emit_key(&self, percent: u8, key: &str) {
-        self.emit(
-            percent as f64,
-            bibliosmith_progress_message(self.locale.as_deref(), key),
-        );
-    }
-
-    fn emit(&self, percent: f64, message: String) {
-        let percent = clamp_progress_percent(percent);
-        let payload = DownloadProgress {
-            percent,
-            downloaded_bytes: percent.round() as u64,
-            total_bytes: 100,
-            message: Some(message),
-            state: None,
-        };
-        let _ = self.app.emit(BIBLIOSMITH_PROGRESS_EVENT, payload.clone());
-        if let Some(window) = self.app.get_webview_window("main") {
-            let _ = window.emit(BIBLIOSMITH_PROGRESS_EVENT, payload);
-        }
-    }
-}
-
-impl NodeModulesProgressEmitter {
-    fn new(app: tauri::AppHandle) -> Self {
-        Self { app }
-    }
-
-    fn emit(
-        &self,
-        percent: f64,
-        downloaded_bytes: u64,
-        total_bytes: u64,
-        message: String,
-        state: Option<&str>,
-    ) {
-        let payload = DownloadProgress {
-            percent: clamp_progress_percent(percent),
-            downloaded_bytes,
-            total_bytes,
-            message: Some(message),
-            state: state.map(|value| value.to_string()),
-        };
-        let _ = self.app.emit(NODE_MODULES_PROGRESS_EVENT, payload.clone());
-        if let Some(window) = self.app.get_webview_window("main") {
-            let _ = window.emit(NODE_MODULES_PROGRESS_EVENT, payload);
-        }
-    }
-}
-
 impl RuntimeProgressEmitter {
     fn new(app: tauri::AppHandle) -> Self {
         Self { app }
@@ -3230,204 +1893,6 @@ impl RuntimeProgressEmitter {
     }
 }
 
-fn bibliosmith_progress_message(locale: Option<&str>, key: &str) -> String {
-    let language = locale.unwrap_or("").to_ascii_lowercase();
-    let is_ja = language.starts_with("ja");
-    let is_en = language.starts_with("en");
-    match key {
-        "prepare_start" if is_ja => "BiblioSmith プロジェクトを準備しています...".into(),
-        "prepare_start" if is_en => "Preparing the BiblioSmith project...".into(),
-        "prepare_start" => "正在准备 BiblioSmith 项目...".into(),
-        "sync_start" if is_ja => "BiblioSmith プロジェクトを同期しています...".into(),
-        "sync_start" if is_en => "Syncing the BiblioSmith project...".into(),
-        "sync_start" => "正在同步 BiblioSmith 项目...".into(),
-        "clone_start" if is_ja => "BiblioSmith をダウンロードしています...".into(),
-        "clone_start" if is_en => "Downloading BiblioSmith...".into(),
-        "clone_start" => "正在下载 BiblioSmith 项目...".into(),
-        "archive_download" if is_ja => {
-            "GitHub archive から BiblioSmith をダウンロードしています...".into()
-        }
-        "archive_download" if is_en => "Downloading BiblioSmith from GitHub archive...".into(),
-        "archive_download" => "正在通过 GitHub archive 下载 BiblioSmith 项目...".into(),
-        "archive_extract" if is_ja => "BiblioSmith archive を展開しています...".into(),
-        "archive_extract" if is_en => "Extracting the BiblioSmith archive...".into(),
-        "archive_extract" => "正在解压 BiblioSmith archive...".into(),
-        "archive_sync" if is_ja => "BiblioSmith archive の更新を同期しています...".into(),
-        "archive_sync" if is_en => "Syncing BiblioSmith archive files...".into(),
-        "archive_sync" => "正在同步 BiblioSmith archive 文件...".into(),
-        "clone_compressing" if is_ja => "BiblioSmith ファイルを準備しています...".into(),
-        "clone_compressing" if is_en => "Preparing BiblioSmith files...".into(),
-        "clone_compressing" => "正在准备 BiblioSmith 文件...".into(),
-        "clone_receiving" if is_ja => "BiblioSmith ファイルを受信しています...".into(),
-        "clone_receiving" if is_en => "Receiving BiblioSmith files...".into(),
-        "clone_receiving" => "正在接收 BiblioSmith 文件...".into(),
-        "clone_resolving" if is_ja => "BiblioSmith ファイルを整理しています...".into(),
-        "clone_resolving" if is_en => "Resolving BiblioSmith files...".into(),
-        "clone_resolving" => "正在整理 BiblioSmith 文件...".into(),
-        "local_check" if is_ja => "ローカル変更を確認しています...".into(),
-        "local_check" if is_en => "Checking local changes...".into(),
-        "local_check" => "正在检查本地改动...".into(),
-        "remote_check" if is_ja => "リモートの更新を確認しています...".into(),
-        "remote_check" if is_en => "Checking remote updates...".into(),
-        "remote_check" => "正在确认远端更新...".into(),
-        "no_updates" if is_ja => "BiblioSmith はすでに最新です".into(),
-        "no_updates" if is_en => "BiblioSmith is already up to date".into(),
-        "no_updates" => "BiblioSmith 已是最新版本".into(),
-        "fetch_start" if is_ja => "更新情報を確認しています...".into(),
-        "fetch_start" if is_en => "Checking BiblioSmith updates...".into(),
-        "fetch_start" => "正在检查 BiblioSmith 更新...".into(),
-        "fetch_compressing" if is_ja => "更新ファイルを準備しています...".into(),
-        "fetch_compressing" if is_en => "Preparing update files...".into(),
-        "fetch_compressing" => "正在准备更新文件...".into(),
-        "fetch_receiving" if is_ja => "更新ファイルを受信しています...".into(),
-        "fetch_receiving" if is_en => "Receiving update files...".into(),
-        "fetch_receiving" => "正在接收更新文件...".into(),
-        "fetch_resolving" if is_ja => "更新ファイルを整理しています...".into(),
-        "fetch_resolving" if is_en => "Resolving update files...".into(),
-        "fetch_resolving" => "正在整理更新文件...".into(),
-        "pull_start" if is_ja => "更新を適用しています...".into(),
-        "pull_start" if is_en => "Applying BiblioSmith updates...".into(),
-        "pull_start" => "正在应用 BiblioSmith 更新...".into(),
-        "npm_install_start" if is_ja => "EPUB ビルド用 Node.js 依存関係を準備しています...".into(),
-        "npm_install_start" if is_en => "Preparing EPUB build dependencies...".into(),
-        "npm_install_start" => "正在准备 EPUB 构建依赖...".into(),
-        "read_changes" if is_ja => "更新内容を読み込んでいます...".into(),
-        "read_changes" if is_en => "Reading update details...".into(),
-        "read_changes" => "正在读取更新内容...".into(),
-        "complete" if is_ja => "BiblioSmith の同期が完了しました".into(),
-        "complete" if is_en => "BiblioSmith sync completed".into(),
-        "complete" => "BiblioSmith 同步完成".into(),
-        "stopped" if is_ja => "BiblioSmith の準備/同期を停止しました。次回再試行できます。".into(),
-        "stopped" if is_en => "BiblioSmith prepare/sync stopped. You can retry.".into(),
-        "stopped" => "BiblioSmith 准备/同步已停止，可重试。".into(),
-        _ if is_ja => "BiblioSmith を処理しています...".into(),
-        _ if is_en => "Working on BiblioSmith...".into(),
-        _ => "正在处理 BiblioSmith...".into(),
-    }
-}
-
-#[cfg(test)]
-fn git_progress_for_line(phase: GitProgressPhase, line: &str) -> Option<(f64, &'static str)> {
-    let lower = line.to_ascii_lowercase();
-    let raw = parse_git_percent(line)?;
-    if lower.contains("receiving objects") {
-        return Some(match phase {
-            GitProgressPhase::Clone => (scale_percent(raw, 18, 76), "clone_receiving"),
-            GitProgressPhase::Fetch => (scale_percent(raw, 32, 68), "fetch_receiving"),
-            GitProgressPhase::Pull => (scale_percent(raw, 78, 88), "fetch_receiving"),
-        });
-    }
-    if lower.contains("compressing objects") {
-        return Some(match phase {
-            GitProgressPhase::Clone => (scale_percent(raw, 14, 18), "clone_compressing"),
-            GitProgressPhase::Fetch => (scale_percent(raw, 30, 34), "fetch_compressing"),
-            GitProgressPhase::Pull => (scale_percent(raw, 78, 82), "fetch_compressing"),
-        });
-    }
-    if lower.contains("resolving deltas") {
-        return Some(match phase {
-            GitProgressPhase::Clone => (scale_percent(raw, 76, 92), "clone_resolving"),
-            GitProgressPhase::Fetch => (scale_percent(raw, 68, 78), "fetch_resolving"),
-            GitProgressPhase::Pull => (scale_percent(raw, 88, 94), "fetch_resolving"),
-        });
-    }
-    if lower.contains("updating files") {
-        return Some((scale_percent(raw, 88, 96), "pull_start"));
-    }
-    if lower.contains("enumerating objects") || lower.contains("counting objects") {
-        return Some(match phase {
-            GitProgressPhase::Clone => (scale_percent(raw, 10, 18), "clone_start"),
-            GitProgressPhase::Fetch => (scale_percent(raw, 30, 35), "fetch_start"),
-            GitProgressPhase::Pull => (scale_percent(raw, 78, 82), "pull_start"),
-        });
-    }
-    None
-}
-
-fn scale_percent(value: f64, start: u8, end: u8) -> f64 {
-    let span = end.saturating_sub(start) as f64;
-    clamp_progress_percent(start as f64 + value.clamp(0.0, 100.0) * span / 100.0)
-}
-
-#[cfg(test)]
-fn parse_git_percent(line: &str) -> Option<f64> {
-    parse_git_object_percent(line).or_else(|| parse_git_percent_token(line))
-}
-
-#[cfg(test)]
-fn parse_git_percent_token(line: &str) -> Option<f64> {
-    let percent_index = line.find('%')?;
-    let before_percent = &line[..percent_index];
-    let digits_reversed: String = before_percent
-        .chars()
-        .rev()
-        .skip_while(|ch| ch.is_whitespace())
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect();
-    if digits_reversed.is_empty() {
-        return None;
-    }
-    let digits: String = digits_reversed.chars().rev().collect();
-    digits
-        .parse::<f64>()
-        .ok()
-        .filter(|value| (0.0..=100.0).contains(value))
-}
-
-#[cfg(test)]
-fn parse_git_object_percent(line: &str) -> Option<f64> {
-    let (current, total) = parse_git_object_counts(line)?;
-    if total == 0 {
-        return None;
-    }
-    Some(((current as f64 / total as f64) * 100.0).clamp(0.0, 100.0))
-}
-
-#[cfg(test)]
-fn parse_git_object_counts(line: &str) -> Option<(u64, u64)> {
-    let open_index = line.find('(')?;
-    let rest = &line[open_index + 1..];
-    let slash_index = rest.find('/')?;
-    let current = rest[..slash_index].trim().parse::<u64>().ok()?;
-    let after_slash = &rest[slash_index + 1..];
-    let close_index = after_slash.find(')')?;
-    let total = after_slash[..close_index].trim().parse::<u64>().ok()?;
-    Some((current, total))
-}
-
-#[cfg(test)]
-fn git_progress_detail(line: &str) -> Option<String> {
-    let object_detail =
-        parse_git_object_counts(line).map(|(current, total)| format!("{current}/{total}"));
-    let transfer_detail = git_transfer_detail(line);
-    match (object_detail, transfer_detail) {
-        (Some(objects), Some(transfer)) => Some(format!("{objects} - {transfer}")),
-        (Some(objects), None) => Some(objects),
-        (None, Some(transfer)) => Some(transfer),
-        (None, None) => None,
-    }
-}
-
-#[cfg(test)]
-fn git_transfer_detail(line: &str) -> Option<String> {
-    line.split(',')
-        .map(|part| {
-            part.trim()
-                .trim_end_matches("done.")
-                .trim_end_matches("done")
-                .trim()
-        })
-        .find(|part| {
-            part.contains("B/s")
-                || part.contains("bytes")
-                || part.contains("KiB")
-                || part.contains("MiB")
-                || part.contains("GiB")
-        })
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_string())
-}
-
 fn clamp_progress_percent(value: f64) -> f64 {
     if !value.is_finite() {
         return 0.0;
@@ -3435,181 +1900,20 @@ fn clamp_progress_percent(value: f64) -> f64 {
     (value.clamp(0.0, 100.0) * 100.0).round() / 100.0
 }
 
-fn bibliosmith_update_info(
-    repo_root: &Path,
-    _fetch: bool,
-    locale: Option<&str>,
-) -> Result<BiblioSmithUpdateInfo, String> {
-    let commits = local_bibliosmith_commit_history_best_effort(repo_root, locale)?;
-    let current_commit = commits
-        .first()
-        .map(|commit| commit.hash.clone())
-        .unwrap_or_else(|| "local".into());
-    Ok(BiblioSmithUpdateInfo {
-        repo_root: display_path(repo_root),
-        current_commit,
-        remote_ref: "local-git".into(),
-        behind_count: 0,
-        ahead_count: 0,
-        has_update: false,
-        commits,
-    })
-}
-
-fn bibliosmith_update_info_best_effort(
-    repo_root: &Path,
-    fetch: bool,
-    locale: Option<&str>,
-) -> Result<BiblioSmithUpdateInfo, String> {
-    match bibliosmith_update_info(repo_root, fetch, locale) {
-        Ok(info) => Ok(info),
-        Err(fetch_error) if fetch => bibliosmith_update_info(repo_root, false, locale)
-            .map_err(|local_error| format!("{fetch_error}; {local_error}")),
-        Err(error) => Err(error),
-    }
-}
-
-fn local_bibliosmith_commit_history_best_effort(
-    repo_root: &Path,
-    locale: Option<&str>,
-) -> Result<Vec<CommitInfo>, String> {
-    match git_log(repo_root, "HEAD", Some(20), locale) {
-        Ok(commits) => {
-            if !commits.is_empty() {
-                append_launcher_log(
-                    "INFO",
-                    format!(
-                        "using local git log as BiblioSmith commit history fallback repo_root={} count={}",
-                        display_path(repo_root),
-                        commits.len()
-                    ),
-                );
-            }
-            Ok(commits)
-        }
-        Err(error) => {
-            append_launcher_log(
-                "WARN",
-                format!(
-                    "unable to load local BiblioSmith commit history repo_root={} error={error}",
-                    display_path(repo_root)
-                ),
-            );
-            Ok(Vec::new())
-        }
-    }
-}
-
-fn active_bibliosmith_repo_root() -> Result<PathBuf, String> {
-    let configured_root = configured_or_default_repo_root()?;
-    active_repo_root_from_configured_path(&configured_root).ok_or_else(|| {
-        format!(
-            "BiblioSmith 项目尚未准备完成：{}。请等待自动准备完成，或在设置里选择已有 BiblioSmith 项目目录。",
-            display_path(&configured_root)
-        )
-    })
-}
-
-fn active_repo_root_from_configured_path(path: &Path) -> Option<PathBuf> {
-    if !path.exists() {
-        return None;
-    }
-    repo_root_from_path(path)
-}
-
-fn repo_root_from_path(path: &Path) -> Option<PathBuf> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    for ancestor in canonical.ancestors() {
-        if is_bibliosmith_repo(ancestor) {
-            return Some(ancestor.to_path_buf());
-        }
-    }
-    None
-}
-
-fn is_bibliosmith_repo(path: &Path) -> bool {
-    path.join("AGENTS.md").is_file()
-        && path
-            .join("tools")
-            .join("create_local_book_project.py")
-            .is_file()
-        && path.join("books").join("local").is_dir()
-}
-
-fn repo_status_for_path(path: &Path) -> String {
-    if is_bibliosmith_repo(path) {
-        "ready".into()
-    } else if !path.exists() {
-        "missing".into()
-    } else if is_dir_empty(path) {
-        "empty".into()
-    } else {
-        "occupied".into()
-    }
-}
-
-fn is_dir_empty(path: &Path) -> bool {
-    if !path.exists() {
-        return true;
-    }
-    path.is_dir()
-        && fs::read_dir(path)
-            .map(|mut entries| entries.next().is_none())
-            .unwrap_or(false)
-}
-
-fn configured_or_default_repo_root() -> Result<PathBuf, String> {
-    if let Some(repo_root) = configured_repo_root() {
-        return Ok(repo_root);
-    }
-    if let Some(repo_root) = bibliosmith_home_repo_root() {
-        return Ok(repo_root);
-    }
-    default_bibliosmith_repo_root()
-}
-
-fn configured_repo_root() -> Option<PathBuf> {
-    if let Some(config) = read_launcher_config() {
-        if let Some(repo_root) = config.repo_root {
-            if !repo_root.trim().is_empty() {
-                return Some(PathBuf::from(repo_root.trim()));
-            }
-        }
-    }
-    None
-}
-
-fn bibliosmith_home_repo_root() -> Option<PathBuf> {
-    bibliosmith_home_repo_root_from_value(env::var(BIBLIOSMITH_HOME_ENV).ok())
-}
-
-fn bibliosmith_home_repo_root_from_value(value: Option<String>) -> Option<PathBuf> {
-    value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-fn default_bibliosmith_repo_root() -> Result<PathBuf, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let d_drive = PathBuf::from(r"D:\");
-        if d_drive.exists() {
-            return Ok(PathBuf::from(r"D:\BiblioSmith"));
-        }
-    }
-    let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录。".to_string())?;
-    Ok(home.join("BiblioSmith"))
-}
-
 fn launcher_config_path() -> Result<PathBuf, String> {
-    let base = dirs::config_local_dir()
-        .or_else(dirs::data_local_dir)
-        .ok_or_else(|| "无法定位用户配置目录。".to_string())?;
-    Ok(base
-        .join("BiblioSmith")
-        .join("launcher")
-        .join("config.json"))
+    Ok(app_paths::current()?.support_root().join("config.json"))
+}
+
+#[cfg(test)]
+fn launcher_config_path_from_base(base: &Path, development: bool) -> PathBuf {
+    let launcher_dir = if development {
+        "launcher-dev"
+    } else {
+        "launcher"
+    };
+    base.join("BiblioSmith")
+        .join(launcher_dir)
+        .join("config.json")
 }
 
 fn read_launcher_config() -> Option<LauncherConfig> {
@@ -3624,34 +1928,60 @@ fn write_launcher_config_file(config: &LauncherConfig) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     let text = serde_json::to_string_pretty(config).map_err(|err| err.to_string())?;
-    fs::write(path, text).map_err(|err| err.to_string())
+    let parent = path
+        .parent()
+        .ok_or_else(|| "BiblioSmith 配置文件缺少父目录。".to_string())?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|err| err.to_string())?;
+    temporary
+        .write_all(text.as_bytes())
+        .and_then(|_| temporary.as_file_mut().sync_all())
+        .map_err(|err| err.to_string())?;
+    temporary
+        .persist(&path)
+        .map_err(|error| error.error.to_string())?;
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
-fn write_launcher_config(repo_root: &Path) -> Result<(), String> {
+fn update_launcher_config(update: impl FnOnce(&mut LauncherConfig)) -> Result<(), String> {
+    let _guard = LAUNCHER_CONFIG_LOCK
+        .lock()
+        .map_err(|_| "BiblioSmith 配置锁不可用。".to_string())?;
     let mut config = read_launcher_config().unwrap_or_default();
-    config.repo_root = Some(display_path(repo_root));
-    write_launcher_config_file(&config)?;
+    update(&mut config);
+    write_launcher_config_file(&config)
+}
+
+fn configured_workspace_root_from_config(config: Option<&LauncherConfig>) -> Option<PathBuf> {
+    config
+        .and_then(|config| config.workspace_root.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+pub(crate) fn configured_or_recommended_workspace_root() -> Result<PathBuf, String> {
+    let config = read_launcher_config();
+    Ok(configured_workspace_root_from_config(config.as_ref())
+        .unwrap_or(app_paths::current()?.recommended_workspace_root()))
+}
+
+fn write_workspace_root(workspace_root: &Path) -> Result<(), String> {
+    update_launcher_config(|config| {
+        config.workspace_root = Some(display_path(workspace_root));
+    })?;
     append_launcher_log(
         "INFO",
-        format!("launcher config repo_root={}", display_path(repo_root)),
+        format!("workspace_root={}", display_path(workspace_root)),
     );
-    set_process_bibliosmith_env(repo_root);
-    persist_user_bibliosmith_home_env(repo_root);
     Ok(())
 }
 
 fn write_save_logs_config(save_logs: bool) -> Result<(), String> {
-    let mut config = read_launcher_config().unwrap_or_default();
-    config.save_logs = Some(save_logs);
-    write_launcher_config_file(&config)
-}
-
-fn write_auto_install_node_modules_config(enabled: bool) -> Result<(), String> {
-    let mut config = read_launcher_config().unwrap_or_default();
-    config.auto_install_node_modules = Some(enabled);
-    write_launcher_config_file(&config)?;
-    append_launcher_log("INFO", format!("auto_install_node_modules={enabled}"));
-    Ok(())
+    update_launcher_config(|config| config.save_logs = Some(save_logs))
 }
 
 fn configured_proxy_settings() -> NetworkProxySettings {
@@ -3662,9 +1992,7 @@ fn configured_proxy_settings() -> NetworkProxySettings {
 
 fn write_proxy_config(proxy: NetworkProxySettings) -> Result<NetworkProxySettings, String> {
     validate_proxy_settings(&proxy)?;
-    let mut config = read_launcher_config().unwrap_or_default();
-    config.proxy = Some(proxy.clone());
-    write_launcher_config_file(&config)?;
+    update_launcher_config(|config| config.proxy = Some(proxy.clone()))?;
     append_launcher_log(
         "INFO",
         format!(
@@ -3998,8 +2326,8 @@ fn diagnostic_log_settings() -> Result<DiagnosticLogSettings, String> {
 
 fn diagnostic_context_for_export(
     launcher_version: &str,
-    repo_root: &str,
-    repo_status: &str,
+    workspace_root: &str,
+    workspace_status: app_paths::WorkspaceStatus,
     save_logs: bool,
     log_dir: &Path,
     log_max_bytes: u64,
@@ -4010,21 +2338,19 @@ fn diagnostic_context_for_export(
         launcher_version: launcher_version.to_string(),
         os: env::consts::OS.to_string(),
         arch: env::consts::ARCH.to_string(),
-        repo_root: repo_root.to_string(),
-        repo_status: repo_status.to_string(),
+        workspace_root: workspace_root.to_string(),
+        workspace_status,
         save_logs,
         log_dir: display_path(log_dir),
         log_max_bytes,
         log_backup_count,
-        bibliosmith_home_set: env::var(BIBLIOSMITH_HOME_ENV)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false),
         proxy_configured: is_proxy_configured(),
     }
 }
 
 fn current_diagnostic_context() -> Result<DiagnosticExportContext, String> {
-    let repo_root = configured_or_default_repo_root()?;
+    let workspace_root = configured_or_recommended_workspace_root()?;
+    let workspace_status = app_paths::workspace_status(&workspace_root);
     let log_file = launcher_log_path()?;
     let log_dir = log_file
         .parent()
@@ -4032,8 +2358,8 @@ fn current_diagnostic_context() -> Result<DiagnosticExportContext, String> {
         .unwrap_or_else(|| log_file.clone());
     Ok(diagnostic_context_for_export(
         &launcher_current_version(),
-        &display_path(&repo_root),
-        &repo_status_for_path(&repo_root),
+        &display_path(&workspace_root),
+        workspace_status,
         launcher_logging_enabled(),
         &log_dir,
         LAUNCHER_LOG_MAX_BYTES,
@@ -4047,9 +2373,7 @@ fn diagnostic_log_files(log_dir: &Path) -> Vec<PathBuf> {
     if current.is_file() {
         files.push(current.clone());
     }
-    let rotated_scan_count =
-        LAUNCHER_LOG_BACKUP_COUNT.max(LAUNCHER_LOG_LEGACY_EXPORT_BACKUP_SCAN_COUNT);
-    for index in 1..=rotated_scan_count {
+    for index in 1..=LAUNCHER_LOG_LEGACY_EXPORT_BACKUP_SCAN_COUNT {
         let rotated = rotated_log_path(&current, index);
         if rotated.is_file() {
             files.push(rotated);
@@ -4080,13 +2404,11 @@ fn export_diagnostic_logs_to_dir(
     Ok(export_dir)
 }
 
-fn set_process_bibliosmith_env(repo_root: &Path) {
-    let value = display_path(repo_root);
-    env::set_var(BIBLIOSMITH_HOME_ENV, value);
-}
-
 fn set_process_runtime_envs() {
     for package in runtime_packages() {
+        if package.kind == RuntimeKind::Python && !cfg!(target_os = "windows") {
+            continue;
+        }
         if let Some(path) = runtime_resolved_executable(package) {
             env::set_var(package.kind.env_name(), display_path(&path));
         }
@@ -4098,74 +2420,13 @@ fn set_process_runtime_envs_from_status(status: &RuntimeStatus) {
         (RuntimeKind::Python, &status.python),
         (RuntimeKind::Java, &status.java),
     ] {
-        if tool.ready {
+        if tool.ready && tool.source.as_deref() != Some("bundled_uv") {
             if let Some(path) = tool.path.as_deref() {
                 env::set_var(kind.env_name(), path);
             }
         }
     }
 }
-
-fn apply_runtime_env(command: &mut Command) {
-    for package in runtime_packages() {
-        if let Some(path) = runtime_resolved_executable(package) {
-            command.env(package.kind.env_name(), display_path(&path));
-        }
-    }
-}
-
-fn apply_network_env(command: &mut Command, repo_root: Option<&Path>) {
-    if let Some(repo_root) = repo_root {
-        command.env(BIBLIOSMITH_HOME_ENV, display_path(repo_root));
-    }
-    apply_runtime_env(command);
-    if let Some(proxy_url) = configured_proxy_url_best_effort() {
-        command
-            .env("HTTPS_PROXY", &proxy_url)
-            .env("HTTP_PROXY", &proxy_url)
-            .env("ALL_PROXY", &proxy_url)
-            .env("https_proxy", &proxy_url)
-            .env("http_proxy", &proxy_url)
-            .env("all_proxy", &proxy_url);
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn persist_user_bibliosmith_home_env(repo_root: &Path) {
-    let value = display_path(repo_root);
-    let current = env::var(BIBLIOSMITH_HOME_ENV).unwrap_or_default();
-    if current.trim().eq_ignore_ascii_case(value.trim()) {
-        return;
-    }
-    let mut command = Command::new("setx");
-    command.arg(BIBLIOSMITH_HOME_ENV).arg(&value);
-    command.creation_flags(0x08000000);
-    match command.output() {
-        Ok(output) if output.status.success() => {
-            append_launcher_log("INFO", format!("persisted user BIBLIOSMITH_HOME={value}"));
-        }
-        Ok(output) => {
-            append_launcher_log(
-                "WARN",
-                format!(
-                    "setx BIBLIOSMITH_HOME failed status={} stdout={} stderr={}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout).trim(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            );
-        }
-        Err(error) => {
-            append_launcher_log(
-                "WARN",
-                format!("setx BIBLIOSMITH_HOME spawn failed: {error}"),
-            );
-        }
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn persist_user_bibliosmith_home_env(_repo_root: &Path) {}
 
 fn display_path(path: &Path) -> String {
     let raw = path.display().to_string();
@@ -4176,325 +2437,6 @@ fn display_path(path: &Path) -> String {
     } else {
         raw
     }
-}
-
-fn project_document_candidates(kind: &str, locale: &str) -> Vec<PathBuf> {
-    let locale = locale.to_ascii_lowercase();
-    let is_japanese = locale.starts_with("ja");
-    let is_traditional =
-        locale.starts_with("zh-tw") || locale.starts_with("zh-hk") || locale.starts_with("zh-hant");
-    let is_simplified = locale.starts_with("zh") && !is_traditional;
-
-    match kind {
-        "howto" => {
-            let guides = PathBuf::from("docs").join("guides");
-            let primary = if is_japanese {
-                guides.join("how-to-use-local-reading.ja.md")
-            } else if is_traditional {
-                guides.join("how-to-use-local-reading.zh-TW.md")
-            } else if is_simplified {
-                guides.join("how-to-use-local-reading.zh-CN.md")
-            } else {
-                guides.join("how-to-use-local-reading.en.md")
-            };
-            let mut candidates = vec![primary];
-            for fallback in [
-                guides.join("how-to-use-local-reading.zh-CN.md"),
-                guides.join("how-to-use-local-reading.en.md"),
-            ] {
-                if !candidates.contains(&fallback) {
-                    candidates.push(fallback);
-                }
-            }
-            candidates
-        }
-        _ => {
-            let primary = if is_japanese {
-                PathBuf::from("readme").join("README.ja.md")
-            } else if is_traditional {
-                PathBuf::from("readme").join("README.zh-TW.md")
-            } else if is_simplified {
-                PathBuf::from("README.zh-CN.md")
-            } else {
-                PathBuf::from("README.md")
-            };
-            let mut candidates = vec![primary];
-            for fallback in [PathBuf::from("README.zh-CN.md"), PathBuf::from("README.md")] {
-                if !candidates.contains(&fallback) {
-                    candidates.push(fallback);
-                }
-            }
-            candidates
-        }
-    }
-}
-
-fn read_project_document_file(
-    repo_root: &Path,
-    relative_path: &Path,
-    kind: &str,
-) -> Result<ProjectDocument, String> {
-    let full_path = repo_root.join(relative_path);
-    let content = fs::read_to_string(&full_path)
-        .map_err(|err| format!("无法读取文档 {}：{err}", display_path(&full_path)))?;
-    let title = markdown_title(&content).unwrap_or_else(|| {
-        if kind == "howto" {
-            "How to use".into()
-        } else {
-            "README".into()
-        }
-    });
-
-    Ok(ProjectDocument {
-        kind: kind.to_string(),
-        path: display_path(&full_path),
-        title,
-        content,
-    })
-}
-
-fn markdown_title(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("# ")
-            .map(|title| title.trim().to_string())
-            .filter(|title| !title.is_empty())
-    })
-}
-
-fn document_kind_from_path(path: &Path) -> String {
-    let text = path.to_string_lossy().to_ascii_lowercase();
-    if text.contains("how-to-use") {
-        "howto".into()
-    } else {
-        "readme".into()
-    }
-}
-
-fn safe_project_relative_path(value: &str) -> Result<PathBuf, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty()
-        || trimmed.starts_with("http://")
-        || trimmed.starts_with("https://")
-        || trimmed.starts_with("mailto:")
-        || trimmed.starts_with('#')
-    {
-        return Err("只能打开 BiblioSmith 项目内的 Markdown 文档链接。".into());
-    }
-
-    let without_fragment = trimmed
-        .split('#')
-        .next()
-        .unwrap_or(trimmed)
-        .split('?')
-        .next()
-        .unwrap_or(trimmed);
-    let normalized = without_fragment
-        .replace('\\', "/")
-        .trim_start_matches("./")
-        .to_string();
-    let path = PathBuf::from(&normalized);
-    if path.is_absolute() || normalized.contains("://") {
-        return Err("只能打开 BiblioSmith 项目内的相对链接。".into());
-    }
-    if path.extension().and_then(|value| value.to_str()) != Some("md") {
-        return Err("教程页只打开 Markdown 文档链接。".into());
-    }
-    if path
-        .components()
-        .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err("链接路径不能离开 BiblioSmith 项目目录。".into());
-    }
-    Ok(path)
-}
-
-#[cfg(test)]
-fn bibliosmith_diverged_message(
-    repo_root: &Path,
-    remote_ref: &str,
-    ahead_count: u32,
-    behind_count: u32,
-) -> String {
-    format!(
-        "BiblioSmith 项目本地分支和 GitHub 已分叉，Launcher 为避免覆盖用户内容已停止自动更新。\n项目目录：{}\n远端分支：{}\n当前状态：本地多 {} 个 commit，GitHub 多 {} 个 commit。\nLauncher 不会自动 merge/rebase。请先确认这些本地 commit 是否要保留；如果只是想使用最新 BiblioSmith，建议在设置页选择一个新的空目录重新准备项目。",
-        display_path(repo_root),
-        remote_ref,
-        ahead_count,
-        behind_count
-    )
-}
-
-fn git_log(
-    repo_root: &Path,
-    rev: &str,
-    max_count: Option<usize>,
-    locale: Option<&str>,
-) -> Result<Vec<CommitInfo>, String> {
-    let format = "%h%x1f%ci%x1f%s%x1f%b%x1e";
-    let mut args = vec!["log".to_string()];
-    if let Some(max_count) = max_count {
-        args.push(format!("--max-count={max_count}"));
-    }
-    args.push(format!("--pretty=format:{format}"));
-    args.push(rev.to_string());
-    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = git_output(repo_root, &arg_refs)?;
-    let commits = output
-        .split('\u{1e}')
-        .filter_map(|entry| {
-            let trimmed = entry.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let mut parts = trimmed.split('\u{1f}');
-            let hash = parts.next().unwrap_or_default().trim().to_string();
-            let date = parts.next().unwrap_or_default().trim().to_string();
-            let title = parts.next().unwrap_or_default().trim().to_string();
-            let body = parts.next().unwrap_or_default();
-            Some(commit_info_from_parts(hash, date, title, body, locale))
-        })
-        .collect();
-    Ok(commits)
-}
-
-fn commit_info_from_parts(
-    hash: String,
-    date: String,
-    title: String,
-    body: impl AsRef<str>,
-    locale: Option<&str>,
-) -> CommitInfo {
-    let body = body.as_ref();
-    CommitInfo {
-        hash,
-        date,
-        full_message: full_commit_message(&title, body),
-        title,
-        summary: localized_commit_summary(body, locale),
-    }
-}
-
-fn full_commit_message(title: &str, body: &str) -> String {
-    let title = title.trim();
-    let body = body.trim();
-    match (title.is_empty(), body.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => title.to_string(),
-        (true, false) => body.to_string(),
-        (false, false) => format!("{title}\n\n{body}"),
-    }
-}
-
-fn localized_commit_summary(body: &str, locale: Option<&str>) -> String {
-    let sections = parse_commit_summary_sections(body);
-    let preferred = commit_summary_locale_key(locale);
-    for key in [preferred, "EN", "ZH", "JA"] {
-        if let Some(summary) = sections.iter().find_map(|(section_key, value)| {
-            (*section_key == key).then(|| cleanup_commit_summary(value))
-        }) {
-            if !summary.is_empty() {
-                return summary;
-            }
-        }
-    }
-
-    body.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !is_commit_summary_label(line))
-        .map(cleanup_commit_summary)
-        .unwrap_or_default()
-}
-
-fn commit_summary_locale_key(locale: Option<&str>) -> &'static str {
-    let Some(locale) = locale else {
-        return "EN";
-    };
-    let locale = locale.to_ascii_lowercase();
-    if locale.starts_with("ja") {
-        "JA"
-    } else if locale.starts_with("zh") {
-        "ZH"
-    } else {
-        "EN"
-    }
-}
-
-fn parse_commit_summary_sections(body: &str) -> Vec<(&'static str, String)> {
-    let mut sections: Vec<(&'static str, String)> = Vec::new();
-    let mut current_key: Option<&'static str> = None;
-    let mut current_lines: Vec<String> = Vec::new();
-
-    let flush = |sections: &mut Vec<(&'static str, String)>,
-                 key: &mut Option<&'static str>,
-                 lines: &mut Vec<String>| {
-        if let Some(value) = key.take() {
-            sections.push((value, lines.join("\n")));
-            lines.clear();
-        }
-    };
-
-    for line in body.replace("\r\n", "\n").lines() {
-        let trimmed = line.trim();
-        if let Some((key, rest)) = commit_summary_label_and_rest(trimmed) {
-            flush(&mut sections, &mut current_key, &mut current_lines);
-            current_key = Some(key);
-            if !rest.trim().is_empty() {
-                current_lines.push(rest.trim().to_string());
-            }
-            continue;
-        }
-        if current_key.is_some() {
-            current_lines.push(line.to_string());
-        }
-    }
-    flush(&mut sections, &mut current_key, &mut current_lines);
-    sections
-}
-
-fn commit_summary_label_and_rest(line: &str) -> Option<(&'static str, &str)> {
-    for key in ["ZH", "EN", "JA"] {
-        let label = format!("{key}:");
-        if line == label {
-            return Some((key, ""));
-        }
-        if let Some(rest) = line.strip_prefix(&label) {
-            return Some((key, rest));
-        }
-    }
-    None
-}
-
-fn is_commit_summary_label(line: &str) -> bool {
-    commit_summary_label_and_rest(line)
-        .map(|(_, rest)| rest.trim().is_empty())
-        .unwrap_or(false)
-}
-
-fn cleanup_commit_summary(value: &str) -> String {
-    value
-        .lines()
-        .map(|line| {
-            line.trim()
-                .trim_start_matches("- ")
-                .trim_start_matches("* ")
-                .trim()
-        })
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn http_blocking_client() -> Result<reqwest::blocking::Client, String> {
-    let mut builder = reqwest::blocking::Client::builder().http1_only();
-    if let Some(proxy_url) = configured_proxy_url_best_effort() {
-        let proxy =
-            reqwest::Proxy::all(&proxy_url).map_err(|err| format!("代理配置无效：{err}"))?;
-        builder = builder.proxy(proxy);
-    }
-    builder
-        .build()
-        .map_err(|err| format!("无法初始化 HTTP 下载客户端：{err}"))
 }
 
 fn runtime_http_blocking_client() -> Result<reqwest::blocking::Client, String> {
@@ -4617,12 +2559,6 @@ fn is_proxy_configured() -> bool {
     })
 }
 
-fn file_size(path: &Path) -> u64 {
-    fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
-}
-
 fn download_percent(downloaded: u64, total: u64) -> f64 {
     if downloaded == 0 {
         return 0.0;
@@ -4691,6 +2627,7 @@ pub fn run() {
             Some(vec![]),
         ))
         .setup(|app| {
+            app_paths::initialize(app)?;
             let window = app.get_webview_window("main").expect("main window missing");
             let _ = window.set_title(&format!(
                 "BiblioSmith Launcher {}",
@@ -4706,10 +2643,6 @@ pub fn run() {
                         .unwrap_or_else(|error| error)
                 ),
             );
-            if let Ok(repo_root) = configured_or_default_repo_root() {
-                set_process_bibliosmith_env(&repo_root);
-                persist_user_bibliosmith_home_env(&repo_root);
-            }
             set_process_runtime_envs();
             configure_tray(app)?;
             Ok(())
@@ -4721,12 +2654,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_launcher_state,
-            choose_repo_folder,
-            set_repo_folder,
-            prepare_bibliosmith_project,
-            sync_bibliosmith_project,
-            cancel_bibliosmith_update,
+            get_workspace_state,
+            create_recommended_workspace,
+            choose_and_create_workspace,
             get_diagnostic_log_settings,
             set_save_logs_enabled,
             get_proxy_settings,
@@ -4752,28 +2682,20 @@ pub fn run() {
             zotero_settings::delete_zotero_credential,
             get_runtime_status,
             start_runtime_prepare,
-            get_node_modules_status,
-            set_auto_install_node_modules,
-            start_node_modules_install,
-            cancel_node_modules_install,
             export_launcher_logs,
             record_frontend_activity,
-            check_bibliosmith_updates,
-            update_bibliosmith,
-            read_project_document,
-            read_project_document_path,
             minimize_main_window,
             toggle_main_window_maximized,
             close_main_window_to_tray,
-            open_repo_folder,
-            open_books_folder,
             book_pipeline::get_book_pipeline_state,
             book_pipeline::preview_book_pipeline_route,
             book_pipeline::queue_book_pipeline_job,
             book_pipeline::save_book_pipeline_custom_instructions,
             book_pipeline::run_book_pipeline_job,
             book_pipeline::retry_book_pipeline_job,
-            book_pipeline::delete_book_pipeline_job,
+            book_pipeline::remove_books_from_shelf,
+            book_pipeline::inspect_book_pipeline_project_migration,
+            book_pipeline::migrate_book_pipeline_project,
             book_pipeline::advance_book_pipeline_job,
             book_pipeline::approve_book_pipeline_gate,
             book_pipeline::record_book_pipeline_reader_evidence,
@@ -4811,13 +2733,6 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn assert_percent_close(actual: f64, expected: f64) {
-        assert!(
-            (actual - expected).abs() < 0.01,
-            "expected {actual} to be within 0.01 of {expected}"
-        );
-    }
-
     fn temp_test_path(name: &str) -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4826,9 +2741,63 @@ mod tests {
         env::temp_dir().join(format!("bibliosmith-launcher-{name}-{suffix}"))
     }
 
-    fn has_arg_pair(args: &[String], first: &str, second: &str) -> bool {
-        args.windows(2)
-            .any(|pair| pair[0] == first && pair[1] == second)
+    #[test]
+    fn launcher_config_paths_separate_development_from_release() {
+        let base = Path::new("config-base");
+
+        assert_eq!(
+            launcher_config_path_from_base(base, true),
+            base.join("BiblioSmith")
+                .join("launcher-dev")
+                .join("config.json")
+        );
+        assert_eq!(
+            launcher_config_path_from_base(base, false),
+            base.join("BiblioSmith")
+                .join("launcher")
+                .join("config.json")
+        );
+    }
+
+    #[test]
+    fn workspace_state_uses_documents_default_and_never_requires_git() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = app_paths::AppPaths::from_roots(
+            temp.path()
+                .join("App.app/Contents/Resources/bibliosmith-runtime"),
+            temp.path()
+                .join("Library/Application Support/BiblioSmith/launcher"),
+            temp.path().join("Library/Caches/BiblioSmith/launcher"),
+            temp.path().join("Documents"),
+        );
+
+        let state = collect_workspace_state_from(&paths, None);
+
+        assert_eq!(
+            state.workspace_root,
+            display_path(&temp.path().join("Documents/BiblioSmith"))
+        );
+        assert_eq!(state.recommended_workspace_root, state.workspace_root);
+        assert!(!state.workspace_ready);
+        assert_eq!(state.workspace_status, app_paths::WorkspaceStatus::Missing);
+    }
+
+    #[test]
+    fn launcher_config_ignores_the_retired_repo_root_contract() {
+        let legacy: LauncherConfig = serde_json::from_value(serde_json::json!({
+            "repoRoot": "/developer/checkout"
+        }))
+        .expect("legacy config remains parseable as unknown input");
+        let current: LauncherConfig = serde_json::from_value(serde_json::json!({
+            "workspaceRoot": "/test-data/Documents/BiblioSmith"
+        }))
+        .expect("workspace config");
+
+        assert_eq!(configured_workspace_root_from_config(Some(&legacy)), None);
+        assert_eq!(
+            configured_workspace_root_from_config(Some(&current)),
+            Some(PathBuf::from("/test-data/Documents/BiblioSmith"))
+        );
     }
 
     #[test]
@@ -4846,6 +2815,13 @@ mod tests {
             assert!(package.sha256.chars().all(|ch| ch.is_ascii_hexdigit()));
             assert!(package.archive_name.ends_with(".zip"));
             assert!(package.size_bytes > 1024 * 1024);
+        }
+        for checksum in [PYTHON_RUNTIME_SHA256]
+            .into_iter()
+            .chain(JAVA_RUNTIME_SHA256S)
+        {
+            assert_eq!(checksum.len(), 64);
+            assert!(checksum.chars().all(|ch| ch.is_ascii_hexdigit()));
         }
     }
 
@@ -4866,6 +2842,25 @@ mod tests {
 
         assert!(dir.starts_with(root.join(package.kind.dir_name())));
         assert!(dir.ends_with(package.install_dir_name));
+    }
+
+    #[test]
+    fn runtime_download_archives_stay_in_the_cache_layer() {
+        let root = temp_test_path("runtime-download-cache");
+        let paths = app_paths::AppPaths::from_roots(
+            root.join("App.app/Contents/Resources/bibliosmith-runtime"),
+            root.join("Library/Application Support/BiblioSmith/launcher"),
+            root.join("Library/Caches/BiblioSmith/launcher"),
+            root.join("Documents"),
+        );
+
+        let downloads = runtime_downloads_dir_for(&paths);
+
+        assert_eq!(
+            downloads,
+            root.join("Library/Caches/BiblioSmith/launcher/runtimes/downloads")
+        );
+        assert!(!downloads.starts_with(paths.support_root()));
     }
 
     #[test]
@@ -4912,110 +2907,12 @@ mod tests {
     }
 
     #[test]
-    fn resolves_repo_root_from_nested_source_path() {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let root = repo_root_from_path(&manifest_dir)
-            .expect("repo root should resolve from src-tauri path");
-        assert!(is_bibliosmith_repo(&root));
-        assert!(root.join("AGENTS.md").is_file());
-        assert!(root
-            .join("tools")
-            .join("create_local_book_project.py")
-            .is_file());
-        assert!(root.join("books").join("local").is_dir());
-    }
-
-    #[test]
     fn download_percent_reports_visible_progress_after_first_chunk() {
         assert_eq!(download_percent(0, 100), 0.0);
         assert_eq!(download_percent(1, 100_000_000), 1.0);
         assert_eq!(download_percent(1_234, 100_000), 1.23);
         assert_eq!(download_percent(50, 100), 50.0);
         assert_eq!(download_percent(100, 100), 100.0);
-    }
-
-    #[test]
-    fn parses_git_progress_percent_from_stderr_lines() {
-        assert_eq!(
-            parse_git_percent("Receiving objects:  42% (42/100), 1.2 MiB | 300 KiB/s"),
-            Some(42.0)
-        );
-        assert_percent_close(
-            parse_git_percent("remote: Compressing objects:  75% (2557/3409)").unwrap(),
-            75.01,
-        );
-        assert_eq!(
-            parse_git_percent("Resolving deltas: 100% (20/20), done."),
-            Some(100.0)
-        );
-        assert_eq!(parse_git_percent("Already up to date."), None);
-    }
-
-    #[test]
-    fn maps_git_clone_progress_into_visible_bibliosmith_range() {
-        assert_percent_close(
-            git_progress_for_line(GitProgressPhase::Clone, "Receiving objects: 50% (5/10)")
-                .map(|(percent, _)| percent)
-                .unwrap(),
-            47.0,
-        );
-        assert_percent_close(
-            git_progress_for_line(GitProgressPhase::Fetch, "Resolving deltas: 50% (5/10)")
-                .map(|(percent, _)| percent)
-                .unwrap(),
-            73.0,
-        );
-        assert_eq!(
-            git_progress_for_line(
-                GitProgressPhase::Clone,
-                "remote: Compressing objects:  50% (5/10)"
-            ),
-            Some((16.0, "clone_compressing"))
-        );
-    }
-
-    #[test]
-    fn git_progress_detail_includes_object_counts_and_transfer_rate() {
-        assert_eq!(
-            git_progress_detail("Receiving objects:  4% (192/4539), 14.70 MiB | 92.00 KiB/s"),
-            Some("192/4539 - 14.70 MiB | 92.00 KiB/s".to_string())
-        );
-        assert_eq!(
-            git_progress_detail("Resolving deltas: 100% (20/20), done."),
-            Some("20/20".to_string())
-        );
-    }
-
-    #[test]
-    fn git_progress_fragments_split_on_carriage_returns_and_newlines() {
-        let mut pending = String::new();
-        assert_eq!(
-            git_progress_fragments_from_chunk(
-                &mut pending,
-                "Counting objects:  1%\rCounting objects:  2%\nReceiving objects:  3%"
-            ),
-            vec!["Counting objects:  1%", "Counting objects:  2%"]
-        );
-        assert_eq!(pending, "Receiving objects:  3%");
-        assert_eq!(
-            git_progress_fragments_from_chunk(&mut pending, "\r"),
-            vec!["Receiving objects:  3%"]
-        );
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn git_transfer_args_include_low_speed_limits_before_command() {
-        let args = git_transfer_args(&["clone", "--progress", "https://example.invalid/repo.git"]);
-        assert!(has_arg_pair(&args, "-c", "http.version=HTTP/2"));
-        assert!(has_arg_pair(&args, "-c", "http.lowSpeedLimit=1024"));
-        assert!(has_arg_pair(&args, "-c", "http.lowSpeedTime=60"));
-        assert!(has_arg_pair(&args, "-c", "http.postBuffer=524288000"));
-        assert!(args.ends_with(&[
-            "clone".to_string(),
-            "--progress".to_string(),
-            "https://example.invalid/repo.git".to_string(),
-        ]));
     }
 
     #[cfg(target_os = "windows")]
@@ -5069,160 +2966,6 @@ mod tests {
     }
 
     #[test]
-    fn taskkill_args_target_entire_process_tree() {
-        assert_eq!(taskkill_tree_args(1234), vec!["/PID", "1234", "/T", "/F"]);
-    }
-
-    #[test]
-    fn project_document_candidates_follow_locale() {
-        assert_eq!(
-            project_document_candidates("readme", "zh-CN")[0],
-            PathBuf::from("README.zh-CN.md")
-        );
-        assert_eq!(
-            project_document_candidates("readme", "zh-TW")[0],
-            PathBuf::from("readme").join("README.zh-TW.md")
-        );
-        assert_eq!(
-            project_document_candidates("readme", "ja")[0],
-            PathBuf::from("readme").join("README.ja.md")
-        );
-        assert_eq!(
-            project_document_candidates("howto", "ja")[0],
-            PathBuf::from("docs")
-                .join("guides")
-                .join("how-to-use-local-reading.ja.md")
-        );
-        assert_eq!(
-            project_document_candidates("howto", "zh-TW")[0],
-            PathBuf::from("docs")
-                .join("guides")
-                .join("how-to-use-local-reading.zh-TW.md")
-        );
-    }
-
-    #[test]
-    fn bibliosmith_home_repo_root_reads_single_standard_variable() {
-        let candidate = bibliosmith_home_repo_root_from_value(Some("D:/BiblioSmith".into()));
-
-        assert_eq!(candidate, Some(PathBuf::from("D:/BiblioSmith")));
-    }
-
-    #[test]
-    fn bibliosmith_home_repo_root_ignores_blank_values() {
-        assert_eq!(
-            bibliosmith_home_repo_root_from_value(Some("  ".into())),
-            None
-        );
-        assert_eq!(bibliosmith_home_repo_root_from_value(None), None);
-    }
-
-    #[test]
-    fn repo_status_marks_missing_configured_path_without_fallback() {
-        let missing = temp_test_path("missing");
-        let _ = fs::remove_dir_all(&missing);
-
-        assert_eq!(repo_status_for_path(&missing), "missing");
-        assert!(
-            active_repo_root_from_configured_path(&missing).is_none(),
-            "a missing configured path must not resolve to the development checkout"
-        );
-    }
-
-    #[test]
-    fn missing_child_path_inside_repo_is_not_treated_as_parent_repo() {
-        let missing_inside_repo =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("__missing_bibliosmith_workspace__");
-        let _ = fs::remove_dir_all(&missing_inside_repo);
-
-        assert_eq!(repo_status_for_path(&missing_inside_repo), "missing");
-        assert!(
-            active_repo_root_from_configured_path(&missing_inside_repo).is_none(),
-            "a deleted configured subfolder must not silently fall back to its parent repository"
-        );
-    }
-
-    #[test]
-    fn repo_status_blocks_non_empty_invalid_directory() {
-        let occupied = temp_test_path("occupied");
-        fs::create_dir_all(&occupied).expect("test directory should be created");
-        fs::write(occupied.join("user-file.txt"), "user content")
-            .expect("test file should be written");
-
-        assert_eq!(repo_status_for_path(&occupied), "occupied");
-
-        fs::remove_dir_all(&occupied).expect("test directory should be cleaned");
-    }
-
-    #[test]
-    fn project_document_links_must_stay_inside_repo() {
-        assert_eq!(
-            safe_project_relative_path("./docs/guides/how-to-use-local-reading.zh-CN.md").unwrap(),
-            PathBuf::from("docs")
-                .join("guides")
-                .join("how-to-use-local-reading.zh-CN.md")
-        );
-        assert!(safe_project_relative_path("../AGENTS.md").is_err());
-        assert!(safe_project_relative_path("C:/Windows/win.ini").is_err());
-        assert!(safe_project_relative_path("https://example.com/README.md").is_err());
-    }
-
-    #[test]
-    fn localized_commit_summary_selects_block_language() {
-        let body = r#"ZH:
-- 中文第一条。
-- 中文第二条。
-
-EN:
-- English first item.
-
-JA:
-- 日本語の項目。
-"#;
-        assert_eq!(
-            localized_commit_summary(body, Some("zh-CN")),
-            "中文第一条。 中文第二条。"
-        );
-        assert_eq!(
-            localized_commit_summary(body, Some("ja-JP")),
-            "日本語の項目。"
-        );
-        assert_eq!(
-            localized_commit_summary(body, Some("en-US")),
-            "English first item."
-        );
-    }
-
-    #[test]
-    fn localized_commit_summary_supports_legacy_inline_language_labels() {
-        let body = r#"ZH: 中文摘要。
-
-EN: English summary.
-
-JA: 日本語概要。"#;
-        assert_eq!(localized_commit_summary(body, Some("zh-CN")), "中文摘要。");
-        assert_eq!(
-            localized_commit_summary(body, Some("en-US")),
-            "English summary."
-        );
-        assert_eq!(localized_commit_summary(body, Some("ja")), "日本語概要。");
-    }
-
-    #[test]
-    fn full_commit_message_keeps_title_and_body_for_tooltip() {
-        let body = r#"ZH:
-- 中文摘要。
-
-EN:
-- English summary."#;
-
-        assert_eq!(
-            full_commit_message("Improve Launcher updates", body),
-            "Improve Launcher updates\n\nZH:\n- 中文摘要。\n\nEN:\n- English summary."
-        );
-    }
-
-    #[test]
     fn diagnostic_logging_defaults_to_enabled_for_missing_config() {
         assert!(diagnostic_logging_enabled_from_config(
             &LauncherConfig::default()
@@ -5232,34 +2975,15 @@ EN:
     #[test]
     fn diagnostic_logging_can_be_disabled_from_config() {
         let config = LauncherConfig {
-            repo_root: None,
+            workspace_root: None,
             save_logs: Some(false),
             proxy: None,
-            auto_install_node_modules: None,
             active_model: None,
             qwen_workspace_id: None,
             qwen_web_search_enabled: None,
         };
 
         assert!(!diagnostic_logging_enabled_from_config(&config));
-    }
-
-    #[test]
-    fn node_modules_auto_install_defaults_to_enabled() {
-        assert!(auto_install_node_modules_enabled_from_config(
-            &LauncherConfig::default()
-        ));
-
-        let config = LauncherConfig {
-            repo_root: None,
-            save_logs: None,
-            proxy: None,
-            auto_install_node_modules: Some(false),
-            active_model: None,
-            qwen_workspace_id: None,
-            qwen_web_search_enabled: None,
-        };
-        assert!(!auto_install_node_modules_enabled_from_config(&config));
     }
 
     #[test]
@@ -5361,115 +3085,6 @@ EN:
     }
 
     #[test]
-    fn bibliosmith_diverged_message_includes_safe_counts() {
-        let message =
-            bibliosmith_diverged_message(Path::new(r"D:\BiblioSmith"), "origin/main", 3, 64);
-
-        assert!(message.contains("本地分支和 GitHub 已分叉"));
-        assert!(message.contains("本地多 3 个 commit"));
-        assert!(message.contains("GitHub 多 64 个 commit"));
-        assert!(message.contains("不会自动 merge/rebase"));
-    }
-
-    #[test]
-    fn node_modules_progress_detail_formats_files_bytes_and_rate() {
-        assert_eq!(
-            node_modules_progress_detail(774, 7029, 14_459_863, 9_332_326),
-            "(774/7029), 14121.0 KB | 9113.6 KB/s"
-        );
-        assert_eq!(
-            node_modules_progress_detail(0, 0, 0, 0),
-            "(0/0), 0.0 KB | 0.0 KB/s"
-        );
-    }
-
-    #[test]
-    fn node_modules_ready_requires_epubchecker_vendor_jar() {
-        let root = temp_test_path("node-modules-ready-requires-epubcheck");
-        let _ = fs::remove_dir_all(&root);
-        let epubchecker_dir = root.join("books").join("node_modules").join("epubchecker");
-        fs::create_dir_all(&epubchecker_dir).expect("epubchecker directory should be created");
-        fs::write(
-            epubchecker_dir.join("package.json"),
-            r#"{"epubcheckVersion":"5.2.1"}"#,
-        )
-        .expect("epubchecker package metadata should be written");
-
-        assert!(
-            !books_node_modules_ready(&root),
-            "epubchecker package without the vendored jar is not ready"
-        );
-
-        let jar = epubchecker_dir
-            .join("vendors")
-            .join("epubcheck-5.2.1")
-            .join("epubcheck.jar");
-        fs::create_dir_all(jar.parent().unwrap()).expect("vendor directory should be created");
-        fs::write(&jar, "jar").expect("vendor jar should be written");
-
-        assert!(books_node_modules_ready(&root));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn node_modules_package_detects_epubchecker_without_vendor() {
-        let root = temp_test_path("node-modules-package-detects-partial");
-        let _ = fs::remove_dir_all(&root);
-        let epubchecker_dir = root.join("books").join("node_modules").join("epubchecker");
-        fs::create_dir_all(&epubchecker_dir).expect("epubchecker directory should be created");
-        fs::write(
-            epubchecker_dir.join("package.json"),
-            r#"{"epubcheckVersion":"5.2.1"}"#,
-        )
-        .expect("epubchecker package metadata should be written");
-
-        assert!(books_node_modules_package_installed(&root));
-        assert!(!books_node_modules_ready(&root));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn npm_install_args_ignore_dependency_install_scripts() {
-        let root = temp_test_path("npm-install-args");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("test directory should be created");
-        let lock = root.join("package-lock.json");
-        fs::write(&lock, "{}").expect("package lock should be written");
-
-        let args = npm_install_args(&lock, NPM_PRIMARY_REGISTRY);
-
-        assert_eq!(args.first().map(String::as_str), Some("ci"));
-        assert!(args.iter().any(|arg| arg == "--ignore-scripts"));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "--registry=https://registry.npmjs.org/"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn epubcheck_download_url_targets_w3c_release_zip() {
-        assert_eq!(
-            epubcheck_download_url("5.2.1"),
-            "https://github.com/w3c/epubcheck/releases/download/v5.2.1/epubcheck-5.2.1.zip"
-        );
-    }
-
-    #[test]
-    fn git_transfer_retry_detects_common_github_disconnects() {
-        assert!(should_retry_git_transfer(
-            "error: RPC failed; curl 18 transfer closed with outstanding read data remaining"
-        ));
-        assert!(should_retry_git_transfer("fatal: early EOF"));
-        assert!(should_retry_git_transfer(
-            "HTTP/2 stream 5 was not closed cleanly"
-        ));
-        assert!(!should_retry_git_transfer("BiblioSmith 下载已停止"));
-    }
-
-    #[test]
     fn rotating_diagnostic_log_keeps_newest_files_and_removes_oldest() {
         let dir = temp_test_path("diagnostic-rotation");
         fs::create_dir_all(&dir).expect("log directory should be created");
@@ -5542,7 +3157,7 @@ EN:
         let context = diagnostic_context_for_export(
             "v-test",
             "D:\\BiblioSmith",
-            "ready",
+            app_paths::WorkspaceStatus::Ready,
             true,
             &log_dir,
             4096,
@@ -5555,23 +3170,11 @@ EN:
         assert!(export_dir.join("bibliosmith-launcher.log.1").is_file());
         let context_text = fs::read_to_string(export_dir.join("diagnostic-context.json"))
             .expect("diagnostic context should be exported");
-        assert!(context_text.contains("\"repoRoot\": \"D:\\\\BiblioSmith\""));
+        assert!(context_text.contains("\"workspaceRoot\": \"D:\\\\BiblioSmith\""));
+        assert!(context_text.contains("\"workspaceStatus\": \"ready\""));
         assert!(context_text.contains("\"saveLogs\": true"));
 
         fs::remove_dir_all(&log_dir).expect("source log directory should be cleaned");
         fs::remove_dir_all(&export_parent).expect("export directory should be cleaned");
-    }
-
-    #[test]
-    fn bibliosmith_update_guard_allows_only_one_update_job() {
-        let first = BiblioSmithUpdateGuard::try_acquire().expect("first update job should start");
-        assert!(
-            BiblioSmithUpdateGuard::try_acquire().is_err(),
-            "second update job should be rejected while the first job is active"
-        );
-        drop(first);
-        let second =
-            BiblioSmithUpdateGuard::try_acquire().expect("guard should release after drop");
-        drop(second);
     }
 }
