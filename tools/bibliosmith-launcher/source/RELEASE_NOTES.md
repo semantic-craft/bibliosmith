@@ -1,8 +1,8 @@
-# BiblioSmith Launcher 1.16.1
+# BiblioSmith Launcher 1.16.2
 
 ## ZH
 
-BiblioSmith Launcher 1.16.1 将翻译提示词、出版结构和独立运行环境三条链路合并为一套可复核的本地成书流程。本版同时纳入最新安全依赖更新和 macOS 随包运行时签名修复。
+BiblioSmith Launcher 1.16.2 将翻译提示词、出版结构和独立运行环境三条链路合并为一套可复核的本地成书流程。本版同时纳入最新安全依赖更新和 macOS 随包运行时签名修复。
 
 ### 翻译提示词方案
 
@@ -30,7 +30,7 @@ BiblioSmith Launcher 1.16.1 将翻译提示词、出版结构和独立运行环�
 
 ## EN
 
-BiblioSmith Launcher 1.16.1 brings prompt management, publication structure, and a self-contained runtime into one auditable local book-production workflow. It also includes the latest security dependency update and a macOS bundled-runtime signing fix.
+BiblioSmith Launcher 1.16.2 brings prompt management, publication structure, and a self-contained runtime into one auditable local book-production workflow. It also includes the latest security dependency update and a macOS bundled-runtime signing fix.
 
 ### Translation prompt packs
 
@@ -58,7 +58,7 @@ BiblioSmith Launcher 1.16.1 brings prompt management, publication structure, and
 
 ## JA
 
-BiblioSmith Launcher 1.16.1 は、翻訳プロンプト管理、出版構造、自己完結型ランタイムを、一つの監査可能なローカル製本フローへ統合します。最新のセキュリティ依存関係更新と macOS 同梱ランタイム署名の修正も含みます。
+BiblioSmith Launcher 1.16.2 は、翻訳プロンプト管理、出版構造、自己完結型ランタイムを、一つの監査可能なローカル製本フローへ統合します。最新のセキュリティ依存関係更新と macOS 同梱ランタイム署名の修正も含みます。
 
 ### 翻訳プロンプトパック
 
