@@ -22,6 +22,8 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDir, "../../../..");
 const booksRoot = join(repositoryRoot, "books");
 const epubcheckerRoot = join(booksRoot, "node_modules", "epubchecker");
+const playwrightCoreRoot = join(booksRoot, "node_modules", "playwright-core");
+const browserManifestRelativePath = "vendor/playwright-core/browser-manifest.json";
 const vendorRoot = join(epubcheckerRoot, "vendors");
 const stagingRoot = join(scriptDir, "..", "src-tauri", "bundle-resources", "runtime");
 const sidecarStagingRoot = join(scriptDir, "..", "src-tauri", "bundle-resources", "sidecars");
@@ -46,7 +48,7 @@ const uvArchives = {
   "x86_64-pc-windows-msvc": ["uv-x86_64-pc-windows-msvc.zip", "c84629a56e0706b69a47ea35862208af827cb6fbfa1d0ca763c52c67594637e8"],
 };
 
-const runtimeScripts = ["build_bilingual_epub.py", "build_epub.cjs", "run_python.cjs"];
+const runtimeScripts = ["audit_epub.py", "build_bilingual_epub.py", "build_epub.cjs", "compile_publication_structure.cjs", "render_epub_smoke.cjs", "run_python.cjs"];
 const runtimeResources = [
   "packages/translation-engine/pyproject.toml",
   "packages/translation-engine/src/translation_engine/__init__.py",
@@ -105,6 +107,7 @@ const runtimeResources = [
   "packages/ocr/mineru.py",
   "packages/ocr/paddle.py",
   "packages/ocr/pdf_text.py",
+  "packages/ocr/publication_evidence.py",
   "packages/ocr/sample_compare.py",
   "packages/ocr/scripts/epub_to_markdown.py",
   "packages/ocr/scripts/pdf_to_html_paddleocr.py",
@@ -122,6 +125,35 @@ function bundledJar() {
     return null;
   }
   return null;
+}
+
+function chromiumHeadlessShell(root = playwrightCoreRoot) {
+  const executableNames = process.platform === "win32"
+    ? new Set(["headless_shell.exe", "chrome-headless-shell.exe"])
+    : new Set(["headless_shell", "chrome-headless-shell"]);
+  return stagedFiles(join(root, ".local-browsers"))
+    .map((relativePath) => join(root, ".local-browsers", relativePath))
+    .find((candidate) => executableNames.has(candidate.split(/[\\/]/).at(-1))
+      && existsSync(candidate)
+      && statSync(candidate).isFile()) ?? null;
+}
+
+function ensurePinnedChromium() {
+  if (chromiumHeadlessShell()) return;
+  const install = spawnSync(
+    process.execPath,
+    [join(playwrightCoreRoot, "cli.js"), "install", "chromium-headless-shell"],
+    {
+      cwd: booksRoot,
+      stdio: "inherit",
+      env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: "0" },
+    },
+  );
+  if (install.status !== 0 || !chromiumHeadlessShell()) {
+    throw new Error(
+      `Unable to install the Playwright-pinned Chromium headless shell (exit ${install.status ?? "unknown"}).`,
+    );
+  }
 }
 
 function processIsAlive(pid) {
@@ -325,6 +357,7 @@ function copyRuntimeSidecar(source, name, targetTriple) {
 
 function stagedFiles(directory, relative = "") {
   const files = [];
+  if (!existsSync(directory)) return files;
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const childRelative = relative ? join(relative, entry.name) : entry.name;
     if (entry.isDirectory()) {
@@ -357,6 +390,8 @@ function expectedRuntimeFiles() {
     ...runtimeResources,
     ...runtimeScripts.map((script) => `tools/bibliosmith-launcher/source/scripts/${script}`),
     ...stagedFiles(epubcheckerRoot).map((path) => `vendor/epubchecker/${path}`),
+    ...stagedFiles(playwrightCoreRoot).map((path) => `vendor/playwright-core/${path}`),
+    browserManifestRelativePath,
   ]);
 }
 
@@ -411,6 +446,18 @@ function verifyStagedInventory(targetTriple) {
       throw new Error(`Staged ${name} sidecar failed its pinned version probe.`);
     }
   }
+  const browserManifest = JSON.parse(
+    readFileSync(join(stagingRoot, browserManifestRelativePath), "utf8"),
+  );
+  const stagedBrowser = join(stagingRoot, browserManifest.relativePath);
+  const browserProbe = spawnSync(stagedBrowser, ["--version"], { encoding: "utf8" });
+  if (browserManifest.schema !== "bibliosmith-browser-runtime-v1"
+    || !browserManifest.version
+    || browserManifest.sha256 !== sha256File(stagedBrowser)
+    || browserProbe.status !== 0
+    || !`${browserProbe.stdout}${browserProbe.stderr}`.includes(browserManifest.version)) {
+    throw new Error("Staged Chromium manifest does not match the pinned browser executable.");
+  }
 }
 
 function bundleInputFingerprint(jar, targetTriple) {
@@ -431,6 +478,10 @@ function bundleInputFingerprint(jar, targetTriple) {
     hash.update(`epubchecker/${relativePath}`);
     hash.update(readFileSync(join(epubcheckerRoot, relativePath)));
   }
+  for (const relativePath of stagedFiles(playwrightCoreRoot).sort()) {
+    hash.update(`playwright-core/${relativePath}`);
+    hash.update(readFileSync(join(playwrightCoreRoot, relativePath)));
+  }
   hash.update(JSON.stringify({ nodeVersion, uvVersion, uvLicenses, targetTriple, jar: jar.split(/[\\/]/).at(-2) }));
   return hash.digest("hex");
 }
@@ -449,6 +500,7 @@ try {
       );
     }
   }
+  ensurePinnedChromium();
 
   const jar = bundledJar();
   if (!jar) {
@@ -516,6 +568,28 @@ try {
         join(stagedEpubchecker, relativePath),
       );
     }
+    const stagedPlaywrightCore = join(stagingRoot, "vendor", "playwright-core");
+    mkdirSync(stagedPlaywrightCore, { recursive: true });
+    for (const relativePath of stagedFiles(playwrightCoreRoot)) {
+      copyFileAtomic(
+        join(playwrightCoreRoot, relativePath),
+        join(stagedPlaywrightCore, relativePath),
+      );
+    }
+    const browser = chromiumHeadlessShell(playwrightCoreRoot);
+    if (!browser) throw new Error("Pinned Chromium disappeared during bundle preparation.");
+    const browserProbe = spawnSync(browser, ["--version"], { encoding: "utf8" });
+    const browserVersion = `${browserProbe.stdout}${browserProbe.stderr}`.trim();
+    if (browserProbe.status !== 0 || !browserVersion) {
+      throw new Error("Pinned Chromium failed its version probe.");
+    }
+    writeFileAtomic(join(stagingRoot, browserManifestRelativePath), `${JSON.stringify({
+      schema: "bibliosmith-browser-runtime-v1",
+      relativePath: `vendor/playwright-core/${browser.slice(playwrightCoreRoot.length + 1).replaceAll("\\", "/")}`,
+      version: browserVersion.replace(/^.*?([0-9]+(?:\.[0-9]+)+).*$/, "$1"),
+      sha256: sha256File(browser),
+      playwrightCoreVersion: JSON.parse(readFileSync(join(playwrightCoreRoot, "package.json"), "utf8")).version,
+    }, null, 2)}\n`);
     pruneFilesOutsideManifest(stagingRoot, expectedRuntimeFiles());
     pruneFilesOutsideManifest(sidecarStagingRoot, expectedSidecarFiles(tauriTarget));
     writeFileAtomic(inputManifestPath, `${JSON.stringify({

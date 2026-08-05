@@ -463,6 +463,21 @@ export type TranslationPromptPreview = {
   parameters?: Record<string, string>;
 };
 
+export type BookPipelineStructureCorrectionDraft = {
+  schema: "publication-structure-correction-draft-v1";
+  sourceMarkdownSha256: string;
+  publicationMapSha256: string;
+  anomalies: string[];
+  sections: unknown[];
+};
+
+export type BookPipelineStructureCorrectionInput = Omit<
+  BookPipelineStructureCorrectionDraft,
+  "anomalies"
+> & {
+  reason: string;
+};
+
 export type BookPipelineTranslationIntent = {
   translationMode: "fast" | "expert";
   profileId: string;

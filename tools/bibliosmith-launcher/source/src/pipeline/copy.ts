@@ -70,6 +70,20 @@ export function pipelineCopy(locale: PipelineLocale) {
     drawerNext: zh ? "下一本" : "Next book",
     drawerClose: zh ? "关闭" : "Close",
     resizeDrawer: zh ? "调整书架与详情栏宽度" : "Resize bookshelf and details pane",
+    structureCorrectionTitle: zh ? "审查并校正出版结构" : "Review and correct publication structure",
+    structureCorrectionHelp: zh
+      ? "结构门禁已阻止分章。你可以修改标题、层级、角色和类型；来源顺序、行号、页码、文件与锚点由系统锁定。保存后会按校正结果重新分章。"
+      : "The structure gate stopped splitting. You may edit titles, hierarchy, roles, and kinds; source order, lines, pages, files, and anchors stay locked. Saving retries the split with the correction.",
+    structureCorrectionOpen: zh ? "打开结构校正" : "Open structure correction",
+    structureCorrectionReason: zh ? "校正理由" : "Correction reason",
+    structureCorrectionReasonPlaceholder: zh
+      ? "说明为什么提取器判断错误，以及你修改了什么。"
+      : "Explain why the extractor was wrong and what you changed.",
+    structureCorrectionSections: zh ? "出版章节（JSON）" : "Publication sections (JSON)",
+    structureCorrectionSave: zh ? "保存并重新分章" : "Save and retry split",
+    structureCorrectionSaving: zh ? "保存中…" : "Saving…",
+    structureCorrectionInvalidJson: zh ? "章节 JSON 无法解析。" : "The sections JSON is invalid.",
+    structureCorrectionLoadError: zh ? "无法读取失败的出版结构。" : "Could not load the failed publication structure.",
     abNoAction: zh ? "不需要操作，好了会提醒你" : "Nothing to do — you'll be notified",
     abAdvanceRequired: zh ? "需要操作：继续到下一阶段" : "Action needed: continue to the next stage",
     abGatePrefix: zh ? "下一步需要你：" : "Next step needs you: ",
@@ -230,6 +244,12 @@ export function pipelineCopy(locale: PipelineLocale) {
     artifactZoteroAttachment: zh ? "Zotero 子附件" : "Zotero child attachment",
     artifactSourceMap: zh ? "source_map" : "source_map",
     artifactReading: zh ? "阅读成品" : "Reading outputs",
+    artifactPackageValidity: zh ? "包规范有效性" : "Package validity",
+    artifactStructuralReadability: zh ? "结构可读性" : "Structural readability",
+    artifactReaderAcceptance: zh ? "阅读器验收" : "Reader acceptance",
+    validationPassed: zh ? "通过" : "Passed",
+    validationFailedLabel: zh ? "失败" : "Failed",
+    validationNotRecorded: zh ? "未验证" : "Not recorded",
     artifactPresent: zh ? "✓" : "✓",
     artifactAttached: zh ? "已挂 ✓" : "attached ✓",
     artifactGenerating: zh ? "生成中" : "In progress",

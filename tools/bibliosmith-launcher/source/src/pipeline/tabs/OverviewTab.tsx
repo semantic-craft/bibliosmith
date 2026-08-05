@@ -1,4 +1,10 @@
+import { useState } from "react";
 import type { PipelineCopy } from "../copy";
+import {
+  getBookPipelineStructureCorrectionDraft,
+  saveBookPipelineStructureCorrection,
+} from "../../api";
+import type { BookPipelineStructureCorrectionDraft } from "../../types";
 import {
   GATE_STAGE_IDS,
   currentStage,
@@ -19,6 +25,122 @@ import {
 } from "../model";
 import type { TabProps } from "./tabProps";
 import { OcrCompareCard, canCompareOcrEngines } from "../OcrCompareCard";
+
+export function StructureCorrectionCard({
+  unit,
+  copy,
+  onRetry,
+}: Pick<TabProps, "unit" | "copy" | "onRetry">) {
+  const stage = currentStage(unit);
+  const childId = unit.child?.id ?? null;
+  const available =
+    stage?.stageId === "split" &&
+    (stage.status === "failed" || stage.status === "blocked") &&
+    Boolean(childId);
+  const [draft, setDraft] = useState<BookPipelineStructureCorrectionDraft | null>(null);
+  const [sectionsJson, setSectionsJson] = useState("");
+  const [reason, setReason] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  if (!available) return null;
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const next = await getBookPipelineStructureCorrectionDraft(unit.job.id, childId);
+      setDraft(next);
+      setSectionsJson(JSON.stringify(next.sections, null, 2));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : copy.structureCorrectionLoadError);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const save = async () => {
+    if (!draft) return;
+    let sections: unknown[];
+    try {
+      const parsed: unknown = JSON.parse(sectionsJson);
+      if (!Array.isArray(parsed)) throw new Error(copy.structureCorrectionInvalidJson);
+      sections = parsed;
+    } catch {
+      setError(copy.structureCorrectionInvalidJson);
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await saveBookPipelineStructureCorrection(unit.job.id, childId, {
+        schema: draft.schema,
+        sourceMarkdownSha256: draft.sourceMarkdownSha256,
+        publicationMapSha256: draft.publicationMapSha256,
+        reason,
+        sections,
+      });
+      onRetry(unit.job.id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : copy.structureCorrectionLoadError);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="pl-custom-instructions">
+      <div className="pl-ci-head">
+        <h3>{copy.structureCorrectionTitle}</h3>
+        <p>{copy.structureCorrectionHelp}</p>
+      </div>
+      {!draft ? (
+        <div className="pl-ci-actions">
+          <button className="pl-btn sm primary" type="button" disabled={loading} onClick={load}>
+            {loading ? copy.progressWorking : copy.structureCorrectionOpen}
+          </button>
+        </div>
+      ) : (
+        <>
+          {draft.anomalies.length > 0 && (
+            <ul className="pl-structure-anomalies">
+              {draft.anomalies.map((anomaly) => <li key={anomaly}>{anomaly}</li>)}
+            </ul>
+          )}
+          <label className="pl-ci-field">
+            {copy.structureCorrectionReason}
+            <textarea
+              value={reason}
+              placeholder={copy.structureCorrectionReasonPlaceholder}
+              onChange={(event) => setReason(event.target.value)}
+            />
+          </label>
+          <label className="pl-ci-field">
+            {copy.structureCorrectionSections}
+            <textarea
+              className="pl-structure-json"
+              value={sectionsJson}
+              onChange={(event) => setSectionsJson(event.target.value)}
+              spellCheck={false}
+            />
+          </label>
+          <div className="pl-ci-actions">
+            <button
+              className="pl-btn sm primary"
+              type="button"
+              disabled={saving || !reason.trim()}
+              onClick={save}
+            >
+              {saving ? copy.structureCorrectionSaving : copy.structureCorrectionSave}
+            </button>
+          </div>
+        </>
+      )}
+      {error && <p className="pl-ci-error" role="alert">{error}</p>}
+    </section>
+  );
+}
 
 function railNodeClass(status: string): string {
   switch (status) {
@@ -242,8 +364,25 @@ function ArtifactDigestCard({ unit, copy }: { unit: BookUnit; copy: PipelineCopy
     : "—";
   const sourceMap = kinds.has("source_map") ? copy.artifactPresent : "—";
   const readingKinds = artifacts.filter((artifact) => artifact.kind.startsWith("reading_"));
+  const conclusionFor = (reportKinds: Set<string>): string => {
+    const reports = artifacts.filter((artifact) => reportKinds.has(artifact.kind));
+    if (!reports.length) return "—";
+    return reports.every((artifact) => artifact.validation?.requiredChecksPassed === true)
+      ? copy.validationPassed
+      : copy.validationFailedLabel;
+  };
+  const packageValidity = conclusionFor(new Set(["epubcheck_report", "bilingual_epubcheck_report"]));
+  const structuralReadability = conclusionFor(
+    new Set(["structural_readability_report", "bilingual_structural_readability_report"]),
+  );
+  const freshReaderEvidence = (unit.child?.readerEvidence ?? []).filter((evidence) => !evidence.stale);
+  const readerAcceptance = !freshReaderEvidence.length
+    ? copy.validationNotRecorded
+    : freshReaderEvidence.every((evidence) => evidence.conclusion === "passed")
+      ? copy.validationPassed
+      : copy.validationFailedLabel;
   const reading = readingKinds.length
-    ? `${readingKinds.map((artifact) => artifact.kind.replace("reading_", "").toUpperCase()).join(" / ")} ✓`
+    ? readingKinds.map((artifact) => artifact.kind.replace("reading_", "").toUpperCase()).join(" / ")
     : "—";
   return (
     <div className="pl-card">
@@ -264,6 +403,18 @@ function ArtifactDigestCard({ unit, copy }: { unit: BookUnit; copy: PipelineCopy
         <span className="pl-k">{copy.artifactReading}</span>
         <span className="pl-v">{reading}</span>
       </div>
+      <div className="pl-evi-row">
+        <span className="pl-k">{copy.artifactPackageValidity}</span>
+        <span className="pl-v">{packageValidity}</span>
+      </div>
+      <div className="pl-evi-row">
+        <span className="pl-k">{copy.artifactStructuralReadability}</span>
+        <span className="pl-v">{structuralReadability}</span>
+      </div>
+      <div className="pl-evi-row">
+        <span className="pl-k">{copy.artifactReaderAcceptance}</span>
+        <span className="pl-v">{readerAcceptance}</span>
+      </div>
     </div>
   );
 }
@@ -274,6 +425,12 @@ export function OverviewTab(props: TabProps) {
     <>
       <StageRail unit={unit} copy={copy} />
       <ActionCard {...props} />
+      <StructureCorrectionCard
+        key={`${unit.job.id}:${unit.child?.id ?? ""}:${currentStage(unit)?.attempt ?? 0}`}
+        unit={unit}
+        copy={copy}
+        onRetry={props.onRetry}
+      />
       {/* Only while the engine is still an open question — the backend refuses
           a sample once extraction has started, so an always-visible card would
           offer a button that errors. */}

@@ -20,6 +20,29 @@ desktop launcher owns orchestration, but it does not own every component's data.
   contains job metadata and aggregate progress only, never source titles, paths,
   logs, private text, or credentials.
 
+## Book structure
+
+- **Publication section**: a reader-visible node in a book's nested structure,
+  such as front matter, a part, chapter, section, notes, bibliography, or
+  appendix. Its identity and title do not change when processing limits change.
+- **Translation unit**: a bounded, source-traceable batch sent through the
+  translation workflow. It belongs to a publication section but is never itself
+  a reader-visible chapter or navigation title.
+- **Publication map**: the book-owned, versioned tree of publication sections,
+  roles, source ranges, and semantic references used to build reading outputs.
+- **Source mapping**: the traceability relationship from each translation unit
+  and semantic reference back to its publication section and source range.
+- **Semantic Note**: an extractor-independent note entity whose stable ID,
+  references, definition range, owning publication section, source files/pages,
+  target-content state, and backlinks survive split, translation, and EPUB
+  construction. Extractor evidence and canonical Markdown must agree.
+- **Package validity**: machine evidence that a reading artifact is a valid,
+  internally consistent package.
+- **Structural readability**: machine evidence that a reading artifact preserves
+  the book's publication structure, metadata, navigation, notes, and reflow rules.
+- **Reader acceptance**: optional, artifact-bound evidence recorded from an
+  actual reading system. Absence means not recorded, never accepted.
+
 ## Translation prompt language
 
 - **Translation Prompt Pack**: a named translation behaviour contract with a
@@ -76,3 +99,6 @@ desktop launcher owns orchestration, but it does not own every component's data.
 - [ADR 0004](docs/adr/0004-immutable-prompt-packs-and-ephemeral-compilation.md):
   immutable Prompt Pack revisions, incompatible executors, verified expert
   evidence references, and ephemeral actual-prompt compilation.
+- [ADR 0005](docs/adr/0005-publication-structure-is-independent-of-translation-units.md):
+  publication sections and bounded translation units are separate contracts;
+  package, structure, and reader acceptance are separate conclusions.

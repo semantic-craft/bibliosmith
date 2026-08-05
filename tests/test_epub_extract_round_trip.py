@@ -24,6 +24,8 @@ import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
+from test_support.epub_builder_contract import write_publication_contract
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "packages" / "ocr" / "scripts"))
 
@@ -58,6 +60,10 @@ def build_real_epub(book_root: Path) -> Path:
 
     source_scripts = REPO_ROOT / "tools" / "bibliosmith-launcher" / "source" / "scripts"
     shutil.copy(source_scripts / "build_epub.cjs", scripts / "build_epub.cjs")
+    shutil.copy(
+        source_scripts / "compile_publication_structure.cjs",
+        scripts / "compile_publication_structure.cjs",
+    )
     shutil.copy(source_scripts / "run_python.cjs", scripts / "run_python.cjs")
     for name, text in CHAPTERS.items():
         (final / name).write_text(text, encoding="utf-8")
@@ -65,6 +71,7 @@ def build_real_epub(book_root: Path) -> Path:
         json.dumps({"source_file_name": "Round Trip.epub", "target_language": "zh-Hans"}),
         encoding="utf-8",
     )
+    write_publication_contract(book_root, title="Round Trip Fixture")
 
     completed = subprocess.run(
         ["node", str(scripts / "build_epub.cjs")],

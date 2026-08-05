@@ -87,13 +87,14 @@ class TextRouteMarkdownTests(unittest.TestCase):
         self.assertNotIn("## Page ", text)
         self.assertNotIn("[no extractable text]", text)
 
-    def test_the_book_title_is_still_the_one_heading_the_route_adds(self) -> None:
+    def test_the_route_does_not_invent_a_heading_from_the_attachment_name(self) -> None:
         _, markdown_path, _ = self.run_route()
 
         text = markdown_path.read_text(encoding="utf-8")
 
         self.assertTrue(text.startswith("---"))
-        self.assertIn("\n# Example.pdf\n", text)
+        self.assertNotIn("\n# Example.pdf\n", text)
+        self.assertEqual([1, 2, 3, 4], markdown_page_numbers(markdown_path))
         self.assertIn("of the body", text)
 
     def test_the_sidecar_keeps_its_per_page_character_counts(self) -> None:
@@ -127,6 +128,30 @@ class TextRouteMarkdownTests(unittest.TestCase):
         self.assertEqual([1, 2, 3, 4], sidecar_page_numbers(sidecar_path))
         self.assertNotIn("## Page ", markdown_path.read_text(encoding="utf-8"))
         self.assertIn(markdown_page_numbers(markdown_path), ([], [1, 2, 3, 4]))
+
+    def test_real_pdf_route_emits_a_stable_semantic_note_contract(self) -> None:
+        self.pdf = write_pdf(
+            self.root / "Notes.pdf",
+            ["# Chapter\n\nClaim[^pdf-1].\n\n[^pdf-1]: PDF note."],
+        )
+        self.attachment = dataclasses.replace(
+            self.attachment,
+            title="Notes.pdf",
+            path=self.pdf,
+        )
+
+        _, markdown_path, _ = self.run_route()
+        evidence = json.loads(
+            markdown_path.with_suffix(".publication.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual("pdf", evidence["sourceFormat"])
+        self.assertEqual("note_001", evidence["notes"][0]["id"])
+        self.assertEqual("pdf-1", evidence["notes"][0]["sourceLabel"])
+        self.assertEqual(
+            ["noteref_note_001_001"], evidence["notes"][0]["referenceIds"]
+        )
+        self.assertEqual([], evidence["notes"][0]["anomalies"])
 
 
 class PageNumberReaderTests(unittest.TestCase):

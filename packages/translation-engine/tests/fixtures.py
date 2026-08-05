@@ -73,12 +73,12 @@ def build_run_fixture(
     _write_json(
         source_map_path,
         {
-            "schema": "local-reading-source-map-v1",
-            "chapters": [
+            "schema": "local-reading-source-map-v2",
+            "translationUnits": [
                 {
                     "id": "chapter_001",
-                    "chapterSourcePath": "chapters/src/chapter_001.md",
-                    "chapterSourceSha256": source_sha256,
+                    "sourceUnitPath": "chapters/src/chapter_001.md",
+                    "sourceUnitSha256": source_sha256,
                 }
             ],
         },
@@ -94,12 +94,12 @@ def build_run_fixture(
     _write_json(
         task_path,
         {
-            "schema": "local-reading-translation-task-v1",
+            "schema": "local-reading-translation-task-v2",
             "taskPolicyVersion": "task-policy-v1",
-            "chapterId": "chapter_001",
+            "unitId": "chapter_001",
             "targetLanguage": "zh-Hans",
-            "sourceChapterPath": "chapters/src/chapter_001.md",
-            "sourceChapterSha256": source_sha256,
+            "sourceUnitPath": "chapters/src/chapter_001.md",
+            "sourceUnitSha256": source_sha256,
             "glossaryPath": "glossary/terms.csv",
             "glossarySha256": glossary_sha256,
         },
@@ -215,8 +215,8 @@ def _write_units(project_root: Path, source_texts: list[str]) -> list[dict[str, 
         chapters.append(
             {
                 "id": chapter_id,
-                "chapterSourcePath": source_relative,
-                "chapterSourceSha256": source_sha256,
+                "sourceUnitPath": source_relative,
+                "sourceUnitSha256": source_sha256,
             }
         )
 
@@ -226,12 +226,12 @@ def _write_units(project_root: Path, source_texts: list[str]) -> list[dict[str, 
         _write_json(
             task_path,
             {
-                "schema": "local-reading-translation-task-v1",
+                "schema": "local-reading-translation-task-v2",
                 "taskPolicyVersion": "task-policy-v1",
-                "chapterId": chapter_id,
+                "unitId": chapter_id,
                 "targetLanguage": "zh-Hans",
-                "sourceChapterPath": source_relative,
-                "sourceChapterSha256": source_sha256,
+                "sourceUnitPath": source_relative,
+                "sourceUnitSha256": source_sha256,
                 "glossaryPath": "glossary/terms.csv",
                 "glossarySha256": glossary_sha256,
             },
@@ -242,7 +242,7 @@ def _write_units(project_root: Path, source_texts: list[str]) -> list[dict[str, 
     source_map_path.parent.mkdir(parents=True, exist_ok=True)
     _write_json(
         source_map_path,
-        {"schema": "local-reading-source-map-v1", "chapters": chapters},
+        {"schema": "local-reading-source-map-v2", "translationUnits": chapters},
     )
     return units
 

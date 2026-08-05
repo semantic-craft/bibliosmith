@@ -50,6 +50,8 @@ No network access and no credentials: extraction is fully offline.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
 import posixpath
 import re
@@ -61,7 +63,11 @@ from urllib.parse import unquote
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
+APP_ROOT = Path(__file__).resolve().parents[1]
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
 from progress import OperationProgress
+from publication_evidence import SourceDocument, build_note_evidence
 
 
 logging.basicConfig(
@@ -130,7 +136,11 @@ BLOCK_TAGS = frozenset(
 # Elements plausible as a footnote body. Without this, a `<div id="chapter3">`
 # wrapping a whole chapter could be pulled inline as somebody's footnote.
 FOOTNOTE_BODY_TAGS = frozenset({"aside", "dd", "div", "li", "note", "p", "span", "td"})
-FOOTNOTE_BODY_MAX_CHARACTERS = 2000
+# Untyped EPUB 2 notes are discovered heuristically. Keep a conservative limit
+# there so an id-bearing chapter wrapper cannot be mistaken for a note body.
+# Explicit EPUB/ARIA note semantics are authoritative and must never be
+# truncated merely because a legal or scholarly note is long.
+UNTYPED_FOOTNOTE_BODY_MAX_CHARACTERS = 2000
 
 
 @dataclass
@@ -227,6 +237,10 @@ class ManifestItem:
 class Package:
     opf_path: str
     title: str
+    creator: str
+    publisher: str
+    publication_date: str
+    cover_href: str
     manifest: dict[str, ManifestItem]
     spine: list[str]
     toc_id: str
@@ -287,11 +301,34 @@ def read_package(archive: ZipFile) -> Package:
     if not spine:
         raise EpubExtractError("package document has an empty spine")
 
-    title_element = package.find(f".//{_qualified(DUBLIN_CORE_NAMESPACE, 'title')}")
-    title = collapse_whitespace(title_element.text or "") if title_element is not None else ""
+    def dc_text(name: str) -> str:
+        element = package.find(f".//{_qualified(DUBLIN_CORE_NAMESPACE, name)}")
+        return collapse_whitespace(element.text or "") if element is not None else ""
+
+    cover_item = next(
+        (item for item in manifest.values() if "cover-image" in item.properties.split()),
+        None,
+    )
+    if cover_item is None:
+        legacy_cover_id = next(
+            (
+                element.get("content", "")
+                for element in package.iter(_qualified(OPF_NAMESPACE, "meta"))
+                if element.get("name", "").casefold() == "cover"
+            ),
+            "",
+        )
+        cover_item = manifest.get(legacy_cover_id)
+
     return Package(
         opf_path=opf_path,
-        title=title,
+        title=dc_text("title"),
+        creator=dc_text("creator"),
+        publisher=dc_text("publisher"),
+        publication_date=dc_text("date"),
+        cover_href=(
+            resolve_href(opf_path, cover_item.href) if cover_item is not None else ""
+        ),
         manifest=manifest,
         spine=spine,
         toc_id=toc_id,
@@ -373,6 +410,148 @@ def read_toc_titles(archive: ZipFile, package: Package) -> dict[str, str]:
     return titles
 
 
+def resolve_href_with_fragment(base_path: str, href: str) -> str:
+    document, separator, fragment = unquote(href).partition("#")
+    resolved = resolve_href(base_path, document)
+    return f"{resolved}#{fragment}" if separator and fragment else resolved
+
+
+def _direct_elements(node: Element, tag: str) -> list[Element]:
+    return [child for child in node.children if isinstance(child, Element) and child.tag == tag]
+
+
+def read_toc_structure(archive: ZipFile, package: Package) -> list[dict[str, object]]:
+    """Preserve the nested EPUB navigation as extractor-owned evidence.
+
+    The merged Markdown is still the translatable text representation. This
+    sidecar is deliberately separate: several nav targets may point into one
+    spine document, so neither the spine nor Markdown file boundaries are a
+    publication hierarchy.
+    """
+    nav_item = next(
+        (item for item in package.manifest.values() if "nav" in item.properties.split()),
+        None,
+    )
+    sections: list[dict[str, object]] = []
+    if nav_item is not None:
+        nav_path = resolve_href(package.opf_path, nav_item.href)
+        markup = read_text_entry(archive, nav_path)
+        if markup is not None:
+            root = parse_xhtml(markup)
+            nav = next(
+                (
+                    element
+                    for element in iter_elements(root)
+                    if element.tag == "nav" and "toc" in element.attrs.get("type", "").split()
+                ),
+                None,
+            )
+            if nav is not None:
+                landmark_roles: dict[str, str] = {}
+                landmarks = next(
+                    (
+                        element
+                        for element in iter_elements(root)
+                        if element.tag == "nav"
+                        and "landmarks" in element.attrs.get("type", "").split()
+                    ),
+                    None,
+                )
+                if landmarks is not None:
+                    for anchor in iter_elements(landmarks):
+                        if anchor.tag != "a" or not anchor.attrs.get("href"):
+                            continue
+                        target = resolve_href_with_fragment(nav_path, anchor.attrs["href"])
+                        role = next(
+                            (
+                                candidate
+                                for candidate in ("frontmatter", "bodymatter", "backmatter")
+                                if candidate in anchor.attrs.get("type", "").split()
+                            ),
+                            "",
+                        )
+                        if role:
+                            landmark_roles[target] = role
+                top_lists = _direct_elements(nav, "ol") or _direct_elements(nav, "ul")
+
+                def walk_list(list_node: Element, parent_id: str | None, depth: int) -> None:
+                    for item in _direct_elements(list_node, "li"):
+                        anchor = next(
+                            (child for child in item.children if isinstance(child, Element) and child.tag == "a"),
+                            None,
+                        )
+                        current_parent = parent_id
+                        if anchor is not None:
+                            label = element_text(anchor)
+                            href = anchor.attrs.get("href", "")
+                            if label and href:
+                                section_id = f"epub_section_{len(sections) + 1:03d}"
+                                source_href = resolve_href_with_fragment(nav_path, href)
+                                section = {
+                                        "id": section_id,
+                                        "title": label,
+                                        "parentId": parent_id,
+                                        "headingLevel": depth,
+                                        "sourceHref": source_href,
+                                        "navigationSourceHref": nav_path,
+                                    }
+                                role = landmark_roles.get(source_href)
+                                if role:
+                                    section["role"] = role
+                                sections.append(section)
+                                current_parent = section_id
+                        for nested in [*_direct_elements(item, "ol"), *_direct_elements(item, "ul")]:
+                            walk_list(nested, current_parent, depth + 1)
+
+                for top_list in top_lists:
+                    walk_list(top_list, None, 1)
+
+    if sections:
+        return sections
+
+    # EPUB 2 fallback: retain NCX nesting rather than flattening navPoints into
+    # one document-title lookup.
+    ncx_item = package.manifest.get(package.toc_id)
+    if ncx_item is None:
+        return []
+    ncx_path = resolve_href(package.opf_path, ncx_item.href)
+    try:
+        ncx = ElementTree.fromstring(archive.read(ncx_path))
+    except (KeyError, ElementTree.ParseError):
+        return []
+
+    def walk_points(parent: ElementTree.Element, parent_id: str | None, depth: int) -> None:
+        for point in parent.findall(_qualified(NCX_NAMESPACE, "navPoint")):
+            content = point.find(_qualified(NCX_NAMESPACE, "content"))
+            label = point.find(
+                f"{_qualified(NCX_NAMESPACE, 'navLabel')}/{_qualified(NCX_NAMESPACE, 'text')}"
+            )
+            current_parent = parent_id
+            if content is not None and label is not None and content.get("src"):
+                title = collapse_whitespace(label.text or "")
+                if title:
+                    section_id = f"epub_section_{len(sections) + 1:03d}"
+                    sections.append(
+                        {
+                            "id": section_id,
+                            "title": title,
+                            "parentId": parent_id,
+                            "headingLevel": depth,
+                            "sourceHref": resolve_href_with_fragment(
+                                ncx_path, content.get("src", "")
+                            ),
+                            "navigationSourceHref": ncx_path,
+                        }
+                    )
+                    current_parent = section_id
+            walk_points(point, current_parent, depth + 1)
+
+    nav_map = ncx.find(_qualified(NCX_NAMESPACE, "navMap"))
+    if nav_map is not None:
+        walk_points(nav_map, None, 1)
+    return sections
+
+
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
@@ -417,8 +596,12 @@ class ChapterContext:
     assets: Assets
     ordinal: int
     footnote_bodies: dict[str, str]
+    footnote_kinds: dict[str, str] = field(default_factory=dict)
     footnotes: list[tuple[str, str]] = field(default_factory=list)
     footnote_keys: dict[str, str] = field(default_factory=dict)
+    note_source_by_label: dict[str, str] = field(default_factory=dict)
+    note_kind_by_label: dict[str, str] = field(default_factory=dict)
+    unresolved_declared_note_targets: set[str] = field(default_factory=set)
     # Book-level, not chapter-level: a note pulled into the chapter that cites it
     # must also stop the endnotes document from printing it a second time, and
     # that document is a different chapter with its own context.
@@ -429,6 +612,17 @@ class ChapterContext:
     # the EPUB 2 house style for a note reference -- Calibre emits exactly that,
     # with no epub:type and no role to identify it by.
     superscript_depth: int = 0
+    nav_markers: dict[str, list[str]] = field(default_factory=dict)
+    emitted_nav_markers: set[str] = field(default_factory=set)
+
+    def markers_for(self, node: Element) -> list[str]:
+        identifier = node.attrs.get("id", "")
+        if not identifier:
+            return []
+        markers = self.nav_markers.get(identifier, [])
+        fresh = [marker for marker in markers if marker not in self.emitted_nav_markers]
+        self.emitted_nav_markers.update(fresh)
+        return fresh
 
     def footnote(self, target: str) -> str | None:
         """Return the `[^key]` reference for a note, pulling its body inline.
@@ -442,10 +636,14 @@ class ChapterContext:
         if body is None:
             return None
         if target not in self.footnote_keys:
-            self.footnote_keys[target] = f"fn-{self.ordinal}-{len(self.footnote_keys) + 1}"
-            self.footnotes.append((self.footnote_keys[target], body))
+            self.footnote_keys[target] = f"fn-{self.ordinal}-{len(self.footnotes) + 1}"
+        key = self.footnote_keys[target]
+        if target not in self.consumed_keys:
+            self.footnotes.append((key, body))
             self.consumed_keys.add(target)
-        return self.footnote_keys[target]
+        self.note_source_by_label[key] = target
+        self.note_kind_by_label[key] = self.footnote_kinds.get(target, "footnote")
+        return key
 
 
 # Body text that would be read as structure at the start of a Markdown line.
@@ -463,6 +661,22 @@ def is_footnote_reference(node: Element) -> bool:
     epub_type = node.attrs.get("type", "")
     role = node.attrs.get("role", "")
     return "noteref" in epub_type or "noteref" in role or "biblioref" in role
+
+
+def is_declared_footnote_body(node: Element) -> bool:
+    return declared_note_body_kind(node) is not None
+
+
+def declared_note_body_kind(node: Element) -> str | None:
+    epub_types = set(node.attrs.get("type", "").split())
+    roles = set(node.attrs.get("role", "").split())
+    if epub_types.intersection({"endnote", "rearnote"}) or "doc-endnote" in roles:
+        return "endnote"
+    if epub_types.intersection({"footnote", "note"}) or roles.intersection(
+        {"doc-footnote", "note"}
+    ):
+        return "footnote"
+    return None
 
 
 def render_math(node: Element) -> str:
@@ -503,38 +717,45 @@ def render_inline(node: Element, context: ChapterContext) -> str:
 
 
 def render_inline_element(node: Element, context: ChapterContext) -> str:
+    marker_prefix = " ".join(context.markers_for(node))
     if node.tag in SKIPPED_TAGS or node is context.skip_element:
-        return ""
+        return marker_prefix
     if node.tag == "br":
         # Soft line breaks are collapsed into the paragraph: a lone newline is
         # not a protected placeholder, so the model would be free to move it.
-        return " "
+        return f"{marker_prefix} "
     if node.tag == "math":
-        return render_math(node)
+        rendered = render_math(node)
+        return " ".join(item for item in (marker_prefix, rendered) if item)
     if node.tag == "img":
-        return render_image(node.attrs.get("src", ""), node.attrs.get("alt", ""), context)
+        rendered = render_image(node.attrs.get("src", ""), node.attrs.get("alt", ""), context)
+        return " ".join(item for item in (marker_prefix, rendered) if item)
     if node.tag == "image":
         # SVG-wrapped covers reach the bitmap through xlink:href.
-        return render_image(node.attrs.get("href", ""), "", context)
+        rendered = render_image(node.attrs.get("href", ""), "", context)
+        return " ".join(item for item in (marker_prefix, rendered) if item)
     if node.tag == "code":
         text = collapse_whitespace(element_text(node))
-        return f"`{text}`" if text else ""
+        rendered = f"`{text}`" if text else ""
+        return " ".join(item for item in (marker_prefix, rendered) if item)
     if node.tag == "a":
-        return render_anchor(node, context)
+        rendered = render_anchor(node, context)
+        return " ".join(item for item in (marker_prefix, rendered) if item)
     if node.tag == "sup":
         context.superscript_depth += 1
         try:
-            return render_inline(node, context)
+            rendered = render_inline(node, context)
+            return " ".join(item for item in (marker_prefix, rendered) if item)
         finally:
             context.superscript_depth -= 1
     inner = render_inline(node, context)
     if not inner.strip():
-        return inner
+        return " ".join(item for item in (marker_prefix, inner) if item)
     if node.tag in {"em", "i", "cite", "dfn", "var"}:
-        return f"*{inner}*"
+        return " ".join(item for item in (marker_prefix, f"*{inner}*") if item)
     if node.tag in {"strong", "b"}:
-        return f"**{inner}**"
-    return inner
+        return " ".join(item for item in (marker_prefix, f"**{inner}**") if item)
+    return " ".join(item for item in (marker_prefix, inner) if item)
 
 
 def render_image(source: str, alt: str, context: ChapterContext) -> str:
@@ -560,6 +781,10 @@ def render_anchor(node: Element, context: ChapterContext) -> str:
         key = context.footnote(target) if target else None
         if key:
             return f"[^{key}]"
+        if is_footnote_reference(node):
+            context.unresolved_declared_note_targets.add(
+                target or node.attrs.get("href", "(missing href)")
+            )
     if not href or href.startswith("#"):
         return label
     if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href) is None:
@@ -579,7 +804,9 @@ def footnote_target(node: Element, document_path: str) -> str | None:
     return f"{resolved}#{unquote(fragment)}"
 
 
-def collect_footnote_bodies(documents: dict[str, Element], assets: Assets) -> dict[str, str]:
+def collect_footnote_bodies(
+    documents: dict[str, Element], assets: Assets
+) -> tuple[dict[str, str], dict[str, str]]:
     """Index every element that could be a footnote body, keyed `path#id`.
 
     Indexing by id rather than by `epub:type="footnote"` is deliberate: EPUB 2
@@ -589,9 +816,10 @@ def collect_footnote_bodies(documents: dict[str, Element], assets: Assets) -> di
     element resolves to its nearest note-shaped ancestor.
     """
     bodies: dict[str, str] = {}
+    kinds: dict[str, str] = {}
     for path, root in documents.items():
-        index_footnote_bodies(root, path, assets, bodies, None)
-    return bodies
+        index_footnote_bodies(root, path, assets, bodies, kinds, None, None)
+    return bodies, kinds
 
 
 def index_footnote_bodies(
@@ -599,7 +827,9 @@ def index_footnote_bodies(
     path: str,
     assets: Assets,
     bodies: dict[str, str],
+    kinds: dict[str, str],
     enclosing_body: Element | None,
+    inside_declared_note_kind: str | None,
 ) -> None:
     for child in node.children:
         if not isinstance(child, Element) or child.tag in SKIPPED_TAGS:
@@ -623,11 +853,25 @@ def index_footnote_bodies(
                     skip_element=marker,
                 )
                 text = collapse_whitespace(render_inline(body, context))
-                if text and len(text) <= FOOTNOTE_BODY_MAX_CHARACTERS:
+                body_kind = declared_note_body_kind(body) or inside_declared_note_kind
+                if text and (
+                    body_kind is not None
+                    or is_declared_footnote_body(body)
+                    or len(text) <= UNTYPED_FOOTNOTE_BODY_MAX_CHARACTERS
+                ):
                     bodies[key] = text
+                    kinds[key] = body_kind or "footnote"
                     body.footnote_key = key
         next_body = child if child.tag in FOOTNOTE_BODY_TAGS else enclosing_body
-        index_footnote_bodies(child, path, assets, bodies, next_body)
+        index_footnote_bodies(
+            child,
+            path,
+            assets,
+            bodies,
+            kinds,
+            next_body,
+            declared_note_body_kind(child) or inside_declared_note_kind,
+        )
 
 
 def render_blocks(node: Element, context: ChapterContext, depth: int = 0) -> list[str]:
@@ -662,37 +906,39 @@ def render_blocks(node: Element, context: ChapterContext, depth: int = 0) -> lis
 
 
 def render_block_element(node: Element, context: ChapterContext, depth: int) -> list[str]:
+    markers = context.markers_for(node)
     if node is context.skip_element:
-        return []
+        return markers
     if node.footnote_key is not None and node.footnote_key in context.consumed_keys:
         # Already emitted as a footnote definition by the chapter that cited it.
-        return []
+        return markers
 
     if node.tag in HEADING_TAGS:
         text = collapse_whitespace(render_inline(node, context))
         level = min(6, HEADING_TAGS[node.tag] + context.heading_offset)
-        return [f"{'#' * level} {text}"] if text else []
+        rendered = [f"{'#' * level} {text}"] if text else []
+        return [*markers, *rendered]
 
     if node.tag == "pre":
-        return render_code_fence(node)
+        return [*markers, *render_code_fence(node)]
 
     if node.tag == "hr":
-        return ["---"]
+        return [*markers, "---"]
 
     if node.tag in {"ul", "ol"}:
-        return render_list(node, context, depth)
+        return [*markers, *render_list(node, context, depth)]
 
     if node.tag == "table":
-        return render_table(node, context)
+        return [*markers, *render_table(node, context)]
 
     if node.tag == "blockquote":
         inner = render_blocks(node, context, depth)
         if not inner:
-            return []
+            return markers
         quoted = "\n\n".join(inner).split("\n")
-        return ["\n".join(f"> {line}".rstrip() for line in quoted)]
+        return [*markers, "\n".join(f"> {line}".rstrip() for line in quoted)]
 
-    return render_blocks(node, context, depth)
+    return [*markers, *render_blocks(node, context, depth)]
 
 
 def render_code_fence(node: Element) -> list[str]:
@@ -770,8 +1016,14 @@ def render_chapter(
     ordinal: int,
     assets: Assets,
     footnote_bodies: dict[str, str],
+    footnote_kinds: dict[str, str],
     consumed_keys: set[str],
+    footnote_keys: dict[str, str],
+    note_source_by_label: dict[str, str],
+    note_kind_by_label: dict[str, str],
+    unresolved_declared_note_targets: set[str],
     toc_title: str,
+    nav_markers: dict[str, list[str]],
 ) -> str:
     """Render one spine document as a chapter owning exactly one level-1 heading.
 
@@ -795,15 +1047,29 @@ def render_chapter(
         assets=assets,
         ordinal=ordinal,
         footnote_bodies=footnote_bodies,
+        footnote_kinds=footnote_kinds,
         consumed_keys=consumed_keys,
+        footnote_keys=footnote_keys,
+        note_source_by_label=note_source_by_label,
+        note_kind_by_label=note_kind_by_label,
+        unresolved_declared_note_targets=unresolved_declared_note_targets,
         heading_offset=2 - shallowest,
         skip_element=headings[0] if heading_title else None,
+        nav_markers=nav_markers,
     )
 
+    title_markers = context.markers_for(headings[0]) if heading_title else []
+
+    document_markers = [
+        marker
+        for marker in nav_markers.get("", [])
+        if marker not in context.emitted_nav_markers
+    ]
+    context.emitted_nav_markers.update(document_markers)
     body = render_blocks(root, context)
-    if not body and not context.footnotes:
+    if not body and not context.footnotes and not document_markers and not title_markers:
         return ""
-    blocks = [f"# {title}", *body]
+    blocks = [f"# {title}", *document_markers, *title_markers, *body]
     blocks.extend(f"[^{key}]: {text}" for key, text in context.footnotes)
     return "\n\n".join(block for block in blocks if block.strip())
 
@@ -816,6 +1082,7 @@ def render_chapter(
 @dataclass(frozen=True)
 class ExtractionResult:
     markdown_path: Path
+    publication_evidence_path: Path
     chapters: int
     images: int
 
@@ -870,6 +1137,7 @@ def extract_book(
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = stem or output_stem(epub_path)
     markdown_path = output_dir / f"{stem}.md"
+    publication_evidence_path = output_dir / f"{stem}.publication.json"
     sidecar_name = f"{stem}{SIDECAR_SUFFIX}"
 
     try:
@@ -880,11 +1148,13 @@ def extract_book(
     with archive:
         package = read_package(archive)
         toc_titles = read_toc_titles(archive, package)
+        toc_structure = read_toc_structure(archive, package)
         assets = Assets(
             directory=output_dir / sidecar_name,
             reference_prefix=sidecar_name,
             archive=archive,
         )
+        cover_path = assets.reference(package.cover_href) if package.cover_href else None
 
         documents: dict[str, Element] = {}
         order: list[str] = []
@@ -902,10 +1172,35 @@ def extract_book(
         if progress is not None:
             progress.start("extracting", total=len(order))
 
-        footnote_bodies = collect_footnote_bodies(documents, assets)
+        footnote_bodies, footnote_kinds = collect_footnote_bodies(documents, assets)
         consumed_keys: set[str] = set()
+        footnote_keys: dict[str, str] = {}
+        note_source_by_label: dict[str, str] = {}
+        note_kind_by_label: dict[str, str] = {}
+        unresolved_declared_note_targets: set[str] = set()
+
+        markers_by_document: dict[str, dict[str, list[str]]] = {}
+        marker_for_section: dict[str, str] = {}
+        for section in toc_structure:
+            source_href = str(section["sourceHref"])
+            document_path, _, fragment = source_href.partition("#")
+            normalized_title = "".join(
+                character.lower()
+                for character in str(section["title"])
+                if character.isalnum()
+            )
+            title_sha256 = hashlib.sha256(normalized_title.encode("utf-8")).hexdigest()
+            marker = (
+                f"<!-- bibliosmith-nav:{section['id']}:{title_sha256} -->"
+            )
+            markers_by_document.setdefault(document_path, {}).setdefault(fragment, []).append(
+                marker
+            )
+            marker_for_section[str(section["id"])] = marker
 
         chapters: list[str] = []
+        chapter_ranges: dict[str, tuple[int, int]] = {}
+        next_line = 1
         for path in order:
             chapter = render_chapter(
                 documents[path],
@@ -913,23 +1208,241 @@ def extract_book(
                 ordinal=len(chapters) + 1,
                 assets=assets,
                 footnote_bodies=footnote_bodies,
+                footnote_kinds=footnote_kinds,
                 consumed_keys=consumed_keys,
+                footnote_keys=footnote_keys,
+                note_source_by_label=note_source_by_label,
+                note_kind_by_label=note_kind_by_label,
+                unresolved_declared_note_targets=unresolved_declared_note_targets,
                 toc_title=toc_titles.get(path, ""),
+                nav_markers=markers_by_document.get(path, {}),
             )
             if chapter.strip():
                 chapters.append(chapter)
+                line_count = max(1, len(chapter.splitlines()))
+                chapter_ranges[path] = (next_line, next_line + line_count - 1)
+                next_line += line_count + 1
             if progress is not None:
                 progress.advance("extracting")
+
+        if unresolved_declared_note_targets:
+            targets = ", ".join(sorted(unresolved_declared_note_targets))
+            raise EpubExtractError(
+                f"declared note reference target could not be recovered: {targets}"
+            )
 
         if not chapters:
             raise EpubExtractError(f"{epub_path.name} produced no chapter text")
 
         if progress is not None:
             progress.touch("assembling")
-        markdown_path.write_text("\n\n".join(chapters) + "\n", encoding="utf-8")
+        markdown_text = "\n\n".join(chapters) + "\n"
+        markdown_path.write_text(markdown_text, encoding="utf-8")
+        markdown_lines = markdown_text.splitlines()
+        marker_lines: dict[str, int] = {}
+        for section_id, marker in marker_for_section.items():
+            positions = [
+                index + 1
+                for index, line in enumerate(markdown_lines)
+                if marker in line
+            ]
+            if len(positions) != 1:
+                raise EpubExtractError(
+                    f"navigation target for {section_id} resolved {len(positions)} times"
+                )
+            marker_lines[section_id] = positions[0]
+
+        source_documents: list[dict[str, object]] = []
+        source_document_for_path: dict[str, str] = {}
+        evidence_root = assets.directory / "source_documents" / "epub"
+        for ordinal, path in enumerate(order, start=1):
+            payload = archive.read(path)
+            suffix = Path(path).suffix or ".xhtml"
+            destination = evidence_root / f"document_{ordinal:03d}{suffix}"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(payload)
+            relative = destination.relative_to(markdown_path.parent).as_posix()
+            source_document_for_path[path] = relative
+            start_line, end_line = chapter_ranges.get(path, (0, 0))
+            source_documents.append(
+                {
+                    "path": relative,
+                    "startLine": start_line,
+                    "endLine": end_line,
+                    "pages": [],
+                    "kind": "epub_xhtml",
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "sourceHref": path,
+                    "anomalies": (
+                        []
+                        if path in chapter_ranges
+                        else ["source document produced no assembled Markdown lines"]
+                    ),
+                }
+            )
+
+        navigation_document_for_path: dict[str, str] = {}
+        nav_item = next(
+            (
+                item
+                for item in package.manifest.values()
+                if "nav" in item.properties.split()
+            ),
+            None,
+        )
+        navigation_sources: list[tuple[str, str]] = []
+        if nav_item is not None:
+            navigation_sources.append(
+                (resolve_href(package.opf_path, nav_item.href), "epub_navigation")
+            )
+        ncx_item = package.manifest.get(package.toc_id)
+        if ncx_item is not None:
+            navigation_sources.append(
+                (resolve_href(package.opf_path, ncx_item.href), "epub_ncx")
+            )
+        for ordinal, (path, kind) in enumerate(navigation_sources, start=1):
+            try:
+                payload = archive.read(path)
+            except KeyError as error:
+                raise EpubExtractError(
+                    f"publication navigation source {path} is missing"
+                ) from error
+            suffix = Path(path).suffix or ".xml"
+            destination = evidence_root / f"navigation_{ordinal:03d}{suffix}"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(payload)
+            relative = destination.relative_to(markdown_path.parent).as_posix()
+            navigation_document_for_path[path] = relative
+            source_documents.append(
+                {
+                    "path": relative,
+                    # Navigation documents describe the hierarchy but do not
+                    # contribute reader text to assembled Markdown. Mapping
+                    # them over 1..EOF makes a retained legacy NCX look like a
+                    # second textual source for every NAV-authored section.
+                    "startLine": 0,
+                    "endLine": 0,
+                    "pages": [],
+                    "kind": kind,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "sourceHref": path,
+                    "anomalies": [
+                        "navigation evidence has no assembled Markdown line range"
+                    ],
+                }
+            )
+
+        for index, section in enumerate(toc_structure):
+            section_id = str(section["id"])
+            marker_line = marker_lines[section_id]
+            depth = int(section["headingLevel"])
+            next_peer = next(
+                (
+                    marker_lines[str(candidate["id"])]
+                    for candidate in toc_structure[index + 1 :]
+                    if int(candidate["headingLevel"]) <= depth
+                ),
+                None,
+            )
+            document_path = str(section["sourceHref"]).partition("#")[0]
+            document_start = chapter_ranges.get(document_path, (marker_line, marker_line))[0]
+            expected_title = "".join(
+                character.lower()
+                for character in str(section["title"])
+                if character.isalnum()
+            )
+            document_heading = (
+                markdown_lines[document_start - 1].removeprefix("# ")
+                if document_start <= len(markdown_lines)
+                else ""
+            )
+            heading_matches = "".join(
+                character.lower()
+                for character in document_heading
+                if character.isalnum()
+            ) == expected_title
+            start_line = (
+                document_start
+                if heading_matches and marker_line <= document_start + 4
+                else marker_line
+            )
+            section_end = next_peer - 1 if next_peer is not None else len(markdown_lines)
+            section["sourceStartLine"] = start_line
+            section["sourceEndLine"] = section_end
+            section["sourceFiles"] = [
+                source_document_for_path[path]
+                for path in order
+                if path in chapter_ranges
+                and chapter_ranges[path][0] <= section_end
+                and start_line <= chapter_ranges[path][1]
+            ]
+            navigation_source = navigation_document_for_path.get(
+                str(section.get("navigationSourceHref") or "")
+            )
+            if navigation_source:
+                section["sourceFiles"].append(navigation_source)
+            section["evidence"] = [
+                "EPUB package navigation target preserved at exact Markdown marker"
+            ]
+            section["confidence"] = 1.0
+            section["anomalies"] = []
+        note_source_documents = [
+            SourceDocument(
+                path=str(document["path"]),
+                start_line=int(document["startLine"]),
+                end_line=int(document["endLine"]),
+                pages=tuple(int(page) for page in document.get("pages", [])),
+                kind=str(document["kind"]),
+                sha256=str(document["sha256"]),
+                anomalies=tuple(str(item) for item in document.get("anomalies", [])),
+                source_href=str(document.get("sourceHref") or ""),
+            )
+            for document in source_documents
+            if document["kind"] == "epub_xhtml"
+        ]
+        notes = build_note_evidence(
+            markdown_text,
+            [None] * len(markdown_lines),
+            note_source_documents,
+            toc_structure,
+        )
+        for note in notes:
+            target = note_source_by_label.get(str(note["sourceLabel"]))
+            if not target:
+                continue
+            target_document = target.partition("#")[0]
+            source_file = source_document_for_path.get(target_document)
+            if source_file and source_file not in note["sourceFiles"]:
+                note["sourceFiles"].append(source_file)
+            note["sourceAnchor"] = target
+            note["kind"] = note_kind_by_label.get(
+                str(note["sourceLabel"]), str(note["kind"])
+            )
+        publication_evidence_path.write_text(
+            json.dumps(
+                {
+                    "schema": "publication-extraction-evidence-v2",
+                    "sourceFormat": "epub",
+                    "extractionEngine": "epub-package-navigation",
+                    "title": package.title,
+                    "creator": package.creator,
+                    "publisher": package.publisher,
+                    "date": package.publication_date,
+                    "coverPath": cover_path,
+                    "sourceDocuments": source_documents,
+                    "sections": toc_structure,
+                    "notes": notes,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     return ExtractionResult(
         markdown_path=markdown_path,
+        publication_evidence_path=publication_evidence_path,
         chapters=len(chapters),
         images=len(assets.names),
     )

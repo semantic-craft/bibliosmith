@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
+from test_support.epub_builder_contract import write_publication_contract
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,6 +40,7 @@ class EpubBuilderLandmarksTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            write_publication_contract(book_root, title="Bilingual Fixture")
 
             completed = subprocess.run(
                 ["node", str(source_scripts / "build_epub.cjs")],
@@ -52,7 +55,7 @@ class EpubBuilderLandmarksTests(unittest.TestCase):
                 nav = archive.read("EPUB/nav.xhtml").decode("utf-8")
                 package = archive.read("EPUB/package.opf").decode("utf-8")
             self.assertIn(
-                '<li><a epub:type="bodymatter" href="chapter_001.xhtml">正文</a></li>',
+                '<li><a epub:type="bodymatter" href="section_001.xhtml#section_001">正文</a></li>',
                 nav,
             )
             self.assertIn("<dc:title>Bilingual Fixture</dc:title>", package)
@@ -60,7 +63,7 @@ class EpubBuilderLandmarksTests(unittest.TestCase):
             self.assertNotIn("Unknown", package)
             self.assertNotIn("BiblioSmith 书坊", package)
             self.assertTrue(
-                (book_root / "output" / "reading" / "html" / "chapter_001.xhtml").is_file()
+                (book_root / "output" / "reading" / "html" / "section_001.xhtml").is_file()
             )
 
 

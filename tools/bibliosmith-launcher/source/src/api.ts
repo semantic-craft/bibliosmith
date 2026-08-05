@@ -6,6 +6,8 @@ import {
   BookPipelineArtifactExcerpt,
   BookPipelineCleanupCandidate,
   BookPipelineCleanupPreview,
+  BookPipelineStructureCorrectionDraft,
+  BookPipelineStructureCorrectionInput,
   BookPipelineJob,
   BookPipelinePreviewConfig,
   BookPipelineProjectMigration,
@@ -1188,6 +1190,34 @@ export function selectBookTranslationPromptPack(
     jobId,
     childId,
     promptPackReference,
+  });
+}
+
+export function getBookPipelineStructureCorrectionDraft(
+  jobId: string,
+  childId: string | null,
+) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("Structure correction is available only in the desktop app."));
+  }
+  return invoke<BookPipelineStructureCorrectionDraft>(
+    "get_book_pipeline_structure_correction_draft",
+    { jobId, childId },
+  );
+}
+
+export function saveBookPipelineStructureCorrection(
+  jobId: string,
+  childId: string | null,
+  correction: BookPipelineStructureCorrectionInput,
+) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("Structure correction is available only in the desktop app."));
+  }
+  return invoke<BookPipelineJob>("save_book_pipeline_structure_correction", {
+    jobId,
+    childId,
+    correction,
   });
 }
 

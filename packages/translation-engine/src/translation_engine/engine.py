@@ -130,7 +130,7 @@ def run_manifest(
         project_root, _required_string(manifest, "sourceMapPath")
     )
     source_map = _read_json(source_map_path)
-    if source_map.get("schema") != "local-reading-source-map-v1":
+    if source_map.get("schema") != "local-reading-source-map-v2":
         raise EngineError("unsupported_source_map_schema")
 
     target_language = _required_string(manifest, "targetLanguage")
@@ -541,16 +541,16 @@ def load_translation_unit(
     task = json.loads(task_bytes)
     if not isinstance(task, dict):
         raise EngineError("invalid_json_object")
-    if task.get("schema") != "local-reading-translation-task-v1":
+    if task.get("schema") != "local-reading-translation-task-v2":
         raise EngineError("unsupported_task_schema")
-    unit_id = _required_string(task, "chapterId")
+    unit_id = _required_string(task, "unitId")
     if task.get("targetLanguage") != target_language:
         raise EngineError("target_language_mismatch")
 
     chapter = next(
         (
             value
-            for value in source_map.get("chapters", [])
+            for value in source_map.get("translationUnits", [])
             if isinstance(value, dict) and value.get("id") == unit_id
         ),
         None,
@@ -558,15 +558,15 @@ def load_translation_unit(
     if chapter is None:
         raise EngineError("unit_not_in_source_map")
 
-    source_relative = _required_string(task, "sourceChapterPath")
-    if chapter.get("chapterSourcePath") != source_relative:
+    source_relative = _required_string(task, "sourceUnitPath")
+    if chapter.get("sourceUnitPath") != source_relative:
         raise EngineError("source_path_mismatch")
     source_path = _project_path(project_root, source_relative)
     source_text = source_path.read_text(encoding="utf-8")
     source_sha256 = _sha256(source_text.encode())
-    if task.get("sourceChapterSha256") != source_sha256:
+    if task.get("sourceUnitSha256") != source_sha256:
         raise EngineError("source_hash_mismatch")
-    if chapter.get("chapterSourceSha256") != source_sha256:
+    if chapter.get("sourceUnitSha256") != source_sha256:
         raise EngineError("source_map_hash_mismatch")
 
     glossary_path = _project_path(project_root, _required_string(task, "glossaryPath"))
@@ -1600,7 +1600,7 @@ def _safe_unit_id(project_root: Path, unit: Any) -> str:
     try:
         task_path = _project_path(project_root, _required_string(unit, "taskManifestPath"))
         task = _read_json(task_path)
-        return _required_string(task, "chapterId")
+        return _required_string(task, "unitId")
     except (OSError, json.JSONDecodeError, EngineError):
         return "unknown"
 

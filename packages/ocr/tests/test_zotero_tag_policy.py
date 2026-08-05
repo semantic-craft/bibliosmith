@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import json
 import tempfile
 import time
@@ -26,8 +27,45 @@ from zotero_llm_worker import (  # noqa: E402
     process_mineru_route,
     route_attachment,
     source_key_from_provenance_note,
+    strict_mineru_source_coordinates,
     upload_test,
 )
+
+
+def write_mineru_publication_evidence(result: Path) -> None:
+    lines = result.read_text(encoding="utf-8").splitlines()
+    result.with_suffix(".publication.json").write_text(
+        json.dumps(
+            {
+                "schema": "publication-extraction-evidence-v2",
+                "sourceFormat": "mineru",
+                "sourceDocuments": [
+                    {
+                        "path": result.name,
+                        "startLine": 1,
+                        "endLine": max(1, len(lines)),
+                        "pages": [],
+                        "kind": "mineru_part_markdown",
+                        "sha256": hashlib.sha256(result.read_bytes()).hexdigest(),
+                    }
+                ],
+                "sections": [
+                    {
+                        "id": "extracted_section_001",
+                        "title": lines[0].removeprefix("# "),
+                        "parentId": None,
+                        "headingLevel": 1,
+                        "sourceHref": "mineru://line/1",
+                        "sourceStartLine": 1,
+                        "sourceEndLine": max(1, len(lines)),
+                        "sourceFiles": [result.name],
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 class ZoteroTagPolicyTests(unittest.TestCase):
@@ -42,6 +80,47 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             parent_creators=[],
             parent_date="2026",
             content_type="application/pdf",
+        )
+
+    def test_mineru_source_coordinates_reject_coercible_types_and_bad_ranges(self) -> None:
+        valid = {
+            "startLine": 1,
+            "endLine": 3,
+            "pages": [1, 2],
+            "anomalies": [],
+        }
+        self.assertEqual(
+            (1, 3, (1, 2)), strict_mineru_source_coordinates(valid, 3)
+        )
+        for field, value in [
+            ("startLine", True),
+            ("startLine", "1"),
+            ("endLine", 3.0),
+            ("pages", [1, "2"]),
+            ("pages", [2, 2]),
+            ("pages", [0]),
+        ]:
+            invalid = dict(valid)
+            invalid[field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValueError):
+                    strict_mineru_source_coordinates(invalid, 3)
+        with self.assertRaises(ValueError):
+            strict_mineru_source_coordinates(
+                {"startLine": 0, "endLine": 0, "pages": [], "anomalies": []},
+                3,
+            )
+        self.assertEqual(
+            (0, 0, ()),
+            strict_mineru_source_coordinates(
+                {
+                    "startLine": 0,
+                    "endLine": 0,
+                    "pages": [],
+                    "anomalies": ["unmapped retained evidence"],
+                },
+                3,
+            ),
         )
 
     def test_default_command_writes_no_tags(self) -> None:
@@ -195,6 +274,7 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                     "![Figure](.mineru_batches/batch-1/part-1/images/figure.png)\n",
                     encoding="utf-8",
                 )
+                write_mineru_publication_evidence(result)
                 (result.parent / "mineru_manifest.json").write_text(
                     '{"model_version":"vlm"}\n', encoding="utf-8"
                 )
@@ -240,6 +320,18 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             self.assertEqual("latin", sidecar["mineru_language"])
             self.assertEqual(str(artifact_dir), sidecar["mineru_artifact_dir"])
             self.assertTrue((artifact_dir / "mineru_manifest.json").is_file())
+            evidence = json.loads(
+                markdown.with_suffix(".publication.json").read_text(encoding="utf-8")
+            )
+            markdown_line_count = len(markdown.read_text(encoding="utf-8").splitlines())
+            self.assertTrue(evidence["sourceDocuments"])
+            self.assertTrue(
+                all(
+                    document["endLine"] <= markdown_line_count
+                    and (artifact_dir.parent / document["path"]).is_file()
+                    for document in evidence["sourceDocuments"]
+                )
+            )
 
     def test_upload_test_promotes_a_complete_mineru_artifact_to_handoff_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,6 +349,7 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                 result = output_dir / "document" / "full.md"
                 result.parent.mkdir(parents=True)
                 result.write_text("# Complete MinerU result\n", encoding="utf-8")
+                write_mineru_publication_evidence(result)
                 return SimpleNamespace(returncode=0)
 
             with patch("zotero_llm_worker.subprocess.run", side_effect=fake_run):

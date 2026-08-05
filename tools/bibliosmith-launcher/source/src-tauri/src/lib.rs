@@ -2690,6 +2690,8 @@ pub fn run() {
             book_pipeline::get_book_pipeline_state,
             book_pipeline::preview_book_pipeline_route,
             book_pipeline::queue_book_pipeline_job,
+            book_pipeline::get_book_pipeline_structure_correction_draft,
+            book_pipeline::save_book_pipeline_structure_correction,
             book_pipeline::list_translation_prompt_packs,
             book_pipeline::get_translation_prompt_pack_default,
             book_pipeline::copy_translation_prompt_pack,

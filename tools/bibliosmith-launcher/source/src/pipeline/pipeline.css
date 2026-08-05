@@ -507,6 +507,8 @@
 .pl-pp-error { color: var(--pl-failed); font-size: 11.5px; }
 .pl-ocrcard-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 .pl-ocrcard-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.pl-structure-anomalies { margin: 8px 0; padding-left: 20px; color: var(--pl-failed); font-size: 11.5px; line-height: 1.5; }
+.pl-ci-field textarea.pl-structure-json { min-height: 260px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
 
 /* ---------- three-phase strip ---------- */
 

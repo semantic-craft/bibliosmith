@@ -85,12 +85,12 @@ def build_project(root: Path, *, provider_profile_id: str, config_id: str,
     _write_json(
         root / "metadata" / "source_map.json",
         {
-            "schema": "local-reading-source-map-v1",
-            "chapters": [
+            "schema": "local-reading-source-map-v2",
+            "translationUnits": [
                 {
                     "id": "chapter_001",
-                    "chapterSourcePath": "chapters/src/chapter_001.md",
-                    "chapterSourceSha256": source_sha,
+                    "sourceUnitPath": "chapters/src/chapter_001.md",
+                    "sourceUnitSha256": source_sha,
                 }
             ],
         },
@@ -104,12 +104,12 @@ def build_project(root: Path, *, provider_profile_id: str, config_id: str,
     _write_json(
         root / "qa" / "tasks" / "chapter_001.json",
         {
-            "schema": "local-reading-translation-task-v1",
+            "schema": "local-reading-translation-task-v2",
             "taskPolicyVersion": "task-policy-v1",
-            "chapterId": "chapter_001",
+            "unitId": "chapter_001",
             "targetLanguage": "zh-Hans",
-            "sourceChapterPath": "chapters/src/chapter_001.md",
-            "sourceChapterSha256": source_sha,
+            "sourceUnitPath": "chapters/src/chapter_001.md",
+            "sourceUnitSha256": source_sha,
             "glossaryPath": "glossary/terms.csv",
             "glossarySha256": glossary_sha,
         },

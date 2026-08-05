@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { inspectBookPipelineProjectMigration, readBookPipelineArtifactExcerpt } from "../api";
 import { BookDrawer, type BookDrawerProps } from "./BookDrawer";
@@ -520,5 +520,95 @@ describe("BookDrawer translation prompt pack", () => {
         contentSha256: "e86141d65f8bfb4a674c597f157a86c6da80d49ac02d081d21f2ca325c8ea2e8",
       },
     );
+  });
+
+  it("discards a prompt preview when its pack or input evidence is no longer current", async () => {
+    const user = userEvent.setup();
+    let resolveStalePreview!: (value: Awaited<ReturnType<BookDrawerProps["onPreviewPrompt"]>>) => void;
+    const stalePreview = new Promise<Awaited<ReturnType<BookDrawerProps["onPreviewPrompt"]>>>((resolve) => {
+      resolveStalePreview = resolve;
+    });
+    const first = bookUnit({
+      stages: [stage("prepare", "completed", {
+        inputHashes: { sourceMapSha256: "source-map-a", publicationMapSha256: "publication-map-a" },
+      })],
+    });
+    const nextReference = {
+      packId: "builtin.four-dimension-refinement",
+      revisionId: "2026.08.05-2",
+      contentSha256: "e86141d65f8bfb4a674c597f157a86c6da80d49ac02d081d21f2ca325c8ea2e8",
+    };
+    const second = bookUnit({
+      stages: [stage("prepare", "completed", {
+        inputHashes: { sourceMapSha256: "source-map-b", publicationMapSha256: "publication-map-b" },
+      })],
+      childOver: { promptPackReference: nextReference },
+      jobOver: { promptPackReference: nextReference },
+    });
+    const onPreviewPrompt = vi.fn()
+      .mockReturnValueOnce(stalePreview)
+      .mockResolvedValueOnce({
+        promptPackReference: nextReference,
+        stages: [{ stageId: "translate", actualPrompt: "CURRENT B PROMPT" }],
+      });
+    const firstProps = drawerProps(first, { promptPackCatalog, onPreviewPrompt });
+    const { rerender } = render(<BookDrawer {...firstProps} />);
+
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+    expect(onPreviewPrompt).toHaveBeenCalledWith("job-1", "child-1");
+
+    rerender(<BookDrawer {...drawerProps(second, { promptPackCatalog, onPreviewPrompt })} />);
+    await act(async () => {
+      resolveStalePreview({
+        promptPackReference: first.child!.promptPackReference,
+        stages: [{ stageId: "translate", actualPrompt: "STALE A PROMPT" }],
+      });
+      await stalePreview;
+    });
+
+    expect(screen.queryByText("STALE A PROMPT")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+    expect(await screen.findByText("CURRENT B PROMPT")).toBeTruthy();
+  });
+
+  it("does not reuse an actual prompt after the same pack's input hashes change", async () => {
+    const user = userEvent.setup();
+    let resolveOldInput!: (value: Awaited<ReturnType<BookDrawerProps["onPreviewPrompt"]>>) => void;
+    const oldInputPreview = new Promise<Awaited<ReturnType<BookDrawerProps["onPreviewPrompt"]>>>((resolve) => {
+      resolveOldInput = resolve;
+    });
+    const first = bookUnit({
+      stages: [stage("prepare", "completed", {
+        inputHashes: { sourceMapSha256: "source-map-a", publicationMapSha256: "publication-map-a" },
+      })],
+    });
+    const second = bookUnit({
+      stages: [stage("prepare", "completed", {
+        inputHashes: { sourceMapSha256: "source-map-b", publicationMapSha256: "publication-map-b" },
+      })],
+    });
+    const onPreviewPrompt = vi.fn()
+      .mockReturnValueOnce(oldInputPreview)
+      .mockResolvedValueOnce({
+        promptPackReference: second.child!.promptPackReference,
+        stages: [{ stageId: "translate", actualPrompt: "CURRENT INPUT PROMPT" }],
+      });
+    const { rerender } = render(
+      <BookDrawer {...drawerProps(first, { promptPackCatalog, onPreviewPrompt })} />,
+    );
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+
+    rerender(<BookDrawer {...drawerProps(second, { promptPackCatalog, onPreviewPrompt })} />);
+    await act(async () => {
+      resolveOldInput({
+        promptPackReference: first.child!.promptPackReference,
+        stages: [{ stageId: "translate", actualPrompt: "STALE INPUT PROMPT" }],
+      });
+      await oldInputPreview;
+    });
+
+    expect(screen.queryByText("STALE INPUT PROMPT")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+    expect(await screen.findByText("CURRENT INPUT PROMPT")).toBeTruthy();
   });
 });
