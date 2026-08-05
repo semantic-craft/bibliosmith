@@ -9,6 +9,12 @@ import type {
 } from "../types";
 import type { BookUnit } from "../pipeline/model";
 
+export const structurePromptPackReference = {
+  packId: "builtin.structure-fidelity",
+  revisionId: "2026.08.05-1",
+  contentSha256: "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+};
+
 /**
  * Builders for the pipeline view model. The backend shapes carry a lot of
  * bookkeeping (contract versions, hash maps, counters) that no view-model
@@ -92,6 +98,8 @@ export function childJob(over: Partial<BookPipelineChildJob> = {}): BookPipeline
     stages: [],
     artifacts: [],
     attempts: 1,
+    promptPackReference: structurePromptPackReference,
+    promptPackSelectionSource: "default",
     ...over,
   };
 }
@@ -103,6 +111,8 @@ export function job(over: Partial<BookPipelineJob> = {}): BookPipelineJob {
     kind: "single",
     mode: "convert_then_translate",
     translationMode: "fast",
+    promptPackReference: structurePromptPackReference,
+    promptPackSelectionSource: "default",
     source: { kind: "zotero_attachment", title: "A Book" },
     route: [],
     status: "pending",

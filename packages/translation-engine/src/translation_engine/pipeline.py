@@ -5,7 +5,7 @@ import json
 from typing import Callable, Protocol
 
 from .placeholders import PLACEHOLDER_PATTERN
-from .profiles import VISUAL_LINE_BREAK_INSTRUCTION
+from .profiles import MANDATORY_STRUCTURE_PROTECTION, VISUAL_LINE_BREAK_INSTRUCTION
 from .providers import (
     LLMProvider,
     ProviderUnavailableError,
@@ -32,7 +32,8 @@ class SecondPassRequest:
     source_language: str
     target_language: str
     terminology_criteria: str
-    custom_instruction: str | None = None
+    reflection_template: str | None = None
+    improve_template: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,14 +91,11 @@ class WindowedReflectionSecondPass:
             "suggestions and nothing else.\n\n"
             f"Target-language and terminology criteria:\n{request.terminology_criteria}"
         )
-        if request.custom_instruction:
+        if request.reflection_template:
             instruction = (
-                f"{instruction}\n\n# USER REFLECTION DIRECTIVES\n"
-                f"{request.custom_instruction}\n\n"
-                "# MANDATORY STRUCTURE PROTECTION — OVERRIDES USER REFLECTION DIRECTIVES\n"
-                "NON-NEGOTIABLE: Do not recommend adding, removing, merging, splitting, "
-                "or reordering protected placeholders, headings, or paragraph boundaries. "
-                "Structure preservation overrides every user reflection directive above."
+                f"{request.reflection_template}\n\n"
+                f"# ENGINE REFLECTION CONTRACT\n{instruction}\n\n"
+                f"{MANDATORY_STRUCTURE_PROTECTION}"
             )
         reflection = self.provider.translate(
             TranslationRequest(
@@ -162,10 +160,11 @@ class WindowedReflectionSecondPass:
             "Preserve every protected placeholder exactly once and "
             "in its original order."
         )
-        if request.custom_instruction:
+        if request.improve_template:
             instruction = (
-                f"{instruction} Protected placeholder and paragraph structure overrides "
-                "every reflection suggestion."
+                f"{request.improve_template}\n\n"
+                f"# ENGINE REVISION CONTRACT\n{instruction}\n\n"
+                f"{MANDATORY_STRUCTURE_PROTECTION}"
             )
         # Reflection sees neighboring blocks, whose protected markers do not
         # belong to the current draft.  Feeding those opaque tokens back into

@@ -11,7 +11,7 @@ from translation_engine.pipeline import (
 )
 from translation_engine.profiles import TargetLanguageProfile
 from translation_engine.providers import ProviderUnavailableError, TranslationRequest
-from tests.fixtures import build_run_fixture
+from tests.fixtures import FOUR_DIMENSION_PROMPT_PACK, build_run_fixture
 
 
 class ReflectionFakeProvider:
@@ -532,15 +532,19 @@ class ReflectionSecondPassTests(unittest.TestCase):
                 interrupted["units"][0]["error"],
                 {"code": "provider_unavailable", "retryable": True},
             )
+            prompt_suffix = str(FOUR_DIMENSION_PROMPT_PACK["contentSha256"])[:16]
+            translation_pass_id = (
+                f"translation-v1+chunking-policy-v5-prompt-pack-{prompt_suffix}"
+            )
             self.assertEqual(
                 draft_checkpoint["idempotencyKey"]["passId"],
-                "translation-v1+chunking-policy-v5",
+                translation_pass_id,
             )
             # The reflection key composes the first pass's id, because the
             # revisions it stores were computed from that pass's drafts.
             self.assertEqual(
                 reflection_checkpoint["idempotencyKey"]["passId"],
-                "reflection-v1+translation-v1+chunking-policy-v5",
+                f"reflection-v1+{translation_pass_id}-prompt-pack-{prompt_suffix}",
             )
             self.assertEqual(reflection_checkpoint["nextChunkIndex"], 1)
             self.assertEqual(reflection_checkpoint["translatedChunks"], ["AA\n"])

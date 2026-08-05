@@ -26,11 +26,13 @@ const LIVE_PROGRESS_PATH_ENV: &str = "BIBLIOSMITH_PROGRESS_PATH";
 mod contract;
 mod domain;
 mod migrate;
+mod prompt_packs;
 mod store;
 
 pub(crate) use contract::*;
 pub use domain::*;
 pub(crate) use migrate::*;
+pub use prompt_packs::*;
 pub(crate) use store::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1688,7 +1690,19 @@ fn validate_state(state: &BookPipelineState) -> Result<(), String> {
             }
         }
         for child in &job.children {
-            validate_custom_instructions(child.custom_instructions.as_ref())?;
+            if child.prompt_pack_reference.pack_id.is_empty()
+                || child.prompt_pack_reference.revision_id.is_empty()
+                || child.prompt_pack_reference.content_sha256.len() != 64
+                || !matches!(
+                    child.prompt_pack_selection_source.as_str(),
+                    "default" | "book-override"
+                )
+            {
+                return Err(format!(
+                    "Book Pipeline child {} has an invalid prompt pack reference",
+                    child.id
+                ));
+            }
             if child.parent_job_id != job.id {
                 return Err(format!(
                     "Book Pipeline child {} does not belong to parent {}",
@@ -2427,6 +2441,22 @@ pub async fn queue_book_pipeline_job(
 ) -> Result<BookPipelineJob, String> {
     crate::run_blocking(move || {
         let store = BookPipelineStore::default()?;
+        let prompt_store = PromptPackStore::default()?;
+        let executor = if translation_intent.translation_mode == TRANSLATION_MODE_EXPERT {
+            "expert-agent"
+        } else {
+            "programmatic"
+        };
+        let revision =
+            prompt_store.resolve_revision(&translation_intent.prompt_pack_reference, executor)?;
+        validate_prompt_pack_skill_dependencies(&translation_intent.skill_ids, &revision)?;
+        let current_default = prompt_store.resolve_default(executor, "auto", "zh-Hans")?;
+        if translation_intent.prompt_pack_reference != current_default {
+            return Err(
+                "prompt_pack_default_changed: refresh the prompt pack defaults before queueing"
+                    .into(),
+            );
+        }
         queue_job_with_translation_intent(
             &store,
             source,
@@ -2439,33 +2469,112 @@ pub async fn queue_book_pipeline_job(
 }
 
 #[tauri::command]
-pub async fn save_book_pipeline_custom_instructions(
-    job_id: String,
-    child_id: Option<String>,
-    custom_instructions: BookPipelineCustomInstructions,
-) -> Result<BookPipelineJob, String> {
+pub async fn list_translation_prompt_packs() -> Result<PromptPackCatalog, String> {
+    crate::run_blocking(move || PromptPackStore::default()?.list()).await
+}
+
+#[tauri::command]
+pub async fn get_translation_prompt_pack_default(
+    executor: String,
+    source_language: String,
+    target_language: String,
+) -> Result<PromptPackReference, String> {
     crate::run_blocking(move || {
-        let store = BookPipelineStore::default()?;
-        save_book_custom_instructions(&store, &job_id, child_id.as_deref(), custom_instructions)
+        PromptPackStore::default()?.resolve_default(&executor, &source_language, &target_language)
     })
     .await
 }
 
-fn save_book_custom_instructions(
+#[tauri::command]
+pub async fn copy_translation_prompt_pack(
+    source_reference: PromptPackReference,
+    display_name: String,
+) -> Result<PromptPackDefinition, String> {
+    crate::run_blocking(move || {
+        PromptPackStore::default()?.copy_builtin(&source_reference, &display_name)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn save_translation_prompt_pack_revision(
+    draft: PromptPackRevisionDraft,
+) -> Result<PromptPackRevision, String> {
+    crate::run_blocking(move || PromptPackStore::default()?.save_custom_revision(draft)).await
+}
+
+#[tauri::command]
+pub async fn delete_translation_prompt_pack(pack_id: String) -> Result<(), String> {
+    crate::run_blocking(move || PromptPackStore::default()?.delete_custom(&pack_id)).await
+}
+
+#[tauri::command]
+pub async fn set_translation_prompt_pack_default(
+    executor: String,
+    source_language: String,
+    target_language: String,
+    prompt_pack_reference: PromptPackReference,
+) -> Result<(), String> {
+    crate::run_blocking(move || {
+        PromptPackStore::default()?.set_default(
+            &executor,
+            &source_language,
+            &target_language,
+            prompt_pack_reference,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn diff_translation_prompt_pack_revisions(
+    before: PromptPackReference,
+    after: PromptPackReference,
+) -> Result<PromptPackRevisionDiff, String> {
+    crate::run_blocking(move || PromptPackStore::default()?.diff_revisions(&before, &after)).await
+}
+
+#[tauri::command]
+pub async fn select_book_translation_prompt_pack(
+    job_id: String,
+    child_id: Option<String>,
+    prompt_pack_reference: PromptPackReference,
+) -> Result<BookPipelineJob, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let prompt_store = PromptPackStore::default()?;
+        select_book_prompt_pack(
+            &store,
+            &prompt_store,
+            &job_id,
+            child_id.as_deref(),
+            prompt_pack_reference,
+        )
+    })
+    .await
+}
+
+fn select_book_prompt_pack(
     store: &dyn BookPipelineStateStore,
+    prompt_store: &PromptPackStore,
     job_id: &str,
     child_id: Option<&str>,
-    custom_instructions: BookPipelineCustomInstructions,
+    prompt_pack_reference: PromptPackReference,
 ) -> Result<BookPipelineJob, String> {
-    let custom_instructions = normalize_custom_instructions(custom_instructions)?;
     let mut state = store.load()?;
     let job_index = find_job_index(&state, job_id)?;
     let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
-    let approval_order = ordered_stage_index("approve_translation").unwrap_or_default();
+    let executor = if state.jobs[job_index].translation_mode == TRANSLATION_MODE_EXPERT {
+        "expert-agent"
+    } else {
+        "programmatic"
+    };
+    prompt_store.resolve_revision(&prompt_pack_reference, executor)?;
     let child = &state.jobs[job_index].children[child_index];
-    if child.custom_instructions == custom_instructions {
+    if child.prompt_pack_reference == prompt_pack_reference {
         return Ok(state.jobs[job_index].clone());
     }
+    let approval_order = ordered_stage_index("approve_translation").unwrap_or_default();
     let later_stage_is_active = child.stages.iter().any(|stage| {
         ordered_stage_index(&stage.stage_id).is_some_and(|order| order > approval_order)
             && (matches!(
@@ -2474,16 +2583,174 @@ fn save_book_custom_instructions(
             ) || is_agent_handoff_waiting(stage))
     });
     if later_stage_is_active {
-        return Err("custom_instructions_locked: translation or a later stage is active.".into());
+        return Err("prompt_pack_selection_locked: translation or a later stage is active.".into());
     }
 
-    state.jobs[job_index].children[child_index].custom_instructions = custom_instructions;
+    state.jobs[job_index].children[child_index].prompt_pack_reference =
+        prompt_pack_reference.clone();
+    state.jobs[job_index].children[child_index].prompt_pack_selection_source =
+        "book-override".into();
+    if state.jobs[job_index].children.len() == 1 {
+        state.jobs[job_index].prompt_pack_reference = prompt_pack_reference;
+        state.jobs[job_index].prompt_pack_selection_source = "book-override".into();
+    }
+    if executor == "expert-agent" {
+        let mut required_skill_ids = BTreeSet::new();
+        for child in &state.jobs[job_index].children {
+            let revision =
+                prompt_store.resolve_revision(&child.prompt_pack_reference, "expert-agent")?;
+            required_skill_ids.extend(revision.required_skill_ids);
+        }
+        state.jobs[job_index].translation_skill_ids = required_skill_ids.into_iter().collect();
+    }
     ready_translation_approval_gate(&mut state.jobs[job_index], child_index);
     state.jobs[job_index].updated_at = now_label();
     derive_job(&mut state.jobs[job_index]);
     let saved = state.jobs[job_index].clone();
     store.save(&state)?;
     Ok(saved)
+}
+
+#[tauri::command]
+pub async fn preview_book_translation_prompt(
+    job_id: String,
+    child_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        preview_book_prompt_with_executor(
+            &store,
+            &PromptPackStore::default()?,
+            &job_id,
+            child_id.as_deref(),
+            &SystemCommandExecutor,
+        )
+    })
+    .await
+}
+
+fn preview_book_prompt_with_executor(
+    store: &dyn BookPipelineStateStore,
+    prompt_store: &PromptPackStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    executor: &dyn RunnerCommandExecutor,
+) -> Result<serde_json::Value, String> {
+    let state = store.load()?;
+    let job = state
+        .jobs
+        .iter()
+        .find(|job| job.id == job_id)
+        .ok_or_else(|| "Book Pipeline job not found".to_string())?;
+    let child_index = locate_child_index(job, child_id)?;
+    let child = &job.children[child_index];
+    if job.translation_mode == TRANSLATION_MODE_EXPERT {
+        let (source_sample, glossary_entries) = expert_prompt_preview_inputs(child)?;
+        let handoff = prompt_store.compile_expert_handoff(
+            &child.prompt_pack_reference,
+            &source_sample,
+            &glossary_entries,
+        )?;
+        return serde_json::to_value(serde_json::json!({
+            "schema": "expert-agent-prompt-preview-v1",
+            "promptPackReference": handoff.prompt_pack_reference,
+            "sourceLanguage": handoff.source_language,
+            "targetLanguage": handoff.target_language,
+            "stages": [{
+                "actualPrompt": handoff.actual_prompt,
+                "injections": ["template", "current-source", "context-policy", "glossary", "executor-safety"]
+            }],
+            "contextPolicy": handoff.context_policy,
+            "requiredSkillIds": handoff.required_skill_ids,
+            "skillDependencyVersions": handoff.skill_dependency_versions,
+            "requiredEvidence": handoff.required_evidence,
+            "excludedResponsibilities": handoff.excluded_responsibilities,
+            "parameters": handoff.parameters,
+            "promptPackProvenance": handoff.prompt_pack_provenance,
+            "stageInstructions": handoff.stage_instructions,
+            "evidencePolicy": handoff.evidence_policy,
+        }))
+        .map_err(|err| err.to_string());
+    }
+
+    let project_root = project_root_from_child(child)?;
+    let units = translation_task_units(child, &project_root)?;
+    let prompt_pack =
+        prompt_store.resolve_revision(&child.prompt_pack_reference, "programmatic")?;
+    let manifest = serde_json::json!({
+        "schema": "translation-engine-prompt-preview-v1",
+        "projectRoot": display_path(&project_root),
+        "sourceMapPath": "metadata/source_map.json",
+        "sourceLanguage": "auto",
+        "targetLanguage": "zh-Hans",
+        "maxTokens": TRANSLATION_ENGINE_MAX_TOKENS,
+        "textCleanup": job.text_cleanup,
+        "promptPack": prompt_pack,
+        "units": units.iter().map(|unit| serde_json::json!({
+            "taskManifestPath": unit.task_manifest_path.as_str()
+        })).collect::<Vec<_>>(),
+    });
+    let mut temporary = tempfile::NamedTempFile::new()
+        .map_err(|err| format!("Could not create private prompt preview manifest: {err}"))?;
+    temporary
+        .write_all(
+            (serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())? + "\n")
+                .as_bytes(),
+        )
+        .map_err(|err| err.to_string())?;
+    let command = build_translation_prompt_preview_command(child, temporary.path())?;
+    let result = executor.execute(&command)?;
+    serde_json::from_str(&result.stdout)
+        .map_err(|err| format!("Translation engine returned invalid prompt preview JSON: {err}"))
+}
+
+fn build_translation_prompt_preview_command(
+    child: &BookPipelineChildJob,
+    manifest_path: &Path,
+) -> Result<RunnerCommand, String> {
+    Ok(RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: "translation prompt preview".into(),
+        program: PathBuf::from("uv"),
+        args: vec![
+            "run".into(),
+            "--package".into(),
+            "translation-engine".into(),
+            "translation-engine-prompt-preview".into(),
+            "--manifest".into(),
+            display_path(manifest_path),
+        ],
+        env: Vec::new(),
+        cwd: Some(translation_engine_resource_root()?),
+        output_dir: project_root_from_child(child)?,
+        attempts: 0,
+        accepted_exit_codes: vec![0],
+    })
+}
+
+fn expert_prompt_preview_inputs(
+    child: &BookPipelineChildJob,
+) -> Result<(String, Vec<String>), String> {
+    let project_root = project_root_from_child(child)?;
+    let unit = translation_task_units(child, &project_root)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No translation unit is available for prompt preview".to_string())?;
+    let source = fs::read_to_string(project_root.join(unit.source_chapter_path))
+        .map_err(|err| err.to_string())?;
+    let sample = source
+        .chars()
+        .take(TRANSLATION_SAMPLE_CHARACTER_BUDGET)
+        .collect();
+    let glossary_path = project_root.join("glossary").join("terms.csv");
+    let glossary_entries = fs::read_to_string(glossary_path)
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .take(20)
+        .map(str::to_string)
+        .collect();
+    Ok((sample, glossary_entries))
 }
 
 #[tauri::command]
@@ -3838,6 +4105,42 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
     if intent.config_id.trim().is_empty() {
         return Err("translationIntent.configId is required.".into());
     }
+    if intent.prompt_pack_reference.pack_id.trim().is_empty()
+        || intent.prompt_pack_reference.revision_id.trim().is_empty()
+        || intent.prompt_pack_reference.content_sha256.len() != 64
+    {
+        return Err("translationIntent.promptPackReference is invalid.".into());
+    }
+    if intent.prompt_pack_reference.pack_id.starts_with("builtin.") {
+        let catalog = builtin_prompt_pack_catalog()?;
+        let revision = catalog
+            .packs
+            .iter()
+            .find(|pack| pack.pack_id == intent.prompt_pack_reference.pack_id)
+            .and_then(|pack| {
+                pack.revisions.iter().find(|revision| {
+                    revision.revision_id == intent.prompt_pack_reference.revision_id
+                })
+            })
+            .ok_or_else(|| "prompt_pack_revision_not_found".to_string())?;
+        if revision.content_sha256 != intent.prompt_pack_reference.content_sha256 {
+            return Err("prompt_pack_content_hash_mismatch".into());
+        }
+        let expected_executor = if intent.translation_mode == TRANSLATION_MODE_EXPERT {
+            "expert-agent"
+        } else {
+            "programmatic"
+        };
+        if revision.executor != expected_executor {
+            return Err("prompt_pack_executor_mismatch".into());
+        }
+        let uses_reflection = prompt_pack_revision_uses_reflection(revision);
+        if intent.translation_mode == TRANSLATION_MODE_FAST
+            && intent.second_pass_enabled != uses_reflection
+        {
+            return Err("prompt_pack_stage_graph_mismatch".into());
+        }
+    }
     if intent
         .skill_ids
         .iter()
@@ -3868,6 +4171,32 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
         return Err("digestMode requires epub in outputFormats.".into());
     }
     Ok(())
+}
+
+fn validate_prompt_pack_skill_dependencies(
+    selected_skill_ids: &[String],
+    revision: &PromptPackRevision,
+) -> Result<(), String> {
+    if revision.executor == "expert-agent"
+        && revision
+            .required_skill_ids
+            .iter()
+            .any(|required| !selected_skill_ids.contains(required))
+    {
+        return Err("prompt_pack_required_skill_missing".into());
+    }
+    Ok(())
+}
+
+fn prompt_pack_revision_uses_reflection(revision: &PromptPackRevision) -> bool {
+    revision
+        .stages
+        .iter()
+        .any(|stage| stage.stage_id == "reflect")
+        && revision
+            .stages
+            .iter()
+            .any(|stage| stage.stage_id == "improve")
 }
 
 /// Guards the queue boundary. An unknown mode is refused instead of being given
@@ -4008,6 +4337,8 @@ fn queue_standard_job_for_root<E: RunnerCommandExecutor>(
         translation_profile_id: translation_intent.profile_id,
         translation_config_id: translation_intent.config_id,
         translation_skill_ids: translation_intent.skill_ids,
+        prompt_pack_reference: translation_intent.prompt_pack_reference,
+        prompt_pack_selection_source: "default".into(),
         second_pass_enabled: translation_intent.second_pass_enabled,
         text_cleanup: translation_intent.text_cleanup,
         digest_mode: translation_intent.digest_mode,
@@ -4109,7 +4440,7 @@ fn queue_zotero_collection_snapshot_job<E: RunnerCommandExecutor>(
                 &collection_key,
                 member,
                 &mode,
-                translation_intent.digest_mode,
+                &translation_intent,
                 &source.route_overrides,
             )
         })
@@ -4162,6 +4493,8 @@ fn queue_zotero_collection_snapshot_job<E: RunnerCommandExecutor>(
         translation_profile_id: translation_intent.profile_id,
         translation_config_id: translation_intent.config_id,
         translation_skill_ids: translation_intent.skill_ids,
+        prompt_pack_reference: translation_intent.prompt_pack_reference,
+        prompt_pack_selection_source: "default".into(),
         second_pass_enabled: translation_intent.second_pass_enabled,
         text_cleanup: translation_intent.text_cleanup,
         digest_mode: translation_intent.digest_mode,
@@ -4447,7 +4780,7 @@ fn collection_snapshot_child(
     collection_key: &str,
     member: &ZoteroCollectionSnapshotMember,
     mode: &str,
-    digest_mode: bool,
+    translation_intent: &BookPipelineTranslationIntent,
     route_overrides: &BTreeMap<String, String>,
 ) -> Option<BookPipelineChildJob> {
     let attachment_key = member.attachment_key.as_deref()?;
@@ -4465,7 +4798,7 @@ fn collection_snapshot_child(
                 } else {
                     STATUS_BLOCKED.into()
                 }
-            } else if stage_id == "build_digest" && !digest_mode {
+            } else if stage_id == "build_digest" && !translation_intent.digest_mode {
                 STATUS_SKIPPED.into()
             } else {
                 STATUS_PENDING.into()
@@ -4521,7 +4854,8 @@ fn collection_snapshot_child(
             eligibility: member.eligibility.clone(),
             reason: member.reason.clone(),
         }),
-        custom_instructions: None,
+        prompt_pack_reference: translation_intent.prompt_pack_reference.clone(),
+        prompt_pack_selection_source: "default".into(),
         reader_evidence: Vec::new(),
         removed_at: None,
     };
@@ -4580,6 +4914,7 @@ fn queue_job(
         profile_id: "fake-provider-profile".into(),
         config_id: "fake-provider-config".into(),
         skill_ids: Vec::new(),
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         second_pass_enabled: false,
         text_cleanup: false,
         digest_mode: false,
@@ -7657,6 +7992,8 @@ fn zotero_item_job(parent: &BookPipelineJob, route: &BookPipelineRouteItem) -> B
         translation_profile_id: parent.translation_profile_id.clone(),
         translation_config_id: parent.translation_config_id.clone(),
         translation_skill_ids: parent.translation_skill_ids.clone(),
+        prompt_pack_reference: parent.prompt_pack_reference.clone(),
+        prompt_pack_selection_source: parent.prompt_pack_selection_source.clone(),
         second_pass_enabled: parent.second_pass_enabled,
         text_cleanup: parent.text_cleanup,
         digest_mode: parent.digest_mode,
@@ -12333,9 +12670,8 @@ fn run_translation_sample_with_executor(
 
     let project_root = project_root_from_child(child)?;
     let units = translation_task_units(child, &project_root)?;
-    // textCleanup and customInstructions are read from the same places the full
-    // run reads them, so the preview cannot show a translation the real run
-    // would not produce. See the run manifest assembly further down.
+    let prompt_pack = PromptPackStore::default()?
+        .resolve_revision(&child.prompt_pack_reference, "programmatic")?;
     let mut manifest = serde_json::json!({
         "schema": TRANSLATION_ENGINE_SAMPLE_SCHEMA,
         "projectRoot": display_path(&project_root),
@@ -12347,16 +12683,13 @@ fn run_translation_sample_with_executor(
         "sampleCount": TRANSLATION_SAMPLE_COUNT,
         "characterBudget": TRANSLATION_SAMPLE_CHARACTER_BUDGET,
         "textCleanup": job.text_cleanup,
+        "promptPack": prompt_pack,
         "placeholderRetries": TRANSLATION_ENGINE_PLACEHOLDER_RETRIES,
         "units": units
             .iter()
             .map(|unit| serde_json::json!({"taskManifestPath": unit.task_manifest_path.as_str()}))
             .collect::<Vec<_>>(),
     });
-    if let Some(custom_instructions) = &child.custom_instructions {
-        manifest["customInstructions"] = serde_json::to_value(custom_instructions)
-            .map_err(|err| format!("Could not serialize custom instructions: {err}"))?;
-    }
     apply_active_model_to_manifest(&mut manifest, provider_profile_id, provider_config_id);
     let sample_dir = project_root.join("qa").join("sample-compare");
     fs::create_dir_all(&sample_dir).map_err(|err| err.to_string())?;
@@ -13458,6 +13791,9 @@ fn run_translate_stage(
     }
     let project_root = project_root_from_child(child)?;
     let mut input_hashes = translation_approval_input_hashes(job, child)?;
+    let prompt_pack = PromptPackStore::default()?
+        .resolve_revision(&child.prompt_pack_reference, "programmatic")?;
+    let second_pass_enabled = prompt_pack_revision_uses_reflection(&prompt_pack);
     let all_units = translation_task_units(child, &project_root)?;
     let retry_unit_ids = failed_translation_unit_ids(child);
     let requested_units = if retry_unit_ids.is_empty() {
@@ -13482,8 +13818,9 @@ fn run_translate_stage(
         "targetLanguage": "zh-Hans",
         "providerProfileId": job.translation_profile_id.as_str(),
         "providerConfigId": job.translation_config_id.as_str(),
-        "secondPassEnabled": job.second_pass_enabled,
+        "secondPassEnabled": second_pass_enabled,
         "textCleanup": job.text_cleanup,
+        "promptPack": prompt_pack,
         "translationPolicyVersion": TRANSLATION_POLICY_VERSION,
         "maxTokens": TRANSLATION_ENGINE_MAX_TOKENS,
         "placeholderRetries": TRANSLATION_ENGINE_PLACEHOLDER_RETRIES,
@@ -13492,10 +13829,6 @@ fn run_translate_stage(
             .map(|unit| serde_json::json!({"taskManifestPath": unit.task_manifest_path.as_str()}))
             .collect::<Vec<_>>(),
     });
-    if let Some(custom_instructions) = &child.custom_instructions {
-        manifest["customInstructions"] = serde_json::to_value(custom_instructions)
-            .map_err(|err| format!("Could not serialize custom instructions: {err}"))?;
-    }
     apply_active_model_to_manifest(
         &mut manifest,
         &job.translation_profile_id,
@@ -13650,10 +13983,33 @@ fn run_expert_translate_stage(
     let project_root = project_root_from_child(child)?;
     let mut input_hashes = translation_approval_input_hashes(job, child)?;
     let units = translation_task_units(child, &project_root)?;
+    let prompt_store = PromptPackStore::default()?;
+    let (source_sample, glossary_entries) = expert_prompt_preview_inputs(child)?;
+    let compiled_handoff = prompt_store.compile_expert_handoff(
+        &child.prompt_pack_reference,
+        &source_sample,
+        &glossary_entries,
+    )?;
     let handoff = serde_json::json!({
         "schema": TRANSLATION_HANDOFF_SCHEMA,
         "agentProfileId": job.translation_profile_id.as_str(),
-        "skillIds": job.translation_skill_ids.as_slice(),
+        "skillIds": &compiled_handoff.required_skill_ids,
+        "promptPackReference": &compiled_handoff.prompt_pack_reference,
+        "sourceLanguage": compiled_handoff.source_language.as_str(),
+        "targetLanguage": compiled_handoff.target_language.as_str(),
+        "contextPolicy": compiled_handoff.context_policy.as_str(),
+        "requiredSkillIds": &compiled_handoff.required_skill_ids,
+        "skillDependencyVersions": &compiled_handoff.skill_dependency_versions,
+        "requiredEvidence": &compiled_handoff.required_evidence,
+        "excludedResponsibilities": &compiled_handoff.excluded_responsibilities,
+        "parameters": &compiled_handoff.parameters,
+        "promptPackProvenance": &compiled_handoff.prompt_pack_provenance,
+        "stageInstructions": &compiled_handoff.stage_instructions,
+        "evidencePolicy": &compiled_handoff.evidence_policy,
+        "executorSafety": {
+            "owner": "bibliosmith",
+            "locked": ["placeholders", "headings", "paragraph-boundaries", "glossary", "privacy"]
+        },
         "units": units
             .iter()
             .map(|unit| serde_json::json!({
@@ -13679,17 +14035,51 @@ fn run_expert_translate_stage(
             && artifact.sha256.as_deref() == Some(handoff_sha256.as_str())
     });
     input_hashes.insert("translationHandoffSha256".into(), handoff_sha256.clone());
+    input_hashes.insert(
+        "promptPackContentSha256".into(),
+        child.prompt_pack_reference.content_sha256.clone(),
+    );
 
     let mut artifacts = vec![BookPipelineArtifact {
         kind: "translation_handoff".into(),
         path: display_path(&handoff_path),
-        sha256: Some(handoff_sha256),
+        sha256: Some(handoff_sha256.clone()),
         zotero_key: None,
         producer_stage: Some("translate".into()),
         ..BookPipelineArtifact::default()
     }];
     let mut completed = 0_u32;
     let mut blocked = 0_u32;
+    let receipt_path = handoff_dir.join("translate-receipt.json");
+    let receipt = fs::read_to_string(&receipt_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(|receipt| {
+            prompt_store
+                .validate_expert_receipt(
+                    &child.prompt_pack_reference,
+                    receipt,
+                    &handoff_sha256,
+                    &project_root,
+                )
+                .is_ok()
+        });
+    if let Some(receipt) = &receipt {
+        let receipt_text = serde_json::to_string(receipt).map_err(|err| err.to_string())?;
+        let receipt_sha256 = sha256_str(&receipt_text);
+        input_hashes.insert(
+            "translationPromptPackReceiptSha256".into(),
+            receipt_sha256.clone(),
+        );
+        artifacts.push(BookPipelineArtifact {
+            kind: "translation_handoff_receipt".into(),
+            path: display_path(&receipt_path),
+            sha256: Some(sha256_file(&receipt_path)?),
+            zotero_key: None,
+            producer_stage: Some("translate".into()),
+            ..BookPipelineArtifact::default()
+        });
+    }
     for unit in &units {
         input_hashes.insert(
             format!("translationTaskManifest:{}", unit.unit_id),
@@ -13699,7 +14089,7 @@ fn run_expert_translate_stage(
             format!("sourceChapter:{}", unit.unit_id),
             unit.source_chapter_sha256.clone(),
         );
-        if !handoff_was_issued {
+        if !handoff_was_issued || receipt.is_none() {
             blocked = blocked.saturating_add(1);
             continue;
         }
@@ -13727,7 +14117,11 @@ fn run_expert_translate_stage(
     }
     let output = StageRunOutput {
         artifacts,
-        artifact_kinds: vec!["translation_handoff", "chapter_translation"],
+        artifact_kinds: vec![
+            "translation_handoff",
+            "translation_handoff_receipt",
+            "chapter_translation",
+        ],
         input_hashes,
         log_summary: vec![if blocked == 0 {
             format!("Accepted {completed} expert translation unit(s)")
@@ -14661,6 +15055,15 @@ fn translation_approval_binding(
     job: &BookPipelineJob,
     child: &BookPipelineChildJob,
 ) -> Option<(BookPipelineApprovalRequest, BTreeMap<String, String>)> {
+    let executor = if job.translation_mode == TRANSLATION_MODE_EXPERT {
+        "expert-agent"
+    } else {
+        "programmatic"
+    };
+    let prompt_pack = PromptPackStore::default()
+        .ok()?
+        .resolve_revision(&child.prompt_pack_reference, executor)
+        .ok()?;
     if !["split", "prepare"].iter().all(|stage_id| {
         child
             .stages
@@ -14716,12 +15119,12 @@ fn translation_approval_binding(
     let agent_profile_id = (job.translation_mode == TRANSLATION_MODE_EXPERT)
         .then(|| job.translation_profile_id.clone());
     let skill_ids = if job.translation_mode == TRANSLATION_MODE_EXPERT {
-        job.translation_skill_ids.clone()
+        prompt_pack.required_skill_ids.clone()
     } else {
         Vec::new()
     };
-    let second_pass_enabled =
-        job.translation_mode == TRANSLATION_MODE_FAST && job.second_pass_enabled;
+    let second_pass_enabled = job.translation_mode == TRANSLATION_MODE_FAST
+        && prompt_pack_revision_uses_reflection(&prompt_pack);
     let mut sample_evidence = BTreeMap::new();
     if let Some(report_sha256) = child
         .artifacts
@@ -14732,12 +15135,7 @@ fn translation_approval_binding(
         sample_evidence.insert("translation_sample_report".into(), report_sha256);
     }
     let text_cleanup = job.translation_mode == TRANSLATION_MODE_FAST && job.text_cleanup;
-    let custom_instructions_sha256 = child
-        .custom_instructions
-        .as_ref()
-        .and_then(|value| serde_json::to_string(value).ok())
-        .map(|value| sha256_str(&value));
-    let mut binding = serde_json::json!({
+    let binding = serde_json::json!({
         "translationMode": job.translation_mode.as_str(),
         "secondPassEnabled": second_pass_enabled,
         "textCleanup": text_cleanup,
@@ -14747,21 +15145,16 @@ fn translation_approval_binding(
         "agentProfileId": agent_profile_id.as_deref(),
         "configId": job.translation_config_id.as_str(),
         "skillIds": skill_ids.as_slice(),
+        "promptPackReference": &child.prompt_pack_reference,
         "sampleEvidence": &sample_evidence,
         "boundArtifactHashes": &bound_artifact_hashes,
     });
-    if let Some(custom_instructions_sha256) = &custom_instructions_sha256 {
-        binding["customInstructionsSha256"] =
-            serde_json::Value::String(custom_instructions_sha256.clone());
-    }
     let binding_json = serde_json::to_string(&binding).ok()?;
     let mut input_hashes = bound_artifact_hashes.clone();
-    if let Some(custom_instructions_sha256) = custom_instructions_sha256 {
-        input_hashes.insert(
-            "customInstructionsSha256".into(),
-            custom_instructions_sha256,
-        );
-    }
+    input_hashes.insert(
+        "promptPackContentSha256".into(),
+        child.prompt_pack_reference.content_sha256.clone(),
+    );
     input_hashes.insert("approvalBindingSha256".into(), sha256_str(&binding_json));
     Some((
         BookPipelineApprovalRequest {
@@ -14775,6 +15168,7 @@ fn translation_approval_binding(
             agent_profile_id,
             config_id: job.translation_config_id.clone(),
             skill_ids,
+            prompt_pack_reference: child.prompt_pack_reference.clone(),
             qa_policy: None,
             sample_evidence,
             bound_artifact_hashes,
@@ -15162,6 +15556,7 @@ fn promotion_approval_binding(
         "agentProfileId": agent_profile_id.as_str(),
         "configId": job.translation_config_id.as_str(),
         "skillIds": skill_ids.as_slice(),
+        "promptPackReference": &child.prompt_pack_reference,
         "sampleEvidence": &sample_evidence,
         "boundArtifactHashes": &bound_artifact_hashes,
     }))
@@ -15180,6 +15575,7 @@ fn promotion_approval_binding(
             agent_profile_id: Some(agent_profile_id),
             config_id: job.translation_config_id.clone(),
             skill_ids,
+            prompt_pack_reference: child.prompt_pack_reference.clone(),
             qa_policy: Some(policy.into()),
             sample_evidence,
             bound_artifact_hashes,

@@ -462,37 +462,50 @@
 .pl-dfoot { display: flex; flex: none; align-items: center; gap: 14px; padding: 11px 20px; border-top: 1px solid var(--line); background: var(--island); }
 .pl-dhint { flex: 1; color: var(--muted); font-size: 12.5px; }
 
-.pl-custom-instructions {
+.pl-prompt-pack {
   margin-bottom: 14px;
   padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: 13px;
   background: var(--sub);
 }
-.pl-ci-head h3 { margin: 0; color: var(--ink); font-size: 13.5px; }
-.pl-ci-head p { margin: 3px 0 12px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
-.pl-ci-field { display: block; margin-top: 10px; color: var(--ink); font-size: 12px; font-weight: 600; }
-.pl-ci-field textarea {
-  display: block;
-  box-sizing: border-box;
+.pl-pp-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.pl-pp-head h3 { margin: 0; color: var(--ink); font-size: 13.5px; }
+.pl-pp-head p, .pl-pp-actual > p { margin: 3px 0 12px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.pl-pp-select { display: grid; gap: 5px; color: var(--ink); font-size: 12px; font-weight: 600; }
+.pl-pp-select select {
   width: 100%;
-  min-height: 74px;
-  margin-top: 5px;
-  padding: 9px 10px;
-  resize: vertical;
+  height: 32px;
+  padding: 0 8px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   background: var(--island);
   color: var(--ink);
-  font: inherit;
-  font-weight: 400;
-  line-height: 1.5;
+  font-size: 12px;
 }
-.pl-ci-field textarea:focus { outline: 2px solid var(--pl-running-soft); border-color: var(--pl-running); }
-.pl-ci-field small { display: block; margin-top: 3px; color: var(--pl-faint); font-size: 10.5px; text-align: right; }
-.pl-ci-field small.over, .pl-ci-error { color: var(--pl-failed); }
-.pl-ci-error { margin: 8px 0 0; font-size: 11.5px; }
-.pl-ci-actions,
+.pl-pp-binding { display: block; overflow: hidden; margin-top: 5px; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.pl-pp-tabs { display: flex; gap: 4px; margin-top: 12px; border-bottom: 1px solid var(--line); }
+.pl-pp-tabs button { padding: 6px 8px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-size: 11.5px; }
+.pl-pp-tabs button.active { border-bottom-color: var(--pl-jade); color: var(--ink); }
+.pl-pp-templates, .pl-pp-actual { display: grid; gap: 8px; margin-top: 10px; }
+.pl-pp-templates > div, .pl-pp-actual > div { display: grid; gap: 4px; }
+.pl-pp-templates strong, .pl-pp-actual strong { color: var(--ink); font-size: 11.5px; }
+.pl-pp-injections { color: var(--muted); font-size: 10.5px; }
+.pl-pp-templates pre, .pl-pp-actual pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--island);
+  font: 11px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pl-pp-error { color: var(--pl-failed); font-size: 11.5px; }
+.pl-ocrcard-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 .pl-ocrcard-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 
 /* ---------- three-phase strip ---------- */
