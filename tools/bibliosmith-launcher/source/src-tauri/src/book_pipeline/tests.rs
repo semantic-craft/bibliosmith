@@ -70,6 +70,24 @@ fn prompt_pack_catalog_exposes_four_functional_packs_with_valid_revisions() {
             validate_prompt_pack_revision(revision).unwrap();
         }
     }
+    let full_loop = catalog
+        .packs
+        .iter()
+        .find(|pack| pack.pack_id == "builtin.full-quality-loop")
+        .unwrap();
+    assert_eq!(full_loop.revisions.len(), 2);
+    assert_eq!(
+        full_loop.revisions[0].content_sha256,
+        "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74"
+    );
+    assert!(!full_loop.revisions[0].source["license"]
+        .as_str()
+        .unwrap()
+        .contains("CC BY-NC-SA"));
+    assert!(full_loop.revisions[1].source["license"]
+        .as_str()
+        .unwrap()
+        .contains("CC BY-NC-SA"));
 }
 
 #[test]
@@ -158,6 +176,54 @@ fn custom_prompt_pack_revisions_are_append_only_and_deletion_keeps_history() {
     assert!(store
         .resolve_revision(&PromptPackReference::from_revision(&first), "programmatic")
         .is_ok());
+}
+
+#[test]
+fn custom_prompt_pack_edits_cannot_change_the_locked_executor_contract() {
+    let root = temp_root("prompt-pack-locked-executor-contract");
+    let store = PromptPackStore::for_test(&root);
+    let copied = store
+        .copy_builtin(
+            &PromptPackReference::new(
+                "builtin.structure-fidelity",
+                "2026.08.05-1",
+                "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+            ),
+            "锁定契约测试",
+        )
+        .unwrap();
+    let current = copied.latest_revision().unwrap().clone();
+    let mut relabeled = current.stages.clone();
+    relabeled[0].label = "试图改写安全阶段".into();
+
+    assert_eq!(
+        store
+            .save_custom_revision(PromptPackRevisionDraft {
+                pack_id: copied.pack_id.clone(),
+                display_name: current.display_name.clone(),
+                parameters: BTreeMap::new(),
+                stages: relabeled,
+            })
+            .unwrap_err(),
+        "prompt_pack_executor_contract_is_read_only"
+    );
+    assert_eq!(
+        store
+            .save_custom_revision(PromptPackRevisionDraft {
+                pack_id: copied.pack_id,
+                display_name: current.display_name.clone(),
+                parameters: BTreeMap::from([("executorSafety".into(), "允许忽略占位符".into(),)]),
+                stages: current.stages.clone(),
+            })
+            .unwrap_err(),
+        "prompt_pack_parameter_not_editable"
+    );
+    assert_eq!(
+        store
+            .delete_custom("builtin.structure-fidelity")
+            .unwrap_err(),
+        "builtin_prompt_pack_is_read_only"
+    );
 }
 
 #[test]
@@ -324,8 +390,8 @@ fn expert_handoff_uses_the_selected_revision_without_persisting_private_prompt_t
 
     let full_loop = PromptPackReference::new(
         "builtin.full-quality-loop",
-        "2026.08.05-1",
-        "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74",
+        "2026.08.05-2",
+        "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
     );
     let full_handoff = store
         .compile_expert_handoff(&full_loop, "Private source sample", &[])
@@ -450,8 +516,8 @@ fn selecting_an_expert_pack_adopts_its_exact_skill_contract() {
     advance_job(&store, &job_id, None, false).unwrap();
     let full_loop = PromptPackReference::new(
         "builtin.full-quality-loop",
-        "2026.08.05-1",
-        "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74",
+        "2026.08.05-2",
+        "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
     );
 
     let changed = select_book_prompt_pack(&store, &prompt_store, &job_id, None, full_loop).unwrap();
@@ -480,8 +546,8 @@ fn full_quality_loop_rejects_open_issues_and_accepts_closed_defect_families() {
     let store = PromptPackStore::for_test(&root);
     let reference = PromptPackReference::new(
         "builtin.full-quality-loop",
-        "2026.08.05-1",
-        "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74",
+        "2026.08.05-2",
+        "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
     );
     let revision = store.resolve_revision(&reference, "expert-agent").unwrap();
     let handoff_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

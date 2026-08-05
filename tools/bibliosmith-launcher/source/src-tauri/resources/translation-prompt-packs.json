@@ -245,6 +245,86 @@
               "template": "只有最新的研究、校准、章级控制、多维审校、独立复核和问题族证据均通过且无未关闭问题时，才允许确认翻译完成。"
             }
           ]
+        },
+        {
+          "schema": "translation-prompt-pack-revision-v1",
+          "packId": "builtin.full-quality-loop",
+          "revisionId": "2026.08.05-2",
+          "contentSha256": "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
+          "displayName": "全流程审校闭环",
+          "executor": "expert-agent",
+          "sourceLanguage": "auto",
+          "targetLanguage": "zh-Hans",
+          "costHint": "专家代理全流程，多轮审校与问题族复查",
+          "source": {
+            "kind": "mechanism-reference",
+            "repository": "https://github.com/SaberOnGo/public-domain-books-translation",
+            "commit": "219f452311817a09cfbe59d7e345a1ac2a81faa8",
+            "referenceFiles": ["AGENTS.md", ".opencode/agents/book-runner.md", ".opencode/agents/book-reviewer.md", ".opencode/commands/run-gates.md", ".opencode/commands/random-spotcheck.md"],
+            "skillVersions": {
+              "expert-translation-quality": "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47",
+              "translation-quality-defect-families": "sha256:74663d622043bf80096a8188e402112dec7ad5d112e1ae8429561fa4379994af"
+            },
+            "license": "Mechanism-only reference; no upstream text is bundled. Any copied or adapted upstream expression must be a separately attributed CC BY-NC-SA content asset.",
+            "commercialUse": "BiblioSmith wording is original; no upstream text is bundled and no upstream endorsement is implied.",
+            "adaptation": "在首版原创机制实现上补充来源使用边界：仅参考机制，不捆绑上游文本；任何具体表达的复制或改编都必须作为独立 CC BY-NC-SA 内容资产署名管理。"
+          },
+          "contextPolicy": "阶段输入按最小必要范围提供；独立复核不得读取译者的自评结论；发现问题族后扩展到全书候选并用新证据关闭。",
+          "requiredSkillIds": ["expert-translation-quality", "translation-quality-defect-families"],
+          "requiredEvidence": ["research-brief", "calibration-result", "chapter-control", "multidimensional-review", "independent-review", "defect-family-closure", "rollback-receipt", "final-gate"],
+          "excludedResponsibilities": ["copyright-decision", "online-source-acquisition", "cover-or-epub-production", "publication", "commercial-licensing", "release", "global-template-backfill"],
+          "evidencePolicy": {
+            "independentReview": true,
+            "requireZeroOpenIssues": true,
+            "requireDefectFamilyClosure": true
+          },
+          "stages": [
+            {
+              "stageId": "research",
+              "label": "译前研究",
+              "template": "建立作品、时代、体裁、作者文体和关键术语的最小研究简报，只记录能改变翻译决策的证据。"
+            },
+            {
+              "stageId": "calibrate",
+              "label": "校准试译",
+              "template": "选择有代表性的短样本试译，形成可检验的术语和风格规则；未通过校准不得进入全书翻译。"
+            },
+            {
+              "stageId": "translate_chapter",
+              "label": "分章翻译",
+              "template": "按已批准的研究、术语和风格规则完整翻译当前章，保存单元级可追溯证据。"
+            },
+            {
+              "stageId": "chapter_control",
+              "label": "章级控制",
+              "template": "把本章作为整体检查结构、叙事连续性、语域、术语和漏译，不以孤立句子的顺滑替代整章一致。"
+            },
+            {
+              "stageId": "multidimensional_review",
+              "label": "多维审校",
+              "template": "分别检查忠实度、可读性、术语一致性和结构完整性，为每个问题给出原文与译文证据定位。"
+            },
+            {
+              "stageId": "independent_review",
+              "label": "独立复核",
+              "template": "在不依赖译者自评结论的前提下独立抽查并挑战现有译文；发现的问题必须进入可追踪清单。"
+            },
+            {
+              "stageId": "close_defect_families",
+              "label": "问题族关闭",
+              "template": "把已确认问题抽象为可检索的问题族，扫描全书候选、逐一判定和修复，再用新的复查证据关闭；不得用一次局部修复宣称全书完成。"
+            },
+            {
+              "stageId": "rollback",
+              "label": "精确回退",
+              "template": "若最新复查失败，只回退到产生缺陷的最近阶段，保留已通过且不受影响的证据，修复后重新经过下游门禁。"
+            },
+            {
+              "stageId": "final_gate",
+              "label": "最终翻译门禁",
+              "template": "只有最新的研究、校准、章级控制、多维审校、独立复核和问题族证据均通过且无未关闭问题时，才允许确认翻译完成。"
+            }
+          ]
         }
       ]
     }

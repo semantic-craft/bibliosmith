@@ -282,7 +282,7 @@ function previewBookPipelineRoutes(source: BookPipelineSource, mode: string, con
 function previewBookPipelineJob(source: BookPipelineSource, mode: string, config?: BookPipelinePreviewConfig | null): BookPipelineJob {
   const now = bookPipelineNow();
   const route = previewBookPipelineRoutes(source, mode, config);
-  const id = `preview-${Date.now()}`;
+  const id = `preview-${crypto.randomUUID()}`;
   const executionRoutes = route.filter((item) => item.routeKind !== "translation_handoff");
   const childRoutes = isBookPipelineZoteroBatchSource(source) ? executionRoutes.map((item) => [item]) : [executionRoutes];
   const children = childRoutes.map((routes, index) => {
@@ -989,6 +989,22 @@ export async function saveTranslationPromptPackRevision(draft: TranslationPrompt
     const pack = previewTranslationPromptCatalog.packs.find((item) => item.packId === draft.packId);
     const previous = pack?.revisions.at(-1);
     if (!pack || pack.kind === "builtin" || !previous) throw new Error("Only local prompt packs can be edited.");
+    if (!draft.displayName.trim()) throw new Error("displayName is required.");
+    if (draft.stages.length !== previous.stages.length || draft.stages.some((stage, index) => {
+      const locked = previous.stages[index];
+      return !locked
+        || stage.stageId !== locked.stageId
+        || stage.label !== locked.label
+        || !stage.template.trim();
+    })) {
+      throw new Error("Prompt pack executor contract is read-only.");
+    }
+    if (Object.entries(draft.parameters).some(([key, value]) =>
+      !["qualityFocus", "styleGuidance"].includes(key)
+      || !value.trim()
+      || [...value].length > 2_000)) {
+      throw new Error("Prompt pack parameter is not editable.");
+    }
     const revision: TranslationPromptPackRevision = {
       ...structuredClone(previous),
       revisionId: `local-${pack.revisions.length + 1}`,
@@ -1385,7 +1401,7 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
     if (stage.status !== "ready") return Promise.reject(new Error("Preview approval gate is not ready."));
     stage.status = "completed";
     stage.attempt += 1;
-    stage.approvalId = `preview-approval-${Date.now()}`;
+    stage.approvalId = `preview-approval-${crypto.randomUUID()}`;
     stage.finishedAt = bookPipelineNow();
     const next = child.stages.find((item) => item.status !== "completed" && item.status !== "skipped");
     if (next?.status === "pending") next.status = "ready";

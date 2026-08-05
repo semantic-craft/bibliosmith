@@ -719,6 +719,10 @@ fn validate_editable_stages(
         .map(|stage| stage.stage_id.as_str())
         .collect::<Vec<_>>();
     if current_ids != edited_ids
+        || current
+            .iter()
+            .zip(edited)
+            .any(|(locked, candidate)| locked.label != candidate.label)
         || edited
             .iter()
             .any(|stage| stage.label.trim().is_empty() || stage.template.trim().is_empty())

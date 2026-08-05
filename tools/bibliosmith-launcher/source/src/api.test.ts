@@ -3,11 +3,14 @@ import {
   copyTranslationPromptPack,
   deleteTranslationPromptPack,
   diffTranslationPromptPackRevisions,
+  getBookPipelineState,
+  getTranslationPromptPackDefault,
   listTranslationPromptPacks,
   previewBookTranslationPrompt,
   previewBookPipelineRoute,
   queueBookPipelineJob,
   saveTranslationPromptPackRevision,
+  setTranslationPromptPackDefault,
 } from "./api";
 import type { BookPipelineSource, BookPipelineTranslationIntent } from "./types";
 
@@ -105,6 +108,60 @@ describe("previewBookPipelineRoute in the browser preview", () => {
 });
 
 describe("prompt-pack management in the browser preview", () => {
+  it("rejects local drafts that change locked stage metadata", async () => {
+    const catalog = await listTranslationPromptPacks();
+    const sourceRevision = catalog.packs
+      .find((pack) => pack.packId === "builtin.structure-fidelity")!
+      .revisions.at(-1)!;
+    const copied = await copyTranslationPromptPack({
+      packId: sourceRevision.packId,
+      revisionId: sourceRevision.revisionId,
+      contentSha256: sourceRevision.contentSha256,
+    }, "预览契约锁定测试");
+    const first = copied.revisions[0];
+
+    await expect(saveTranslationPromptPackRevision({
+      packId: copied.packId,
+      displayName: first.displayName,
+      parameters: {},
+      stages: first.stages.map((stage) => ({
+        ...stage,
+        label: `${stage.label}（已改写）`,
+      })),
+    })).rejects.toThrow("Prompt pack executor contract is read-only.");
+  });
+
+  it("adopts a new default only for subsequent jobs and leaves queued bindings unchanged", async () => {
+    const originalDefault = await getTranslationPromptPackDefault("programmatic");
+    const nextDefault = {
+      packId: "builtin.four-dimension-refinement",
+      revisionId: "2026.08.05-2",
+      contentSha256: "e86141d65f8bfb4a674c597f157a86c6da80d49ac02d081d21f2ca325c8ea2e8",
+    };
+    try {
+      await setTranslationPromptPackDefault("programmatic", originalDefault);
+      const existing = await queueBookPipelineJob(source, "translate_only", {
+        ...intent,
+        promptPackReference: originalDefault,
+      });
+
+      await setTranslationPromptPackDefault("programmatic", nextDefault);
+      const subsequent = await queueBookPipelineJob(source, "translate_only", {
+        ...intent,
+        promptPackReference: nextDefault,
+        secondPassEnabled: true,
+      });
+      const state = await getBookPipelineState();
+
+      expect(await getTranslationPromptPackDefault("programmatic")).toEqual(nextDefault);
+      expect(state.jobs.find((job) => job.id === existing.id)?.promptPackReference).toEqual(originalDefault);
+      expect(state.jobs.find((job) => job.id === subsequent.id)?.promptPackReference).toEqual(nextDefault);
+      expect(state.jobs.find((job) => job.id === existing.id)?.promptPackSelectionSource).toBe("default");
+    } finally {
+      await setTranslationPromptPackDefault("programmatic", originalDefault);
+    }
+  });
+
   it("assigns distinct identities to copies created in the same millisecond", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_786_000_000_000);
     try {

@@ -95,6 +95,7 @@ describe("PromptPackSettingsPanel", () => {
     await user.click(screen.getByRole("button", { name: /全流程审校闭环/ }));
     expect(screen.getByText("机制参考文件")).toBeTruthy();
     expect(screen.getByText(/book-runner\.md/)).toBeTruthy();
+    expect(screen.getByText("许可证 / 使用边界").parentElement?.textContent).toContain("CC BY-NC-SA");
     expect(screen.getByText("明确排除的职责")).toBeTruthy();
     expect(screen.getByText(/copyright-decision/)).toBeTruthy();
   });
