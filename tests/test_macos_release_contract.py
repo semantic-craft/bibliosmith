@@ -366,9 +366,13 @@ def test_release_verifier_executes_bundled_chromium_javascript() -> None:
     completed, _, browser_smoke = _run_verifier(
         "accepted\nsource=Notarized Developer ID"
     )
+    verifier = VERIFIER.read_text(encoding="utf-8")
 
     assert completed.returncode == 0, completed.stderr
     assert browser_smoke == "called\n"
+    assert "spawnSync(executablePath" in verifier
+    assert '"--dump-dom"' in verifier
+    assert 'require(join(runtimeRoot, "vendor/playwright-core"))' not in verifier
 
 
 def _run_apple_password_secret_setter(
