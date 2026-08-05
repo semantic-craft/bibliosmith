@@ -9,7 +9,12 @@ import {
   testModelConnection,
 } from "../../api";
 import type { ActiveModel, ModelCatalog, ModelSlotView } from "../../types";
-import { MODEL_BRANDS, slotKey, slotMeta } from "./modelCatalog";
+import {
+  MODEL_BRANDS,
+  slotDisplayName,
+  slotKey,
+  slotMeta,
+} from "./modelCatalog";
 import { modelsCopy } from "./modelsCopy";
 
 type SlotState = {
@@ -22,10 +27,22 @@ type SlotState = {
   ok: boolean | null;
 };
 
+const MODEL_SLOT_KEYS = new Set(
+  MODEL_BRANDS.flatMap((brand) =>
+    brand.slots.map((meta) => slotKey(meta.profileId, meta.configId)),
+  ),
+);
+
+const FIRST_MODEL_SLOT_KEY = slotKey(
+  MODEL_BRANDS[0].slots[0].profileId,
+  MODEL_BRANDS[0].slots[0].configId,
+);
+
 export function ModelsSettingsPanel({ locale }: { locale: string }) {
   const copy = useMemo(() => modelsCopy(locale), [locale]);
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [slotState, setSlotState] = useState<Record<string, SlotState>>({});
+  const [selectedSlotKey, setSelectedSlotKey] = useState<string | null>(null);
 
   const refresh = async () => {
     const next = await getModelCatalog();
@@ -51,6 +68,26 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
   }, [catalog]);
 
   const active: ActiveModel | null = catalog?.active ?? null;
+  const candidateActiveSlotKey = active
+    ? slotKey(active.profileId, active.configId)
+    : null;
+  const activeSlotKey =
+    candidateActiveSlotKey && MODEL_SLOT_KEYS.has(candidateActiveSlotKey)
+      ? candidateActiveSlotKey
+      : null;
+  const firstConfiguredSlot = catalog?.slots.find(
+    (slot) =>
+      slot.configured &&
+      MODEL_SLOT_KEYS.has(slotKey(slot.profileId, slot.configId)),
+  );
+  const firstConfiguredSlotKey = firstConfiguredSlot
+    ? slotKey(firstConfiguredSlot.profileId, firstConfiguredSlot.configId)
+    : null;
+  const visibleSlotKey =
+    selectedSlotKey ??
+    activeSlotKey ??
+    firstConfiguredSlotKey ??
+    FIRST_MODEL_SLOT_KEY;
 
   const stateFor = (
     key: string,
@@ -98,7 +135,35 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
           : copy.noActive}
       </div>
 
-      {MODEL_BRANDS.map((brand) => (
+      <div className="st-models-picker st-row">
+        <div className="st-row-copy">
+          <strong>{copy.modelPicker}</strong>
+          <span>{copy.modelPickerDescription}</span>
+        </div>
+        <select
+          className="st-select"
+          aria-label={copy.modelPicker}
+          value={visibleSlotKey}
+          onChange={(event) => setSelectedSlotKey(event.currentTarget.value)}
+        >
+          {MODEL_BRANDS.map((brand) =>
+            brand.slots.map((meta) => (
+              <option
+                key={slotKey(meta.profileId, meta.configId)}
+                value={slotKey(meta.profileId, meta.configId)}
+              >
+                {slotDisplayName(meta.profileId, meta.configId)}
+              </option>
+            )),
+          )}
+        </select>
+      </div>
+
+      {MODEL_BRANDS.filter((brand) =>
+        brand.slots.some(
+          (meta) => slotKey(meta.profileId, meta.configId) === visibleSlotKey,
+        ),
+      ).map((brand) => (
         <div key={brand.profileId} className="st-models-brand">
           <div className="st-models-brand-head">
             <b>{brand.brand}</b>
@@ -106,7 +171,9 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
               {copy.getKey}
             </a>
           </div>
-          {brand.slots.map((meta) => {
+          {brand.slots.filter(
+            (meta) => slotKey(meta.profileId, meta.configId) === visibleSlotKey,
+          ).map((meta) => {
             const key = slotKey(meta.profileId, meta.configId);
             const view = configuredBy.get(key);
             const configured = view?.configured ?? false;
@@ -125,6 +192,8 @@ export function ModelsSettingsPanel({ locale }: { locale: string }) {
               <div
                 key={key}
                 className={`st-models-slot${isActive ? " active" : ""}`}
+                role="group"
+                aria-label={slotDisplayName(meta.profileId, meta.configId)}
               >
                 <div className="st-models-slot-head">
                   <span className="st-models-slot-name">

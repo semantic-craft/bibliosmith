@@ -250,11 +250,11 @@ export function pipelineCopy(locale: PipelineLocale) {
     goApprovalTab: zh ? "去审批页签" : "Open approval tab",
     failedHintRetryable: zh ? "已保留已完成部分，重试只补失败边界。" : "Completed work is preserved; retry only re-runs the failed boundary.",
     retryJob: zh ? "重试该书" : "Retry this book",
-    deleteBook: zh ? "删除该书" : "Delete this book",
+    deleteBook: zh ? "从书架移除" : "Remove from shelf",
     deleteBookConfirmHint: zh
       ? "从书架移除这本书？磁盘上的已转换文件与 Zotero 附件都会保留，之后重新添加可复用。"
       : "Remove this book from the shelf? Converted files on disk and Zotero attachments are kept and can be reused if you re-add it.",
-    deleteBookConfirm: zh ? "确认删除" : "Confirm delete",
+    deleteBookConfirm: zh ? "确认移除" : "Confirm removal",
     deleteBookCancel: zh ? "取消" : "Cancel",
     deleteBookDone: zh ? "已从书架删除" : "Removed from the shelf",
     blockedKeepMineru: zh ? "保留 MinerU 结果" : "Keep MinerU result",
@@ -404,6 +404,27 @@ export function pipelineCopy(locale: PipelineLocale) {
       ? "保版式轨只对文字版 PDF 开放：扫描件没有文字层，一次多本也没有单一版式可保。"
       : "The layout-preserving track needs a single text PDF: a scan has no text layer, and a batch has no one layout to preserve.",
     shelfCount: (n: number) => (zh ? `书架 · ${n} 本` : `Bookshelf · ${n} book(s)`),
+    manageShelf: zh ? "管理" : "Manage",
+    finishManagingShelf: zh ? "完成" : "Done",
+    selectAllRemovable: zh ? "全选可移除书籍" : "Select all removable books",
+    clearShelfSelection: zh ? "取消全选" : "Clear selection",
+    selectedBooks: (n: number) => (zh ? `已选 ${n} 本` : `${n} selected`),
+    removeSelected: (n: number) => (zh ? `从书架移除（${n}）` : `Remove from shelf (${n})`),
+    confirmRemoveSelected: (n: number) => (zh ? `移除 ${n} 本` : `Remove ${n} book(s)`),
+    removeSelectedHint: zh
+      ? "只移除书架和任务记录；磁盘上的项目、阅读成品与 Zotero 附件都会保留。"
+      : "Only shelf and task records are removed. Local projects, reading outputs, and Zotero attachments are kept.",
+    removeSelectedConfirmHint: (n: number) =>
+      zh
+        ? `确认从书架移除选中的 ${n} 本书？磁盘文件和 Zotero 附件不会删除。`
+        : `Remove the selected ${n} book(s) from the shelf? Files on disk and Zotero attachments will not be deleted.`,
+    runningBookCannotRemove: zh ? "处理中，暂不可移除" : "In progress; cannot be removed yet",
+    projectMigrationTitle: zh ? "旧书库项目需要迁移" : "Project migration required",
+    projectMigrationHint: zh
+      ? "这本书仍位于旧书库，App 的安全边界会阻止打开阅读成品。迁移会把项目复制并逐文件校验到当前书库，原项目不会删除。"
+      : "This book is still in an old library, so the App safety boundary blocks its reading output. Migration copies and verifies every file in the current library; the original is kept.",
+    migrateProject: zh ? "复制到当前书库" : "Copy to current library",
+    projectMigrationDone: zh ? "项目已复制并校验到当前书库" : "Project copied and verified in the current library",
 
     // Route preflight (shown inline in the input island)
     preflightReady: zh ? "可发车" : "Ready",

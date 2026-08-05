@@ -1,16 +1,16 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LauncherState } from "./types";
+import type { WorkspaceState } from "./types";
 
 const api = vi.hoisted(() => ({
-  getLauncherState: vi.fn(),
-  prepareBiblioSmithProject: vi.fn(),
+  getWorkspaceState: vi.fn(),
+  createRecommendedWorkspace: vi.fn(),
 }));
 
 vi.mock("./api", async (importOriginal) => ({
   ...await importOriginal<typeof import("./api")>(),
-  getLauncherState: api.getLauncherState,
-  prepareBiblioSmithProject: api.prepareBiblioSmithProject,
+  getWorkspaceState: api.getWorkspaceState,
+  createRecommendedWorkspace: api.createRecommendedWorkspace,
 }));
 
 vi.mock("@tauri-apps/plugin-autostart", () => ({
@@ -21,22 +21,18 @@ vi.mock("@tauri-apps/plugin-autostart", () => ({
 
 import App from "./App";
 
-function missingLauncherState(): LauncherState {
+function missingWorkspaceState(): WorkspaceState {
   return {
-    repoRoot: "/missing/bibliosmith",
-    repoReady: false,
-    repoStatus: "missing",
-    branch: "not-ready",
-    localCommit: "",
-    localCommitShort: "",
-    remoteUrl: "local-git",
-    dirty: false,
+    workspaceRoot: "/test-data/Documents/BiblioSmith",
+    recommendedWorkspaceRoot: "/test-data/Documents/BiblioSmith",
+    workspaceReady: false,
+    workspaceStatus: "missing",
     proxyConfigured: false,
     platform: "macos aarch64",
   };
 }
 
-describe("App repository startup gate", () => {
+describe("App workspace startup gate", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     const values = new Map<string, string>();
@@ -50,7 +46,7 @@ describe("App repository startup gate", () => {
         return values.size;
       },
     } satisfies Storage);
-    api.getLauncherState.mockResolvedValue(missingLauncherState());
+    api.getWorkspaceState.mockResolvedValue(missingWorkspaceState());
   });
 
   afterEach(() => {
@@ -59,7 +55,7 @@ describe("App repository startup gate", () => {
     vi.resetAllMocks();
   });
 
-  it("does not mount the launcher or start repository preparation before setup", async () => {
+  it("does not mount the launcher before the user-owned workspace exists", async () => {
     render(<App />);
 
     await act(async () => {
@@ -67,9 +63,9 @@ describe("App repository startup gate", () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByRole("heading", { name: "先设置 BiblioSmith 仓库" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "创建你的 BiblioSmith 书库" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "添加书" })).toBeNull();
     act(() => vi.advanceTimersByTime(1_000));
-    expect(api.prepareBiblioSmithProject).not.toHaveBeenCalled();
+    expect(api.createRecommendedWorkspace).not.toHaveBeenCalled();
   });
 });

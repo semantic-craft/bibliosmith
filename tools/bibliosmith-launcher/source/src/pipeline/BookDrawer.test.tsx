@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { readBookPipelineArtifactExcerpt } from "../api";
+import { inspectBookPipelineProjectMigration, readBookPipelineArtifactExcerpt } from "../api";
 import { BookDrawer, type BookDrawerProps } from "./BookDrawer";
 import { pipelineCopy } from "./copy";
 import type { BookUnit } from "./model";
@@ -16,6 +16,7 @@ vi.mock("../api", () => ({
   readBookPipelineArtifactExcerpt: vi.fn(() => Promise.reject(new Error("desktop only"))),
   readBookPipelineTranslationSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
   readBookPipelineOcrSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
+  inspectBookPipelineProjectMigration: vi.fn(() => Promise.resolve({ required: false, sourceRoot: "", destinationRoot: "" })),
 }));
 
 const copy = pipelineCopy("en");
@@ -29,7 +30,8 @@ function drawerProps(unit: BookUnit, over: Partial<BookDrawerProps> = {}): BookD
     onSelect: vi.fn(),
     onClose: vi.fn(),
     onRetry: vi.fn(),
-    onDelete: vi.fn(),
+    onRemoveBooks: vi.fn(async () => true),
+    onMigrateProject: vi.fn(async () => true),
     onAdvance: vi.fn(),
     onSampleTranslation: vi.fn(),
     onApplySampleProvider: vi.fn(),
@@ -356,7 +358,22 @@ describe("BookDrawer gate card", () => {
     await user.click(within(container).getByRole("button", { name: copy.deleteBook }));
     await user.click(screen.getByRole("button", { name: copy.deleteBookConfirm }));
 
-    expect(props.onDelete).toHaveBeenCalledWith("job-1", "child-1");
+    expect(props.onRemoveBooks).toHaveBeenCalledWith([{ jobId: "job-1", childId: "child-1" }]);
+  });
+
+  it("offers an explicit copy-and-verify migration for an old-library project", async () => {
+    vi.mocked(inspectBookPipelineProjectMigration).mockResolvedValueOnce({
+      required: true,
+      sourceRoot: "/old/books/local/zh-Hans/001_Book",
+      destinationRoot: "/current/books/local/zh-Hans/001_Book",
+    });
+    const user = userEvent.setup();
+    const { props } = renderDrawer(bookUnit({ status: "completed" }));
+
+    await user.click(await screen.findByRole("button", { name: copy.migrateProject }));
+
+    expect(props.onMigrateProject).toHaveBeenCalledWith("job-1", "child-1");
+    expect(screen.queryByText(copy.projectMigrationTitle)).toBeNull();
   });
 
   // A single-book job keeps the original wording, which was already accurate.
@@ -447,4 +464,3 @@ describe("BookDrawer gate sample preview", () => {
     expect(screen.queryByText(/First chapter opening line/)).toBeNull();
   });
 });
-

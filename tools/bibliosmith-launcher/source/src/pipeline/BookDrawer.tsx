@@ -1,9 +1,11 @@
 import { useEffect, useState, type ReactElement } from "react";
 import { ChevronLeft, ChevronRight, FolderOpen, Trash2, X } from "lucide-react";
-import { readBookPipelineArtifactExcerpt, readBookPipelineTranslationSample } from "../api";
+import { inspectBookPipelineProjectMigration, readBookPipelineArtifactExcerpt, readBookPipelineTranslationSample } from "../api";
 import type {
   BookPipelineArtifact,
   BookPipelineCustomInstructions,
+  BookPipelineShelfSelection,
+  BookPipelineProjectMigration,
   BookPipelineTranslationSampleReport,
 } from "../types";
 import type { PipelineCopy } from "./copy";
@@ -60,7 +62,8 @@ export type BookDrawerProps = {
   onSelect: (key: string) => void;
   onClose: () => void;
   onRetry: (jobId: string) => void;
-  onDelete: (jobId: string, childId?: string | null) => void;
+  onRemoveBooks: (selections: BookPipelineShelfSelection[]) => Promise<boolean>;
+  onMigrateProject: (jobId: string, childId?: string | null) => Promise<boolean>;
   onAdvance: (jobId: string, childId: string, invalidateDownstream?: boolean) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   // Adopting a sampled slot as the book's own. Separate from sampling, because
@@ -666,7 +669,7 @@ function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement
 }
 
 export function BookDrawer(props: BookDrawerProps) {
-  const { copy, units, unit, busy, onSelect, onClose, onDelete } = props;
+  const { copy, units, unit, busy, onSelect, onClose, onRemoveBooks } = props;
   // Delete now drops just this book; only the last one left takes the job with
   // it, so the batch wording is gone and the confirmation is true again.
   const index = units.findIndex((candidate) => candidate.key === unit.key);
@@ -678,6 +681,19 @@ export function BookDrawer(props: BookDrawerProps) {
   // `confirmingDelete` resets with the drawer: PipelineWorkbench keys this
   // component on the selected book, so switching books remounts it.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [projectMigration, setProjectMigration] = useState<BookPipelineProjectMigration | null>(null);
+  useEffect(() => {
+    if (unit.status === "running" || unit.job.status === "running" || unit.job.status === "handoff_running") return undefined;
+    let current = true;
+    void inspectBookPipelineProjectMigration(unit.job.id, unit.child?.id ?? null)
+      .then((migration) => {
+        if (current && migration.required) setProjectMigration(migration);
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [unit.child?.id, unit.job.id, unit.job.status, unit.status]);
   const gates = pendingGates(unit, copy);
   const bar = actionBar(props);
   return (
@@ -702,6 +718,23 @@ export function BookDrawer(props: BookDrawerProps) {
           </div>
         </div>
         <div className="pl-dbody">
+          {projectMigration && (
+            <div className="pl-hintcard warnc">
+              <strong>{copy.projectMigrationTitle}</strong>
+              <span>{copy.projectMigrationHint}</span>
+              <span className="pl-spacer" />
+              <button
+                className="pl-btn sm"
+                type="button"
+                disabled={busy === "migrate"}
+                onClick={async () => {
+                  if (await props.onMigrateProject(unit.job.id, unit.child?.id ?? null)) setProjectMigration(null);
+                }}
+              >
+                {copy.migrateProject}
+              </button>
+            </div>
+          )}
           {confirmingDelete && (
             <div className="pl-hintcard errc">
               <span>{copy.deleteBookConfirmHint}</span>
@@ -710,7 +743,9 @@ export function BookDrawer(props: BookDrawerProps) {
                 className="pl-btn sm danger-ghost"
                 type="button"
                 disabled={busy === "delete"}
-                onClick={() => onDelete(unit.job.id, unit.child?.id ?? null)}
+                onClick={async () => {
+                  if (await onRemoveBooks([{ jobId: unit.job.id, childId: unit.child?.id ?? null }])) onClose();
+                }}
               >
                 {copy.deleteBookConfirm}
               </button>

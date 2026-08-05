@@ -2,7 +2,7 @@
 
 The PaddleOCR assembler writes a ``<!-- page: N -->`` anchor between pages so a
 reviewer can map a translated passage back to a page of the original, and picked
-a comment precisely so the marker would stay out of the prose. `build_epub.js`
+a comment precisely so the marker would stay out of the prose. `build_epub.cjs`
 recognises a fixed list of block tags as raw HTML and escapes everything else, so
 an anchor matched nothing, fell through to the paragraph buffer and reached the
 reader as a paragraph of literal ``<!-- page: N -->`` -- once per page, in every
@@ -54,8 +54,8 @@ def build_chapter(chapter_markdown: str) -> str:
         scripts.mkdir(parents=True)
         final.mkdir(parents=True)
         metadata.mkdir(parents=True)
-        shutil.copy(SOURCE_SCRIPTS / "build_epub.js", scripts / "build_epub.js")
-        shutil.copy(SOURCE_SCRIPTS / "run_python.js", scripts / "run_python.js")
+        shutil.copy(SOURCE_SCRIPTS / "build_epub.cjs", scripts / "build_epub.cjs")
+        shutil.copy(SOURCE_SCRIPTS / "run_python.cjs", scripts / "run_python.cjs")
         (final / "chapter_001.md").write_text(chapter_markdown, encoding="utf-8")
         metadata.joinpath("source_manifest.json").write_text(
             json.dumps(
@@ -65,7 +65,8 @@ def build_chapter(chapter_markdown: str) -> str:
         )
 
         completed = subprocess.run(
-            ["node", str(scripts / "build_epub.js")],
+            ["node", str(scripts / "build_epub.cjs")],
+            cwd=book_root,
             check=False,
             capture_output=True,
             text=True,

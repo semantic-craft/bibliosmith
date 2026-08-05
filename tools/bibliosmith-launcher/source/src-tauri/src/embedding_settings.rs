@@ -1,26 +1,31 @@
 //! Credential for the Zotero full-text search embedding backend.
 //!
-//! The zfulltext vector index (`~/.local/share/zotero-cli/vectors.sqlite`) is
+//! The zfulltext vector index lives in the App's Cache layer and is
 //! dimension-locked to whichever embedding backend first built it — switching
 //! backends means dropping and re-embedding the whole index, so unlike the
 //! translation model settings this panel does not offer a backend picker. It
 //! only manages the key for Gemini, the backend packages/zotero-cli defaults
 //! to (`ZSEARCH_EMBEDDING_BACKEND` unset).
 //!
-//! The key lives in the same macOS Keychain service as the translation model
+//! The key lives in the same operating system Keychain service as the translation model
 //! keys, under its own account, and is injected into the zfulltext subprocess
-//! env at run time. The CLI's own `.env` lookup remains the fallback when no
-//! key is stored here.
+//! environment at run time.
 
 const KEYCHAIN_SERVICE: &str = "com.bibliosmith.launcher.models";
 const ACCOUNT: &str = "embedding/gemini";
 const KEY_ENV: &str = "GEMINI_API_KEY";
 
+#[cfg(not(test))]
 fn keychain_read() -> Option<String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT)
         .ok()?
         .get_password()
         .ok()
+}
+
+#[cfg(test)]
+fn keychain_read() -> Option<String> {
+    None
 }
 
 fn keychain_write(secret: &str) -> Result<(), String> {
@@ -40,8 +45,7 @@ fn keychain_delete() -> Result<(), String> {
 }
 
 /// The `(key_env, secret)` pair to inject into the zfulltext subprocess, or
-/// None when no key is stored — the CLI then falls back to its own `.env`
-/// lookup.
+/// None when no key is stored.
 pub fn resolve_credential_env() -> Option<(String, String)> {
     keychain_read().map(|secret| (KEY_ENV.to_string(), secret))
 }

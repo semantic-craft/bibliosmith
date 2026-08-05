@@ -1,46 +1,16 @@
-export type LauncherState = {
-  repoRoot: string;
-  repoReady: boolean;
-  repoStatus: string;
-  branch: string;
-  localCommit: string;
-  localCommitShort: string;
-  remoteUrl: string;
-  dirty: boolean;
+export type WorkspaceState = {
+  workspaceRoot: string;
+  recommendedWorkspaceRoot: string;
+  workspaceReady: boolean;
+  workspaceStatus: "missing" | "empty" | "ready" | "occupied";
   proxyConfigured: boolean;
   platform: string;
-};
-
-export type CommitInfo = {
-  hash: string;
-  date: string;
-  title: string;
-  summary: string;
-  fullMessage: string;
-};
-
-export type BiblioSmithUpdateInfo = {
-  repoRoot: string;
-  currentCommit: string;
-  remoteRef: string;
-  behindCount: number;
-  aheadCount: number;
-  hasUpdate: boolean;
-  commits: CommitInfo[];
 };
 
 export type ActionResult = {
   ok: boolean;
   message: string;
-  repoRoot?: string | null;
-  requiresDownload?: boolean | null;
-};
-
-export type ProjectDocument = {
-  kind: string;
-  path: string;
-  title: string;
-  content: string;
+  workspaceRoot?: string | null;
 };
 
 export type DownloadProgress = {
@@ -80,15 +50,6 @@ export type ProxyAutoDetectResult = {
   proxy?: NetworkProxySettings | null;
   test?: ProxyTestResult | null;
   message: string;
-};
-
-export type NodeModulesStatus = {
-  ready: boolean;
-  running: boolean;
-  autoInstall: boolean;
-  repoReady: boolean;
-  booksDir: string;
-  nodeModulesDir: string;
 };
 
 export type RuntimeToolStatus = {
@@ -450,6 +411,17 @@ export type BookPipelineState = {
   schemaVersion: string;
   revision: number;
   jobs: BookPipelineJob[];
+};
+
+export type BookPipelineShelfSelection = {
+  jobId: string;
+  childId?: string | null;
+};
+
+export type BookPipelineProjectMigration = {
+  required: boolean;
+  sourceRoot: string;
+  destinationRoot: string;
 };
 
 export type BookPipelineZoteroDiscoveryResult = {

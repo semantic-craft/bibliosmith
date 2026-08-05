@@ -63,6 +63,27 @@ class RootEnvTests(unittest.TestCase):
                         self.assertNotIn("PACKAGE_ONLY_TEST", os.environ)
                         self.assertNotIn("BLANK_ENV_TEST", os.environ)
 
+    def test_desktop_runtime_disables_dotenv_for_every_entrypoint(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            package_root = repo_root / "packages" / "ocr"
+            package_root.mkdir(parents=True)
+            (repo_root / "pyproject.toml").write_text("[tool.uv.workspace]\n", encoding="utf-8")
+            (repo_root / ".env").write_text("DESKTOP_SECRET=must-not-load\n", encoding="utf-8")
+            modules = [load_module(path, index + 100) for index, path in enumerate(ENTRYPOINTS)]
+
+            for module in modules:
+                with self.subTest(entrypoint=module.__file__), mock.patch.dict(
+                    os.environ,
+                    {"BIBLIOSMITH_DISABLE_DOTENV": "1"},
+                    clear=False,
+                ):
+                    os.environ.pop("DESKTOP_SECRET", None)
+                    module.load_root_dotenv(package_root)
+                    self.assertNotIn("DESKTOP_SECRET", os.environ)
+
 
 if __name__ == "__main__":
     unittest.main()

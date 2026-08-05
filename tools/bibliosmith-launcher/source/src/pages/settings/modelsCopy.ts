@@ -4,6 +4,10 @@ export function modelsCopy(locale: string) {
   const zh = locale.startsWith("zh");
   return {
     title: zh ? "翻译模型" : "Translation model",
+    modelPicker: zh ? "翻译模型" : "Translation model",
+    modelPickerDescription: zh
+      ? "选择一个模型服务；下方只显示这一项的配置。"
+      : "Choose one model service; only its configuration is shown below.",
     description: zh
       ? "选择用于翻译的模型并填入 API 密钥。密钥保存在系统钥匙串（Keychain）里，不写入任何文件。"
       : "Choose the model used for translation and enter its API key. Keys are stored in the system Keychain, never in a file.",

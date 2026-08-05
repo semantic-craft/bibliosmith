@@ -20,6 +20,7 @@ export type PipelineBusy =
   | "run"
   | "retry"
   | "delete"
+  | "migrate"
   | "advance"
   | "sample"
   | "gateApproval"

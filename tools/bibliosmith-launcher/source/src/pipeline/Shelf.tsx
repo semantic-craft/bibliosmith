@@ -37,32 +37,57 @@ export function Shelf({
   selectedKey,
   onSelect,
   dimmed,
+  manageMode = false,
+  selectedKeys = new Set<string>(),
+  disabledKeys = new Set<string>(),
+  onToggle,
 }: {
   copy: PipelineCopy;
   units: BookUnit[];
   selectedKey: string | null;
   onSelect: (key: string) => void;
   dimmed?: boolean;
+  manageMode?: boolean;
+  selectedKeys?: Set<string>;
+  disabledKeys?: Set<string>;
+  onToggle?: (key: string) => void;
 }) {
   return (
-    <div className={dimmed ? "pl-shelf dimmed" : "pl-shelf"}>
+    <div className={`pl-shelf${dimmed ? " dimmed" : ""}${manageMode ? " managing" : ""}`}>
       {units.map((unit) => {
         const ribbon = ribbonFor(unit, copy);
+        const disabled = disabledKeys.has(unit.key);
+        const selected = selectedKeys.has(unit.key);
         return (
           <div
             key={unit.key}
-            className={`pl-bookcard${unit.key === selectedKey ? " sel" : ""}`}
-            role="button"
-            tabIndex={0}
-            onClick={() => onSelect(unit.key)}
+            className={`pl-bookcard${unit.key === selectedKey || selected ? " sel" : ""}${disabled ? " disabled" : ""}`}
+            role={manageMode ? "checkbox" : "button"}
+            aria-checked={manageMode ? selected : undefined}
+            aria-disabled={manageMode && disabled ? true : undefined}
+            aria-label={manageMode ? `${unit.title}${disabled ? ` · ${copy.runningBookCannotRemove}` : ""}` : undefined}
+            tabIndex={manageMode && disabled ? -1 : 0}
+            onClick={() => {
+              if (manageMode) {
+                if (!disabled) onToggle?.(unit.key);
+              } else {
+                onSelect(unit.key);
+              }
+            }}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
-                onSelect(unit.key);
+                if (manageMode) {
+                  if (!disabled) onToggle?.(unit.key);
+                } else {
+                  onSelect(unit.key);
+                }
               }
             }}
           >
             <BookCover title={unit.title} className="shelf" />
+            {manageMode && <span className="pl-selectmark" aria-hidden="true">{selected ? "✓" : ""}</span>}
+            {manageMode && disabled && <span className="pl-disabled-label">{copy.runningBookCannotRemove}</span>}
             {ribbon && <span className={`pl-ribbon ${ribbon.cls}`}>{ribbon.label}</span>}
             <div className="pl-bmeta">
               <div className="pl-bt">{unit.title}</div>

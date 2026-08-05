@@ -255,6 +255,9 @@
 
 .pl-shelf-island { display: flex; flex: 1; flex-direction: column; min-height: 0; padding: 14px 0 0; }
 .pl-shelf-title {
+  display: flex;
+  align-items: center;
+  gap: 14px;
   flex: none;
   padding: 0 26px 10px;
   color: var(--faint);
@@ -262,6 +265,8 @@
   font-weight: 550;
   letter-spacing: 0.04em;
 }
+.pl-text-action { padding: 0; border: 0; background: transparent; color: var(--pl-jade); font: inherit; cursor: pointer; }
+.pl-text-action:hover { text-decoration: underline; }
 .pl-shelfwrap { position: relative; display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .pl-shelf {
   flex: 1;
@@ -273,9 +278,58 @@
   align-content: start;
   padding: 20px 26px 30px;
 }
+.pl-shelf.managing { padding-bottom: 92px; }
 .pl-bookcard { position: relative; cursor: pointer; border-radius: 8px; }
 .pl-bookcard:focus-visible { outline: 2px solid var(--pl-jade); outline-offset: 3px; }
 .pl-bookcard.sel .pl-cover { outline: 3px solid var(--pl-jade); outline-offset: 3px; }
+.pl-bookcard.disabled { cursor: not-allowed; opacity: 0.55; }
+.pl-selectmark {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  background: var(--pl-jade);
+  color: white;
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.22);
+}
+.pl-bookcard:not(.sel) .pl-selectmark { background: rgba(20, 24, 23, 0.35); }
+.pl-disabled-label {
+  position: absolute;
+  right: 6px;
+  bottom: 50px;
+  left: 6px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: rgba(20, 24, 23, 0.78);
+  color: white;
+  font-size: 10px;
+  text-align: center;
+}
+.pl-shelf-manager {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  left: 18px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--island);
+  box-shadow: 0 8px 28px rgba(20, 24, 23, 0.14);
+  color: var(--muted);
+  font-size: 12px;
+}
 .pl-cover {
   position: relative;
   display: flex;

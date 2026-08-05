@@ -21,6 +21,8 @@ def _load_dotenv(path: Path) -> None:
 
 
 def load_root_dotenv(start: Path | None = None) -> None:
+    if os.environ.get("BIBLIOSMITH_DISABLE_DOTENV") == "1":
+        return
     current = (start or Path(__file__).resolve().parent).resolve()
     for candidate in (current, *current.parents):
         if (candidate / "pyproject.toml").is_file() and (candidate / "packages").is_dir():

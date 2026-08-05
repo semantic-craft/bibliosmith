@@ -24,12 +24,25 @@ from translation_engine.providers import (
     RateLimitError,
     TranslationRequest,
     create_provider,
+    load_root_dotenv,
     load_provider_registry,
     normalize_api_keys,
 )
 
 
 class ProviderFactoryTests(unittest.TestCase):
+    def test_desktop_runtime_never_loads_repository_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repo_root = Path(temporary_directory)
+            (repo_root / ".env").write_text(
+                "DESKTOP_SECRET=must-not-load\n", encoding="utf-8"
+            )
+            environ = {"BIBLIOSMITH_DISABLE_DOTENV": "1"}
+
+            load_root_dotenv(repo_root=repo_root, environ=environ)
+
+        self.assertNotIn("DESKTOP_SECRET", environ)
+
     def test_factory_keeps_the_deterministic_offline_provider(self) -> None:
         fake = create_provider(
             "fake-provider-profile", config_id="fake-config-no-secrets"

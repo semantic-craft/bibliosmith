@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -16,10 +15,8 @@ class EpubBuilderLandmarksTests(unittest.TestCase):
     def test_chapter_only_book_has_a_bodymatter_landmark(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             book_root = Path(temporary_directory) / "book"
-            scripts = book_root / "scripts"
             final = book_root / "chapters" / "final"
             metadata = book_root / "metadata"
-            scripts.mkdir(parents=True)
             final.mkdir(parents=True)
             metadata.mkdir(parents=True)
             source_scripts = (
@@ -29,8 +26,6 @@ class EpubBuilderLandmarksTests(unittest.TestCase):
                 / "source"
                 / "scripts"
             )
-            shutil.copy(source_scripts / "build_epub.js", scripts / "build_epub.js")
-            shutil.copy(source_scripts / "run_python.js", scripts / "run_python.js")
             (final / "chapter_001.md").write_text(
                 "# 第一章\n\n正文。\n", encoding="utf-8"
             )
@@ -45,7 +40,8 @@ class EpubBuilderLandmarksTests(unittest.TestCase):
             )
 
             completed = subprocess.run(
-                ["node", str(scripts / "build_epub.js")],
+                ["node", str(source_scripts / "build_epub.cjs")],
+                cwd=book_root,
                 check=False,
                 capture_output=True,
                 text=True,

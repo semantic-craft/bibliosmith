@@ -7,19 +7,17 @@ import {
   advanceBookPipelineJob,
   setBookPipelineRouteOverride,
   approveBookPipelineGate,
-  deleteBookPipelineJob,
+  removeBooksFromShelf,
+  migrateBookPipelineProject,
   discoverBookPipelineZoteroSources,
   getBookPipelineState,
   getModelCatalog,
   getOcrCredentialsStatus,
-  getNodeModulesStatus,
   getProxySettings,
   getRuntimeStatus,
   handoffBookPipelineMarkdown,
-  listenNodeModulesProgress,
   listenRuntimeProgress,
   openBookPipelineOutput,
-  prepareBiblioSmithProject,
   previewBookPipelineRoute,
   queueBookPipelineJob,
   recordFrontendActivity,
@@ -30,7 +28,6 @@ import {
   runBookPipelineJob,
   saveBookPipelineCustomInstructions,
   saveProxySettings,
-  startNodeModulesInstall,
   startRuntimePrepare,
   testProxySettings,
 } from "./api";
@@ -41,6 +38,7 @@ import {
   BookPipelinePreviewConfig,
   BookPipelineRouteItem,
   BookPipelineSource,
+  BookPipelineShelfSelection,
   BookPipelineState,
   LauncherSettings,
   ModelSlotView,
@@ -51,7 +49,7 @@ import { copies, detectLocale, type LanguageSetting, type Locale } from "./i18n"
 import { SettingsOverlay } from "./pages/settings";
 import { pipelineJobOutcomeSucceeded, translationHandoffReady } from "./lib/pipeline-status";
 import { FloatingFeedback, Titlebar, type FloatingToast, type ToastTone } from "./shell";
-import { RepositorySetupGate } from "./startup/RepositorySetupGate";
+import { WorkspaceSetupGate } from "./startup/WorkspaceSetupGate";
 import launcherVersionManifest from "../launcher-version.json";
 import {
   PipelineWorkbench,
@@ -105,9 +103,9 @@ export default function App() {
   const languageSetting = loadLanguageSetting();
   const locale = languageSetting === "system" ? detectLocale() : languageSetting;
   return (
-    <RepositorySetupGate locale={locale} version={LAUNCHER_VERSION}>
+    <WorkspaceSetupGate locale={locale} version={LAUNCHER_VERSION}>
       <LauncherApp />
-    </RepositorySetupGate>
+    </WorkspaceSetupGate>
   );
 }
 
@@ -163,7 +161,7 @@ function LauncherApp() {
       })
       .catch(() => undefined);
   }, []);
-  // What is actually configured (Keychain or repo-root .env) drives the input
+  // What is actually configured in Keychain drives the input
   // island's OCR chips and, through the preview config, the routes the backend
   // hands back.
   const refreshOcrCredentialStatus = useCallback(() => {
@@ -189,7 +187,6 @@ function LauncherApp() {
   const [pipelineZoteroSources, setPipelineZoteroSources] = useState<BookPipelineSource[]>([]);
   const [pipelineBusy, setPipelineBusy] = useState<PipelineBusy>("loading");
   const runtimePrepareStartedRef = useRef(false);
-  const nodeModulesAutoStartRef = useRef(false);
   const startupInitializedRef = useRef(false);
   const floatingToastTimer = useRef<number | null>(null);
 
@@ -347,21 +344,41 @@ function LauncherApp() {
     }
   }, [addActivity, showFloatingToast]);
 
-  const deletePipeline = useCallback(async (jobId: string, childId?: string | null) => {
+  const removePipelineBooks = useCallback(async (selections: BookPipelineShelfSelection[]) => {
     setPipelineBusy("delete");
     try {
-      const state = await deleteBookPipelineJob(jobId, childId);
+      const state = await removeBooksFromShelf(selections);
       setPipelineState(state);
-      addActivity("success", `Book Pipeline job deleted: ${jobId}`);
+      addActivity("success", `Removed ${selections.length} book(s) from the shelf`);
       showFloatingToast(bookPipelineCopy.deleteBookDone, "success");
+      return true;
     } catch (error) {
       const message = String(error);
       addActivity("error", message);
       showFloatingToast(message, "error");
+      return false;
     } finally {
       setPipelineBusy(null);
     }
   }, [addActivity, bookPipelineCopy.deleteBookDone, showFloatingToast]);
+
+  const migratePipelineProject = useCallback(async (jobId: string, childId?: string | null) => {
+    setPipelineBusy("migrate");
+    try {
+      const state = await migrateBookPipelineProject(jobId, childId);
+      setPipelineState(state);
+      addActivity("success", `Book Pipeline project migrated: ${jobId}`);
+      showFloatingToast(bookPipelineCopy.projectMigrationDone, "success");
+      return true;
+    } catch (error) {
+      const message = String(error);
+      addActivity("error", message);
+      showFloatingToast(message, "error");
+      return false;
+    } finally {
+      setPipelineBusy(null);
+    }
+  }, [addActivity, bookPipelineCopy.projectMigrationDone, showFloatingToast]);
 
   const advancePipeline = useCallback(async (jobId: string, childId: string, invalidateDownstream = false) => {
     setPipelineBusy("advance");
@@ -715,34 +732,12 @@ function LauncherApp() {
     }
   }, [addActivity, copy, proxyBusy, showFloatingToast]);
 
-  // Runtime and node_modules preparation run silently in the background; only a
-  // failure surfaces, as a toast. The blocking bootstrap screen and the download
-  // HUD retired with the island redesign (docs/planning/island-ui-minimal-redesign.md).
-  const maybeAutoInstallNodeModules = useCallback(async () => {
-    try {
-      const status = await getNodeModulesStatus();
-      if (!status.repoReady || status.ready || status.running || !status.autoInstall) return;
-      if (nodeModulesAutoStartRef.current) return;
-      nodeModulesAutoStartRef.current = true;
-      await startNodeModulesInstall();
-    } catch (error) {
-      addActivity("warning", copy.nodeModulesStatusFailed(String(error)));
-    }
-  }, [addActivity, copy]);
-
   useEffect(() => {
     const unlistenRuntime = listenRuntimeProgress((progress) => {
       if (progress.state === "failed") {
         const message = progress.message || copy.runtimeBootstrapFailed;
         addActivity("warning", message);
         showFloatingToast(message, "warning");
-      }
-    });
-    const unlistenNodeModules = listenNodeModulesProgress((progress) => {
-      if (progress.state === "failed") {
-        const message = progress.message || copy.nodeModulesMissing;
-        addActivity("error", message);
-        showFloatingToast(message, "error");
       }
     });
     if (!runtimePrepareStartedRef.current) {
@@ -756,7 +751,6 @@ function LauncherApp() {
     }
     return () => {
       unlistenRuntime.then((fn) => fn()).catch(() => undefined);
-      unlistenNodeModules.then((fn) => fn()).catch(() => undefined);
     };
   }, [addActivity, copy, showFloatingToast]);
 
@@ -776,26 +770,6 @@ function LauncherApp() {
       })
       .catch(() => undefined);
   }, [doAutoDetectProxySettings, refreshProxySettings]);
-
-  // The project repository still prepares itself on startup — books live in it —
-  // it just no longer has a page. Success stays quiet; failure raises a toast.
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void recordFrontendActivity("info", "frontend startup automation begin").catch(() => undefined);
-      void prepareBiblioSmithProject(locale)
-        .then(() => {
-          addActivity("success", copy.biblioSmithReady);
-          void maybeAutoInstallNodeModules();
-        })
-        .catch((error) => {
-          addActivity("error", copy.biblioSmithUpdateStopped(String(error)));
-          showFloatingToast(copy.biblioSmithDownloadFailed, "error");
-        });
-    }, 600);
-    return () => window.clearTimeout(timer);
-    // Startup automation should run once after first paint using the initial persisted settings.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // The mount load reads its state in the promise continuation instead of
   // calling the shared refreshers, whose first statement flips a busy flag
@@ -886,7 +860,8 @@ function LauncherApp() {
               onChooseFolder={() => void choosePipelinePdfFolder()}
               onSearchZotero={(query) => void discoverZoteroByQuery(query)}
               onRetry={(jobId) => void retryPipeline(jobId)}
-              onDelete={(jobId, childId) => void deletePipeline(jobId, childId)}
+              onRemoveBooks={removePipelineBooks}
+              onMigrateProject={migratePipelineProject}
               onAdvance={(jobId, childId, invalidateDownstream) =>
                 void advancePipeline(jobId, childId, invalidateDownstream)
               }

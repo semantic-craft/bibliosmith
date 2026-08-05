@@ -37,7 +37,7 @@
 
 .startup-gate__card {
   display: grid;
-  width: min(480px, calc(100vw - 48px));
+  width: min(520px, calc(100vw - 48px));
   padding: 42px;
   border-radius: var(--radius-island);
   background: var(--island);
@@ -58,9 +58,31 @@
 }
 
 .startup-gate__card > p {
-  max-width: 360px;
+  max-width: 410px;
   margin: 12px 0 0;
   color: var(--muted);
+}
+
+.startup-gate__location {
+  display: grid;
+  width: 100%;
+  gap: 5px;
+  margin-top: 24px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--sub);
+  text-align: left;
+}
+
+.startup-gate__location span {
+  color: var(--muted);
+  font-size: var(--fs-caption);
+}
+
+.startup-gate__location strong {
+  color: var(--ink);
+  font-size: var(--fs-body);
+  overflow-wrap: anywhere;
 }
 
 .startup-gate__card .startup-gate__reason {
@@ -71,26 +93,41 @@
   background: var(--sub);
   color: var(--muted);
   font-size: var(--fs-caption);
-  overflow-wrap: anywhere;
 }
 
 .startup-gate__card .startup-gate__error {
   color: var(--err);
 }
 
-.startup-gate__choose {
+.startup-gate__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.startup-gate__actions button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-top: 24px;
   padding: 9px 16px;
-  border: 0;
   border-radius: var(--radius-sm);
-  background: var(--jade);
-  color: var(--on-accent);
   font-weight: 600;
 }
 
-.startup-gate__choose:hover:not(:disabled) {
+.startup-gate__create {
+  border: 0;
+  background: var(--jade);
+  color: var(--on-accent);
+}
+
+.startup-gate__create:hover:not(:disabled) {
   background: var(--jade-bright);
+}
+
+.startup-gate__choose {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
 }

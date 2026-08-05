@@ -41,7 +41,7 @@ Origin: 2026-08-01 设计会话，基于三路并行代码盘点（UI 面 / OCR 
    设置/日志）里唯一工作面是「书架」（pipeline tab）；模型与 OCR 藏在设置十块
    面板中的两块。精简的本质是砍五个页面 + 把两块设置提为一级，而不是重写书架。
 2. **EPUB 焊死在翻译后面。** 两个 EPUB builder
-   （`tools/bibliosmith-launcher/source/scripts/build_epub.js`、
+   （`tools/bibliosmith-launcher/source/scripts/build_epub.cjs`、
    `build_bilingual_epub.py`）都只吃 `chapters/final/`（翻译定稿后才存在）。
    「PDF 不翻译直出 EPUB」没有代码路径；而向导默认模式恰是 `conversion_only`
    ——只出 HTML、Markdown 不落盘的半吊子路径（`pdf_to_html_paddleocr.py` 的

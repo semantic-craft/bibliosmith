@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import struct
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from pathlib import Path
 import sqlite_vec
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "zotero-cli" / "vectors.sqlite"
+APP_INDEX_PATH_ENV = "BIBLIOSMITH_ZOTERO_INDEX_PATH"
 FTS_SCHEMA_SQL = """
 CREATE VIRTUAL TABLE fts_items
 USING fts5(
@@ -23,6 +25,12 @@ USING fts5(
     tokenize='trigram'
 )
 """
+
+
+def default_db_path() -> Path:
+    """Resolve the store path, allowing the desktop App to own its cache."""
+    configured = os.environ.get(APP_INDEX_PATH_ENV, "").strip()
+    return Path(configured).expanduser() if configured else DEFAULT_DB_PATH
 
 
 @dataclass(frozen=True)
@@ -51,7 +59,7 @@ class SQLiteVecStore:
     """
 
     def __init__(self, cfg: VectorStoreConfig | None = None) -> None:
-        self.cfg = cfg or VectorStoreConfig(db_path=DEFAULT_DB_PATH)
+        self.cfg = cfg or VectorStoreConfig(db_path=default_db_path())
         self.cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.cfg.db_path))
         self._conn.enable_load_extension(True)

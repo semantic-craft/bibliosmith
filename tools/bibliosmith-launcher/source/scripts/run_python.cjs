@@ -26,6 +26,13 @@ function privatePython() {
   return found ? { program: found, args: [] } : null;
 }
 
+function bundledUvPython() {
+  const uv = process.env.BIBLIOSMITH_UV;
+  const runtimeRoot = process.env.BIBLIOSMITH_RUNTIME_ROOT;
+  if (!uv || !runtimeRoot || !fs.existsSync(uv)) return null;
+  return { program: uv, args: ['run', '--project', runtimeRoot, 'python'] };
+}
+
 function commandWorks(program, args) {
   const result = spawnSync(program, [...args, '--version'], {
     encoding: 'utf8',
@@ -37,6 +44,8 @@ function commandWorks(program, args) {
 function resolvePython() {
   const privateRuntime = privatePython();
   if (privateRuntime) return privateRuntime;
+  const uvPython = bundledUvPython();
+  if (uvPython) return uvPython;
   if (process.platform === 'win32' && commandWorks('py', ['-3'])) {
     return { program: 'py', args: ['-3'] };
   }

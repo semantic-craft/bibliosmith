@@ -24,13 +24,13 @@ export default tseslint.config(
   {
     // The build and test scripts under scripts/ are plain node modules, not
     // browser code, and none of the React rules above apply to them.
-    files: ["scripts/**/*.{js,mjs}", "*.config.{js,ts}"],
+    files: ["scripts/**/*.{js,cjs,mjs}", "*.config.{js,ts}"],
     languageOptions: {
       globals: globals.node,
     },
   },
   {
-    files: ["scripts/**/*.js"],
+    files: ["scripts/**/*.{js,cjs}"],
     rules: {
       "@typescript-eslint/no-require-imports": "off",
     },

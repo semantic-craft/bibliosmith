@@ -11,6 +11,7 @@ vi.mock("../api", () => ({
   readBookPipelineArtifactExcerpt: vi.fn(() => Promise.reject(new Error("desktop only"))),
   readBookPipelineTranslationSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
   readBookPipelineOcrSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
+  inspectBookPipelineProjectMigration: vi.fn(() => Promise.resolve({ required: false, sourceRoot: "", destinationRoot: "" })),
   // The input island only registers the native drag-drop listener under Tauri.
   isTauriRuntime: () => false,
 }));
@@ -39,7 +40,8 @@ function workbenchProps(
     onChooseFolder: vi.fn(),
     onSearchZotero: vi.fn(),
     onRetry: vi.fn(),
-    onDelete: vi.fn(),
+    onRemoveBooks: vi.fn(async () => true),
+    onMigrateProject: vi.fn(async () => true),
     onAdvance: vi.fn(),
     onSampleTranslation: vi.fn(),
     onApplySampleProvider: vi.fn(),
@@ -55,6 +57,52 @@ function workbenchProps(
 }
 
 describe("PipelineWorkbench split view", () => {
+  it("removes multiple eligible books from the shelf with one atomic request", async () => {
+    const user = userEvent.setup();
+    const props = workbenchProps();
+    const completedStages = [stage("extract", "completed")];
+    const first = childJob({
+      id: "child-first",
+      parentJobId: "job-first",
+      status: "completed",
+      source: { kind: "zotero_attachment", title: "First book" },
+      stages: completedStages,
+    });
+    const second = childJob({
+      id: "child-second",
+      parentJobId: "job-second",
+      status: "completed",
+      source: { kind: "zotero_attachment", title: "Second book" },
+      stages: completedStages,
+    });
+    const running = childJob({
+      id: "child-running",
+      parentJobId: "job-running",
+      status: "running",
+      source: { kind: "zotero_attachment", title: "Running book" },
+      stages: [stage("translate", "running")],
+    });
+    props.state.jobs = [
+      job({ id: "job-first", status: "completed", source: first.source, children: [first] }),
+      job({ id: "job-second", status: "completed", source: second.source, children: [second] }),
+      job({ id: "job-running", status: "running", source: running.source, children: [running] }),
+    ];
+
+    render(<PipelineWorkbench {...props} />);
+
+    await user.click(screen.getByRole("button", { name: copy.manageShelf }));
+    await user.click(screen.getByRole("button", { name: copy.selectAllRemovable }));
+    expect(screen.getByRole("checkbox", { name: /Running book/ }).getAttribute("aria-disabled")).toBe("true");
+    await user.click(screen.getByRole("button", { name: copy.removeSelected(2) }));
+    await user.click(screen.getByRole("button", { name: copy.confirmRemoveSelected(2) }));
+
+    expect(props.onRemoveBooks).toHaveBeenCalledTimes(1);
+    expect(props.onRemoveBooks).toHaveBeenCalledWith([
+      { jobId: "job-first", childId: "child-first" },
+      { jobId: "job-second", childId: "child-second" },
+    ]);
+  });
+
   it("lets the reader widen the details pane from an accessible separator", async () => {
     const user = userEvent.setup();
     const { container } = render(<PipelineWorkbench {...workbenchProps()} />);

@@ -47,6 +47,32 @@ fn executable_fixture(dir: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
+fn concurrent_project_reservations_never_share_a_user_directory() {
+    let root = temp_root("concurrent-project-reservations");
+    let target = root.join("books/local/zh-Hans");
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let workers = (0..2)
+        .map(|_| {
+            let target = target.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                create_new_local_project(&target, "same_book").unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut projects = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    projects.sort();
+
+    assert_ne!(projects[0], projects[1]);
+    assert!(projects.iter().all(|project| project.is_dir()));
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn program_search_dirs_keep_inherited_path_ahead_of_the_desktop_fallbacks() {
     let inherited = env::join_paths(["/usr/bin", "/bin"].map(PathBuf::from)).unwrap();
     let dirs = program_search_dirs_from(
@@ -260,7 +286,7 @@ fn runner_program_falls_back_to_the_bare_name_when_nothing_resolves() {
     let root = temp_root("program-missing");
     fs::create_dir_all(&root).unwrap();
     assert_eq!(
-        resolve_runner_program_in(&[root.clone()], Path::new("uv")),
+        resolve_runner_program_in(std::slice::from_ref(&root), Path::new("uv")),
         PathBuf::from("uv")
     );
     fs::remove_dir_all(&root).ok();
@@ -268,9 +294,11 @@ fn runner_program_falls_back_to_the_bare_name_when_nothing_resolves() {
 
 #[test]
 fn runner_child_path_carries_every_search_dir() {
-    let value = runner_path_env_value().expect("search dirs should join into a PATH");
+    let resource_root = PathBuf::from("/App/Contents/Resources/bibliosmith-runtime");
+    let value = runner_path_env_value(&resource_root).expect("search dirs should join into a PATH");
     let carried = env::split_paths(&value).collect::<Vec<_>>();
-    assert_eq!(carried, program_search_dirs());
+    assert_eq!(carried.first(), Some(&resource_root.join("bin")));
+    assert_eq!(&carried[1..], program_search_dirs());
 }
 
 fn nvm_fixture(root: &Path, versions: &[&str], default_alias: Option<&str>) -> PathBuf {
@@ -419,7 +447,7 @@ fn pipeline_process_programs_are_resolvable() {
     for program in ["uv", "node", "java", "python3"] {
         let resolved = resolve_runner_program(Path::new(program));
         assert!(
-            resolved.is_absolute() || resolved == PathBuf::from(program),
+            resolved.is_absolute() || resolved == Path::new(program),
             "{program} resolved to an unusable relative path: {}",
             display_path(&resolved)
         );
@@ -1538,7 +1566,7 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
         assert_eq!(command.kind, RunnerCommandKind::Process);
         assert_eq!(command.label, TRANSLATION_ENGINE_COMMAND_LABEL);
         assert_eq!(command.program, PathBuf::from("uv"));
-        let repo_root = local_reading_repo_root().unwrap();
+        let repo_root = bundled_resource_root().unwrap();
         assert_eq!(command.cwd.as_deref(), Some(repo_root.as_path()));
         assert_eq!(command.accepted_exit_codes, vec![0, 1]);
         let manifest_path = PathBuf::from(&command.args[5]);
@@ -1867,12 +1895,13 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                 assert_eq!(command.program, PathBuf::from("node"));
                 assert_eq!(command.cwd.as_deref(), Some(command.output_dir.as_path()));
                 assert_eq!(command.accepted_exit_codes, vec![0]);
-                assert_eq!(command.args.len(), 1);
+                assert_eq!(command.args.len(), 2);
+                assert_eq!(command.args[0], "--jitless");
                 assert_eq!(
-                    Path::new(&command.args[0])
+                    Path::new(&command.args[1])
                         .file_name()
                         .and_then(|name| name.to_str()),
-                    Some("build_epub.js")
+                    Some("build_epub.cjs")
                 );
                 assert!(command.output_dir.join("output/reading/book.md").is_file());
                 let final_dir = command.output_dir.join("chapters/final");
@@ -1906,18 +1935,21 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
             }
             BILINGUAL_BUILD_COMMAND_LABEL => {
                 assert_eq!(command.kind, RunnerCommandKind::Process);
-                assert_eq!(command.program, PathBuf::from("python3"));
+                assert_eq!(command.program, PathBuf::from("uv"));
                 assert_eq!(command.cwd.as_deref(), Some(command.output_dir.as_path()));
                 assert_eq!(command.accepted_exit_codes, vec![0]);
-                assert_eq!(command.args.len(), 3);
+                assert_eq!(command.args.len(), 7);
+                assert_eq!(command.args[0], "run");
+                assert_eq!(command.args[1], "--project");
+                assert_eq!(command.args[3], "python");
                 assert_eq!(
-                    Path::new(&command.args[0])
+                    Path::new(&command.args[4])
                         .file_name()
                         .and_then(|name| name.to_str()),
                     Some("build_bilingual_epub.py")
                 );
-                assert_eq!(command.args[1], "--book-root");
-                assert_eq!(command.args[2], display_path(&command.output_dir));
+                assert_eq!(command.args[5], "--book-root");
+                assert_eq!(command.args[6], display_path(&command.output_dir));
                 assert!(command
                     .output_dir
                     .join("metadata/source_map.json")
@@ -2010,7 +2042,7 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                 assert_eq!(command.program, PathBuf::from("uv"));
                 assert_eq!(
                     command.cwd.as_deref(),
-                    Some(local_reading_repo_root().unwrap().as_path())
+                    Some(bundled_resource_root().unwrap().as_path())
                 );
                 assert_eq!(command.accepted_exit_codes, vec![0]);
                 assert_eq!(
@@ -3085,10 +3117,165 @@ fn delete_job_removes_a_queued_job_and_persists() {
     )
     .unwrap();
 
-    let state = delete_job(&store, &job.id, None, true).unwrap();
+    let state = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: job.id.clone(),
+            child_id: None,
+        }],
+        true,
+    )
+    .unwrap();
 
     assert!(state.jobs.is_empty());
     assert!(store.load().unwrap().jobs.is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn batch_remove_is_atomic_and_keeps_local_project_files() {
+    let root = temp_root("batch-remove-shelf");
+    let store = BookPipelineStore::for_test(&root);
+    let first = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let second = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let first_project = root.join("books/local/zh-Hans/first");
+    let second_project = root.join("books/local/zh-Hans/second");
+    fs::create_dir_all(&first_project).unwrap();
+    fs::create_dir_all(&second_project).unwrap();
+    fs::write(first_project.join("book.epub"), "first").unwrap();
+    fs::write(second_project.join("book.epub"), "second").unwrap();
+
+    let rejected = remove_books_from_shelf_in_store(
+        &store,
+        &[
+            BookPipelineShelfSelection {
+                job_id: first.id.clone(),
+                child_id: Some(first.children[0].id.clone()),
+            },
+            BookPipelineShelfSelection {
+                job_id: "missing-job".into(),
+                child_id: Some("missing-child".into()),
+            },
+        ],
+        true,
+    )
+    .unwrap_err();
+    assert!(rejected.contains("not found"));
+    assert_eq!(store.load().unwrap().jobs.len(), 2, "no partial removal");
+
+    let removed = remove_books_from_shelf_in_store(
+        &store,
+        &[
+            BookPipelineShelfSelection {
+                job_id: first.id,
+                child_id: Some(first.children[0].id.clone()),
+            },
+            BookPipelineShelfSelection {
+                job_id: second.id,
+                child_id: Some(second.children[0].id.clone()),
+            },
+        ],
+        true,
+    )
+    .unwrap();
+
+    assert!(removed.jobs.is_empty());
+    assert!(first_project.join("book.epub").is_file());
+    assert!(second_project.join("book.epub").is_file());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn explicit_project_migration_copies_verifies_and_rebinds_open_output() {
+    let root = temp_root("explicit-project-migration");
+    let old_project = root.join("old-repository/books/local/zh-Hans/001_Example");
+    let old_reading = old_project.join("output/reading");
+    fs::create_dir_all(&old_reading).unwrap();
+    let old_epub = old_reading.join("book.epub");
+    fs::write(&old_epub, "verified reading output").unwrap();
+    let workspace = root.join("Documents/BiblioSmith");
+    fs::create_dir_all(workspace.join("books/local/zh-Hans")).unwrap();
+
+    let store = MemoryStateStore::new(&root);
+    let mut queued = queue_job(
+        &store,
+        fake_source(None),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let child_id = {
+        let child = queued.children.first_mut().unwrap();
+        child.local_project_root = Some(display_path(&old_project));
+        child.stages = vec![BookPipelineStage {
+            stage_id: "validate_reading".into(),
+            status: STATUS_COMPLETED.into(),
+            ..BookPipelineStage::default()
+        }];
+        let mut artifact = BookPipelineArtifact {
+            kind: "reading_epub".into(),
+            path: display_path(&old_epub),
+            ..BookPipelineArtifact::default()
+        };
+        enrich_artifact(
+            &mut artifact,
+            Some(&child.id),
+            &queued.source,
+            &child.source,
+            &child.stages,
+            1,
+            &queued.created_at,
+        );
+        let child_id = child.id.clone();
+        child.artifacts = vec![artifact];
+        child_id
+    };
+    let old_artifact_id = queued.children[0].artifacts[0].artifact_id.clone();
+    derive_job(&mut queued);
+    *store.state.lock().unwrap() = BookPipelineState {
+        schema_version: JOB_SCHEMA_VERSION.into(),
+        revision: 1,
+        jobs: vec![queued.clone()],
+    };
+
+    let migrated =
+        migrate_book_project_in_store(&store, &queued.id, Some(&child_id), &workspace, true)
+            .unwrap();
+    let migrated_job = &migrated.jobs[0];
+    let migrated_child = &migrated_job.children[0];
+    let destination = workspace.join("books/local/zh-Hans/001_Example");
+
+    assert_eq!(
+        migrated_child.local_project_root.as_deref(),
+        Some(display_path(&destination).as_str())
+    );
+    assert_eq!(
+        fs::read(destination.join("output/reading/book.epub")).unwrap(),
+        b"verified reading output"
+    );
+    assert!(old_epub.exists(), "the source project is never removed");
+    assert_ne!(migrated_child.artifacts[0].artifact_id, old_artifact_id);
+    assert!(migrated_child.artifacts[0]
+        .path
+        .starts_with(&display_path(&destination)));
+    let opened =
+        resolve_book_pipeline_open_target(migrated_job, std::slice::from_ref(&workspace)).unwrap();
+    assert_eq!(opened.kind, "reading_output_directory");
+    assert!(opened
+        .path
+        .starts_with(fs::canonicalize(workspace).unwrap()));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -3117,7 +3304,15 @@ fn dropping_one_book_of_a_batch_keeps_the_rest_and_the_frozen_membership() {
     let survivors = job.children.len() - 1;
     let membership_before = job.membership.clone();
 
-    let state = delete_job(&store, &job.id, Some(&dropped), true).unwrap();
+    let state = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: job.id.clone(),
+            child_id: Some(dropped.clone()),
+        }],
+        true,
+    )
+    .unwrap();
 
     let stored = state.jobs.iter().find(|item| item.id == job.id).unwrap();
     assert_eq!(
@@ -3150,7 +3345,15 @@ fn dropping_one_book_of_a_batch_keeps_the_rest_and_the_frozen_membership() {
     // a shelf row nobody could dismiss.
     for child in stored.children.clone() {
         if child.removed_at.is_none() {
-            delete_job(&store, &job.id, Some(&child.id), true).unwrap();
+            remove_books_from_shelf_in_store(
+                &store,
+                &[BookPipelineShelfSelection {
+                    job_id: job.id.clone(),
+                    child_id: Some(child.id.clone()),
+                }],
+                true,
+            )
+            .unwrap();
         }
     }
     assert!(store.load().unwrap().jobs.is_empty());
@@ -3172,7 +3375,15 @@ fn dropping_the_only_book_removes_the_job() {
     .unwrap();
     let child_id = job.children[0].id.clone();
 
-    let state = delete_job(&store, &job.id, Some(&child_id), true).unwrap();
+    let state = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: job.id.clone(),
+            child_id: Some(child_id.clone()),
+        }],
+        true,
+    )
+    .unwrap();
 
     assert!(state.jobs.is_empty());
     let _ = fs::remove_dir_all(root);
@@ -3190,11 +3401,27 @@ fn delete_job_requires_explicit_approval_and_a_known_job() {
     )
     .unwrap();
 
-    let refused = delete_job(&store, &job.id, None, false).unwrap_err();
+    let refused = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: job.id.clone(),
+            child_id: None,
+        }],
+        false,
+    )
+    .unwrap_err();
     assert!(refused.contains("Explicit approval"), "got: {refused}");
     assert_eq!(store.load().unwrap().jobs.len(), 1);
 
-    let missing = delete_job(&store, "job-nonexistent", None, true).unwrap_err();
+    let missing = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: "job-nonexistent".into(),
+            child_id: None,
+        }],
+        true,
+    )
+    .unwrap_err();
     assert!(missing.contains("not found"), "got: {missing}");
     let _ = fs::remove_dir_all(root);
 }
@@ -3220,7 +3447,7 @@ fn a_job_with_a_running_stage_counts_as_actively_running() {
 
 #[test]
 fn book_ocr_conversion_root_prefers_monorepo_ocr_package() {
-    let root = book_ocr_conversion_root();
+    let root = book_ocr_conversion_root().unwrap();
 
     assert!(
         root.ends_with(Path::new("packages").join("ocr")),
@@ -6175,17 +6402,6 @@ fn reaching_the_same_terminal_status_again_delivers_one_webhook() {
 }
 
 #[test]
-fn webhook_config_reads_only_the_requested_dotenv_value() {
-    let raw = "# private config\nOTHER_SETTING=ignored\nexport BOOK_PIPELINE_WEBHOOK_URL='https://localhost/hooks/books'\n";
-
-    assert_eq!(
-        dotenv_value(raw, "BOOK_PIPELINE_WEBHOOK_URL").as_deref(),
-        Some("https://localhost/hooks/books")
-    );
-    assert_eq!(dotenv_value(raw, "MISSING"), None);
-}
-
-#[test]
 fn concurrent_saves_reject_one_stale_revision_and_keep_valid_json() {
     let root = temp_root("concurrent-save-protection");
     let store = std::sync::Arc::new(BookPipelineStore::for_test(&root));
@@ -6393,43 +6609,6 @@ fn every_ocr_entry_point_runs_through_the_workspace_venv() {
     );
 
     fs::remove_dir_all(&root).ok();
-}
-
-// `~/BiblioSmith` is a guess, not a promise. Handing a missing directory to
-// the runner as its cwd only produced an errno about a path the user never
-// picked, so the check has to name the source that actually needs fixing.
-#[test]
-fn missing_configured_repo_root_only_names_launcher_settings() {
-    let missing = temp_root("repo-root-absent");
-    let error = existing_repo_root(missing.clone(), RepoRootSource::LauncherConfig).unwrap_err();
-
-    assert!(error.contains(&display_path(&missing)), "{error}");
-    assert!(error.contains("Launcher 设置"), "{error}");
-    assert!(!error.contains("BIBLIOSMITH_HOME"), "{error}");
-
-    fs::create_dir_all(&missing).unwrap();
-    assert_eq!(
-        existing_repo_root(missing.clone(), RepoRootSource::LauncherConfig).unwrap(),
-        missing
-    );
-    fs::remove_dir_all(&missing).ok();
-}
-
-#[test]
-fn missing_environment_repo_root_only_names_bibliosmith_home() {
-    let missing = temp_root("repo-root-env-absent");
-    let error = existing_repo_root(missing.clone(), RepoRootSource::Environment).unwrap_err();
-
-    assert!(error.contains(&display_path(&missing)), "{error}");
-    assert!(error.contains("BIBLIOSMITH_HOME"), "{error}");
-    assert!(!error.contains("Launcher 设置"), "{error}");
-
-    fs::create_dir_all(&missing).unwrap();
-    assert_eq!(
-        existing_repo_root(missing.clone(), RepoRootSource::Environment).unwrap(),
-        missing
-    );
-    fs::remove_dir_all(&missing).ok();
 }
 
 #[test]
@@ -8253,10 +8432,14 @@ fn markdown_artifact_handoff_creates_translation_ready_project() {
         "fixture",
     )
     .unwrap();
+    let original_pdf = root.join("original.pdf");
+    fs::write(&original_pdf, b"%PDF original source\n").unwrap();
+    let mut source = fake_source(None);
+    source.path = Some(display_path(&original_pdf));
     let store = BookPipelineStore::for_test(&root);
     let job = queue_job(
         &store,
-        fake_source(None),
+        source,
         "conversion_only".into(),
         BookPipelinePreviewConfig::default(),
     )
@@ -8287,8 +8470,8 @@ fn markdown_artifact_handoff_creates_translation_ready_project() {
         fs::read_to_string(project_root.join("metadata").join("source_manifest.json")).unwrap();
     assert!(manifest.contains("cleaned_markdown_ready"));
     assert_eq!(
-        fs::read_to_string(project_root.join("source").join("source.md")).unwrap(),
-        fs::read_to_string(project_root.join("source").join("original.md")).unwrap()
+        fs::read(project_root.join("source").join("original.pdf")).unwrap(),
+        b"%PDF original source\n"
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -9200,9 +9383,14 @@ fn fake_handoff_ready_job_with_text_cleanup(store: &BookPipelineStore, repo: &Pa
         "outputFormats": default_output_formats(),
     }))
     .unwrap();
+    let original = repo.join("fixtures/fake-source.pdf");
+    fs::create_dir_all(original.parent().unwrap()).unwrap();
+    fs::write(&original, b"%PDF fake source\n").unwrap();
+    let mut source = fake_source(None);
+    source.path = Some(display_path(&original));
     let job = queue_job_with_translation_intent(
         store,
-        fake_source(None),
+        source,
         MODE_CONVERT_THEN_TRANSLATE.into(),
         translation_intent,
         BookPipelinePreviewConfig::default(),
@@ -9246,9 +9434,14 @@ fn fake_handoff_ready_job_with_output_formats(
     digest_mode: bool,
     output_formats: Vec<String>,
 ) -> String {
+    let original = repo.join("fixtures/fake-source.pdf");
+    fs::create_dir_all(original.parent().unwrap()).unwrap();
+    fs::write(&original, b"%PDF fake source\n").unwrap();
+    let mut source = fake_source(None);
+    source.path = Some(display_path(&original));
     let job = queue_job_with_translation_intent(
         store,
-        fake_source(None),
+        source,
         MODE_CONVERT_THEN_TRANSLATE.into(),
         BookPipelineTranslationIntent {
             translation_mode: TRANSLATION_MODE_FAST.into(),
@@ -13465,10 +13658,8 @@ impl RunnerCommandExecutor for OcrSampleFixtureExecutor {
         // `uv run --package ocr` resolves the workspace from the OCR root, and
         // the script imports its sibling engine clients by bare name. Without
         // this the subprocess fails only against a real install.
-        assert_eq!(
-            command.cwd.as_deref(),
-            Some(book_ocr_conversion_root().as_path())
-        );
+        let ocr_root = book_ocr_conversion_root().unwrap();
+        assert_eq!(command.cwd.as_deref(), Some(ocr_root.as_path()));
         // Whatever the Keychain holds is what the engines authenticate with;
         // dropping inject_ocr_credentials would otherwise fail nothing here and
         // report "not configured" for both engines on a configured machine.
@@ -14872,11 +15063,35 @@ impl PipelineRunner for LayoutPdfFixtureRunner {
     }
 }
 
+fn point_layout_job_at_source(store: &dyn BookPipelineStateStore, job_id: &str, source_pdf: &Path) {
+    let mut state = store.load().unwrap();
+    let job = state.jobs.iter_mut().find(|job| job.id == job_id).unwrap();
+    job.source.path = Some(display_path(source_pdf));
+    for route in &mut job.route {
+        if route.route_kind != "translation_handoff" {
+            route.source_ref = display_path(source_pdf);
+        }
+    }
+    for child in &mut job.children {
+        child.source.path = Some(display_path(source_pdf));
+        for route in &mut child.route {
+            if route.route_kind != "translation_handoff" {
+                route.source_ref = display_path(source_pdf);
+            }
+        }
+    }
+    store.save(&state).unwrap();
+}
+
 #[test]
 fn a_layout_job_completes_at_extract_with_the_bilingual_pdf_registered() {
     let root = temp_root("layout-lifecycle");
     fs::create_dir_all(&root).unwrap();
     let store = BookPipelineStore::for_test(&root);
+    let source_pdf = root.join("source/Weber 1922.pdf");
+    fs::create_dir_all(source_pdf.parent().unwrap()).unwrap();
+    fs::write(&source_pdf, b"%PDF-1.7 original\n").unwrap();
+    let workspace = root.join("Documents/BiblioSmith");
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
@@ -14887,6 +15102,7 @@ fn a_layout_job_completes_at_extract_with_the_bilingual_pdf_registered() {
         },
     )
     .unwrap();
+    point_layout_job_at_source(&store, &job.id, &source_pdf);
 
     // Queued shape: two stages, and no translation handoff row on the route.
     let child = &job.children[0];
@@ -14906,7 +15122,14 @@ fn a_layout_job_completes_at_extract_with_the_bilingual_pdf_registered() {
         job.route
     );
 
-    let completed = run_job(&store, &LayoutPdfFixtureRunner, &job.id).unwrap();
+    let completed = run_job_with_handoff(
+        &store,
+        &LayoutPdfFixtureRunner,
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&workspace),
+    )
+    .unwrap();
 
     assert_eq!(completed.status, STATUS_COMPLETED);
     assert_eq!(
@@ -14915,8 +15138,31 @@ fn a_layout_job_completes_at_extract_with_the_bilingual_pdf_registered() {
             .iter()
             .map(|artifact| artifact.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["pdf"]
+        vec!["source_book", "source_manifest", "reading_bilingual_pdf"]
     );
+    let project_root = PathBuf::from(
+        completed.children[0]
+            .local_project_root
+            .as_deref()
+            .expect("layout book has a durable project"),
+    );
+    assert!(project_root.starts_with(&workspace));
+    assert_eq!(
+        fs::read(project_root.join("source/original.pdf")).unwrap(),
+        b"%PDF-1.7 original\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project_root.join("source/source.md")).unwrap(),
+        "# Layout-preserving source\n\nThe original source is stored as [original.pdf](original.pdf). This project preserves the translated reading output without extracting a Markdown source.\n"
+    );
+    let durable_pdf = completed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "reading_bilingual_pdf")
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .expect("durable PDF");
+    assert!(durable_pdf.starts_with(&workspace));
+    assert!(!durable_pdf.starts_with(store.job_output_dir(&job.id)));
     // No gate is ever raised: the whole point of this track is one pass.
     assert!(
         completed
@@ -14972,6 +15218,10 @@ fn a_finished_layout_job_opens_the_bilingual_pdf_itself() {
     let root = temp_root("layout-open-target");
     fs::create_dir_all(&root).unwrap();
     let store = BookPipelineStore::for_test(&root);
+    let source_pdf = root.join("source/Weber 1922.pdf");
+    fs::create_dir_all(source_pdf.parent().unwrap()).unwrap();
+    fs::write(&source_pdf, b"%PDF-1.7 original\n").unwrap();
+    let workspace = root.join("Documents/BiblioSmith");
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
@@ -14982,8 +15232,16 @@ fn a_finished_layout_job_opens_the_bilingual_pdf_itself() {
         },
     )
     .unwrap();
+    point_layout_job_at_source(&store, &job.id, &source_pdf);
 
-    let completed = run_job(&store, &LayoutPdfFixtureRunner, &job.id).unwrap();
+    let completed = run_job_with_handoff(
+        &store,
+        &LayoutPdfFixtureRunner,
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&workspace),
+    )
+    .unwrap();
 
     assert_eq!(completed.status, STATUS_COMPLETED);
     let open_target = completed
@@ -15002,6 +15260,7 @@ fn a_finished_layout_job_opens_the_bilingual_pdf_itself() {
         "expected the bilingual PDF, got {}",
         target.path
     );
+    assert!(Path::new(&target.path).starts_with(&workspace));
 }
 
 #[test]
@@ -15249,6 +15508,8 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
     let repo_root = root.join("repo");
     fs::create_dir_all(extract_dir.join("Some_Book_assets")).unwrap();
     let markdown_path = extract_dir.join("Some_Book.md");
+    let original_epub = root.join("Some Book.epub");
+    fs::write(&original_epub, b"PK original epub").unwrap();
     fs::write(
         &markdown_path,
         "# Chapter One\n\n![A figure](Some_Book_assets/figure.png)\n\n# Chapter Two\n\nBody.\n",
@@ -15262,7 +15523,7 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
     let job: BookPipelineJob = serde_json::from_value(serde_json::json!({
         "id": "job-epub-sidecar",
         "mode": MODE_CONVERT_THEN_TRANSLATE,
-        "source": { "kind": "local_pdf_folder", "title": "Some Book" },
+        "source": { "kind": "local_pdf_folder", "title": "Some Book", "path": display_path(&original_epub) },
         "route": [],
         "status": "running",
         "currentStep": "handoff",
@@ -15298,6 +15559,10 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
             .join("figure.png")
             .is_file(),
         "the images an EPUB extraction pulled out must reach the translation project"
+    );
+    assert_eq!(
+        fs::read(project_root.join("source/original.epub")).unwrap(),
+        b"PK original epub"
     );
 
     let source_text = fs::read_to_string(project_root.join("source").join("source.md")).unwrap();
@@ -16228,6 +16493,7 @@ fn a_locally_extracted_book_hands_off_to_translation_like_any_other() {
     // handoff that had come to depend on either would fail here.
     let root = local_pdf_folder_with_two_books("local-pdf-direct-handoff");
     let input = root.join("input");
+    fs::write(input.join("Sample_Book.pdf"), "%PDF sample book").unwrap();
     let repo_root = root.join("repo");
     fs::create_dir_all(repo_root.join("tools")).unwrap();
     fs::write(repo_root.join("AGENTS.md"), "fixture").unwrap();
@@ -16283,4 +16549,148 @@ fn a_locally_extracted_book_hands_off_to_translation_like_any_other() {
         DIRECT_TEXT_WRAPPER_MARKDOWN
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pipeline_state_and_ocr_staging_use_support_and_cache_not_the_workspace() {
+    let root = temp_root("four-layer-pipeline-paths");
+    let paths = crate::app_paths::AppPaths::from_roots(
+        root.join("App.app/Contents/Resources/bibliosmith-runtime"),
+        root.join("Library/Application Support/BiblioSmith/launcher"),
+        root.join("Library/Caches/BiblioSmith/launcher"),
+        root.join("Documents"),
+    );
+
+    assert_eq!(
+        state_dir_for(&paths),
+        root.join("Library/Application Support/BiblioSmith/launcher/book-pipeline")
+    );
+    assert_eq!(
+        output_root_for(&paths),
+        root.join("Library/Caches/BiblioSmith/launcher/book-pipeline/output")
+    );
+    assert!(!state_dir_for(&paths).starts_with(root.join("Documents")));
+    assert!(!output_root_for(&paths).starts_with(root.join("Documents")));
+}
+
+#[test]
+fn reading_builder_executes_from_read_only_resources_without_copying_into_a_book() {
+    let root = temp_root("bundled-reading-builder");
+    let resources = root.join("App.app/Contents/Resources/bibliosmith-runtime");
+    let script = resources.join("tools/bibliosmith-launcher/source/scripts/build_epub.cjs");
+    fs::create_dir_all(script.parent().unwrap()).unwrap();
+    fs::write(&script, "// bundled builder").unwrap();
+    let project = root.join("Documents/BiblioSmith/books/local/zh-Hans/001_Book");
+    fs::create_dir_all(&project).unwrap();
+
+    assert_eq!(reading_builder_path_for_root(&resources).unwrap(), script);
+    assert!(!project.join("scripts").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn uv_runtime_writes_environment_and_cache_outside_read_only_resources() {
+    let root = temp_root("uv-runtime-paths");
+    let paths = crate::app_paths::AppPaths::from_roots(
+        root.join("App.app/Contents/Resources/bibliosmith-runtime"),
+        root.join("Library/Application Support/BiblioSmith/launcher"),
+        root.join("Library/Caches/BiblioSmith/launcher"),
+        root.join("Documents"),
+    );
+
+    assert_eq!(
+        uv_runtime_env_for(&paths),
+        vec![
+            (
+                "UV_PROJECT_ENVIRONMENT".to_string(),
+                display_path(
+                    &root.join(
+                        "Library/Application Support/BiblioSmith/launcher/runtimes/python-env"
+                    )
+                ),
+            ),
+            (
+                "UV_CACHE_DIR".to_string(),
+                display_path(&root.join("Library/Caches/BiblioSmith/launcher/uv")),
+            ),
+            (
+                "UV_PYTHON_INSTALL_DIR".to_string(),
+                display_path(
+                    &root.join(
+                        "Library/Application Support/BiblioSmith/launcher/runtimes/uv-python"
+                    )
+                ),
+            ),
+            ("UV_NO_MODIFY_PATH".to_string(), "1".to_string()),
+            ("UV_FROZEN".to_string(), "1".to_string()),
+        ]
+    );
+    assert_eq!(
+        zotero_index_env_for(&paths),
+        (
+            "BIBLIOSMITH_ZOTERO_INDEX_PATH".to_string(),
+            display_path(&root.join("Library/Caches/BiblioSmith/launcher/zotero/vectors.sqlite")),
+        )
+    );
+}
+
+#[test]
+fn node_reading_commands_receive_protected_managed_uv_paths() {
+    let root = temp_root("node-reading-managed-uv");
+    let resources = root.join("App.app/Contents/Resources/bibliosmith-runtime");
+    let paths = crate::app_paths::AppPaths::from_roots(
+        resources.clone(),
+        root.join("Library/Application Support/BiblioSmith/launcher"),
+        root.join("Library/Caches/BiblioSmith/launcher"),
+        root.join("Documents"),
+    );
+    let command = RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: READING_BUILD_COMMAND_LABEL.into(),
+        program: PathBuf::from("node"),
+        args: vec![
+            "--jitless".into(),
+            display_path(&resources.join("scripts/build_epub.cjs")),
+        ],
+        env: vec![(
+            "UV_PROJECT_ENVIRONMENT".into(),
+            display_path(&resources.join(".venv")),
+        )],
+        cwd: Some(root.join("Documents/BiblioSmith/books/local/zh-Hans/001_Book")),
+        output_dir: root.join("Documents/BiblioSmith/books/local/zh-Hans/001_Book"),
+        attempts: 0,
+        accepted_exit_codes: vec![0],
+    };
+
+    let environment = runner_runtime_env_for(&paths, &command)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(
+        environment.get("UV_PROJECT_ENVIRONMENT"),
+        Some(&display_path(&root.join(
+            "Library/Application Support/BiblioSmith/launcher/runtimes/python-env"
+        )))
+    );
+    assert_eq!(
+        environment.get("UV_CACHE_DIR"),
+        Some(&display_path(
+            &root.join("Library/Caches/BiblioSmith/launcher/uv")
+        ))
+    );
+    assert_eq!(
+        environment.get("UV_PYTHON_INSTALL_DIR"),
+        Some(&display_path(&root.join(
+            "Library/Application Support/BiblioSmith/launcher/runtimes/uv-python"
+        )))
+    );
+    assert_eq!(environment.get("UV_FROZEN"), Some(&"1".to_string()));
+    assert_eq!(
+        environment.get("BIBLIOSMITH_RUNTIME_ROOT"),
+        Some(&display_path(&resources))
+    );
+    assert_eq!(
+        environment.get("BIBLIOSMITH_DISABLE_DOTENV"),
+        Some(&"1".to_string())
+    );
 }
