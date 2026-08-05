@@ -6,10 +6,13 @@ import {
   BookPipelineArtifactExcerpt,
   BookPipelineCleanupCandidate,
   BookPipelineCleanupPreview,
-  BookPipelineCustomInstructions,
+  BookPipelineStructureCorrectionDraft,
+  BookPipelineStructureCorrectionInput,
   BookPipelineJob,
   BookPipelinePreviewConfig,
+  BookPipelineProjectMigration,
   BookPipelineRouteItem,
+  BookPipelineShelfSelection,
   BookPipelineSource,
   BookPipelineState,
   BookPipelineOcrSampleReport,
@@ -20,19 +23,24 @@ import {
   DownloadProgress,
   EmbeddingConnectionResult,
   EmbeddingStatus,
-  LauncherState,
-  BiblioSmithUpdateInfo,
+  WorkspaceState,
   ModelCatalog,
   ModelConnectionResult,
   NetworkProxySettings,
   OcrConnectionResult,
   OcrCredentialsStatus,
-  NodeModulesStatus,
-  ProjectDocument,
   ProxyAutoDetectResult,
   ProxyTestResult,
   RuntimeStatus,
+  TranslationPromptPackCatalog,
+  TranslationPromptPackDefinition,
+  TranslationPromptPackReference,
+  TranslationPromptPackRevision,
+  TranslationPromptPackRevisionDiff,
+  TranslationPromptPackRevisionDraft,
+  TranslationPromptPreview,
 } from "./types";
+import builtinTranslationPromptPacks from "../src-tauri/resources/translation-prompt-packs.json";
 
 declare global {
   interface Window {
@@ -46,16 +54,12 @@ export function isTauriRuntime() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
 }
 
-function previewState(): LauncherState {
+function previewWorkspaceState(): WorkspaceState {
   return {
-    repoRoot: "BiblioSmith-PublicDomain-Translator",
-    repoReady: true,
-    repoStatus: "ready",
-    branch: "main",
-    localCommit: "preview",
-    localCommitShort: "preview",
-    remoteUrl: "origin",
-    dirty: false,
+    workspaceRoot: "Documents/BiblioSmith",
+    recommendedWorkspaceRoot: "Documents/BiblioSmith",
+    workspaceReady: true,
+    workspaceStatus: "ready",
     proxyConfigured: false,
     platform: "preview",
   };
@@ -63,8 +67,18 @@ function previewState(): LauncherState {
 
 let previewBookPipelineJobs: BookPipelineJob[] = [];
 let previewBookPipelineRevision = 0;
+let previewTranslationPromptCatalog = structuredClone(
+  builtinTranslationPromptPacks,
+) as TranslationPromptPackCatalog;
+const previewDeletedTranslationPromptPacks: TranslationPromptPackDefinition[] = [];
+const previewTranslationPromptDefaults = new Map<string, TranslationPromptPackReference>();
 export const BOOK_PIPELINE_STATE_SCHEMA_VERSION = "book-pipeline-state-v5";
 const BOOK_PIPELINE_JOB_SCHEMA_VERSION = "book-pipeline-job-v5";
+const PREVIEW_STRUCTURE_PROMPT_PACK: TranslationPromptPackReference = {
+  packId: "builtin.structure-fidelity",
+  revisionId: "2026.08.05-1",
+  contentSha256: "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+};
 
 function bookPipelineNow() {
   return new Date().toISOString();
@@ -270,7 +284,7 @@ function previewBookPipelineRoutes(source: BookPipelineSource, mode: string, con
 function previewBookPipelineJob(source: BookPipelineSource, mode: string, config?: BookPipelinePreviewConfig | null): BookPipelineJob {
   const now = bookPipelineNow();
   const route = previewBookPipelineRoutes(source, mode, config);
-  const id = `preview-${Date.now()}`;
+  const id = `preview-${crypto.randomUUID()}`;
   const executionRoutes = route.filter((item) => item.routeKind !== "translation_handoff");
   const childRoutes = isBookPipelineZoteroBatchSource(source) ? executionRoutes.map((item) => [item]) : [executionRoutes];
   const children = childRoutes.map((routes, index) => {
@@ -319,6 +333,8 @@ function previewBookPipelineJob(source: BookPipelineSource, mode: string, config
       artifacts: [],
       attempts: 0,
       lastError: null,
+      promptPackReference: PREVIEW_STRUCTURE_PROMPT_PACK,
+      promptPackSelectionSource: "default",
     };
   });
   const job: BookPipelineJob = {
@@ -326,6 +342,8 @@ function previewBookPipelineJob(source: BookPipelineSource, mode: string, config
     id,
     kind: isBookPipelineZoteroBatchSource(source) ? "collection" : "single",
     mode,
+    promptPackReference: PREVIEW_STRUCTURE_PROMPT_PACK,
+    promptPackSelectionSource: "default",
     source,
     route,
     status: routeIsRunnableForSource(source, route) ? "ready" : "blocked",
@@ -498,116 +516,33 @@ function previewZoteroDiscovery(source: BookPipelineSource): BookPipelineZoteroD
   };
 }
 
-export function getLauncherState() {
+export function getWorkspaceState() {
   if (!isTauriRuntime()) {
-    return Promise.resolve(previewState());
+    return Promise.resolve(previewWorkspaceState());
   }
-  return invoke<LauncherState>("get_launcher_state");
+  return invoke<WorkspaceState>("get_workspace_state");
 }
 
-export function chooseRepoFolder() {
+export function createRecommendedWorkspace() {
   if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode.", repoRoot: "D:\\BiblioSmith", requiresDownload: false });
-  }
-  return invoke<ActionResult>("choose_repo_folder");
-}
-
-export function setRepoFolder(repoRoot: string) {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode.", repoRoot, requiresDownload: false });
-  }
-  return invoke<ActionResult>("set_repo_folder", { repoRoot });
-}
-
-export function checkBiblioSmithUpdates(locale = "en") {
-  if (!isTauriRuntime()) {
-    const commits = [
-      {
-        hash: "a1b2c3d",
-        date: "2025-05-25 10:15",
-        title: "新增书籍：《时间简史》全文初译",
-        summary: "添加《时间简史》第一版全文初译，包含第1-10章内容。",
-      },
-      {
-        hash: "d4e5f6a",
-        date: "2025-05-25 09:02",
-        title: "优化术语库匹配算法",
-        summary: "改进术语匹配逻辑，提高长句和复合句的识别准确率。",
-      },
-      {
-        hash: "b7c8d9e",
-        date: "2025-05-24 22:47",
-        title: "修复章节导出格式问题",
-        summary: "修复 Markdown 导出时标题层级丢失的问题。",
-      },
-      {
-        hash: "e0f1a2b",
-        date: "2025-05-24 18:33",
-        title: "更新贡献指南",
-        summary: "补充翻译规范说明，新增常见问题解答部分。",
-      },
-      {
-        hash: "c3d4e5f",
-        date: "2025-05-24 16:11",
-        title: "新增西班牙语翻译支持",
-        summary: "添加西班牙语语言包与基础术语库支持。",
-      },
-      {
-        hash: "f6a7b8c",
-        date: "2025-05-24 12:05",
-        title: "改进 Web 编辑器体验",
-        summary: "优化段落导航与快捷键提示，提升编辑效率。",
-      },
-      {
-        hash: "9d8c7bb",
-        date: "2025-05-23 23:19",
-        title: "修复图片引用路径问题",
-        summary: "修复部分书籍中图片相对路径失效的问题。",
-      },
-    ].map((commit) => ({
-      ...commit,
-      fullMessage: `${commit.title}\n\nZH:\n- ${commit.summary}\n\nEN:\n- Preview English summary for ${commit.hash}.\n\nJA:\n- ${commit.hash} のプレビュー概要。`,
-    }));
-
-    return Promise.resolve<BiblioSmithUpdateInfo>({
-      repoRoot: "BiblioSmith-PublicDomain-Translator",
-      currentCommit: "preview",
-      remoteRef: "origin/main",
-      behindCount: 7,
-      aheadCount: 0,
-      hasUpdate: true,
-      commits,
+    return Promise.resolve<WorkspaceState>({
+      ...previewWorkspaceState(),
+      workspaceReady: true,
+      workspaceStatus: "ready",
     });
   }
-  return invoke<BiblioSmithUpdateInfo>("check_bibliosmith_updates", { locale });
+  return invoke<WorkspaceState>("create_recommended_workspace");
 }
 
-export function prepareBiblioSmithProject(locale = "en") {
+export function chooseAndCreateWorkspace() {
   if (!isTauriRuntime()) {
-    return checkBiblioSmithUpdates(locale);
+    return Promise.resolve<WorkspaceState | null>({
+      ...previewWorkspaceState(),
+      workspaceReady: true,
+      workspaceStatus: "ready",
+    });
   }
-  return invoke<BiblioSmithUpdateInfo>("prepare_bibliosmith_project", { locale });
-}
-
-export function syncBiblioSmithProject(locale = "en") {
-  if (!isTauriRuntime()) {
-    return checkBiblioSmithUpdates(locale);
-  }
-  return invoke<BiblioSmithUpdateInfo>("sync_bibliosmith_project", { locale });
-}
-
-export function updateBiblioSmith() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("update_bibliosmith");
-}
-
-export function cancelBiblioSmithUpdate() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("cancel_bibliosmith_update");
+  return invoke<WorkspaceState | null>("choose_and_create_workspace");
 }
 
 export function getDiagnosticLogSettings() {
@@ -860,34 +795,6 @@ export function testOcrConnection(service: "paddleocr" | "mineru", apiKey?: stri
   });
 }
 
-export function getNodeModulesStatus() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<NodeModulesStatus>({
-      ready: true,
-      running: false,
-      autoInstall: true,
-      repoReady: true,
-      booksDir: "BiblioSmith/books",
-      nodeModulesDir: "BiblioSmith/books/node_modules",
-    });
-  }
-  return invoke<NodeModulesStatus>("get_node_modules_status");
-}
-
-export function setAutoInstallNodeModules(enabled: boolean) {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<NodeModulesStatus>({
-      ready: true,
-      running: false,
-      autoInstall: enabled,
-      repoReady: true,
-      booksDir: "BiblioSmith/books",
-      nodeModulesDir: "BiblioSmith/books/node_modules",
-    });
-  }
-  return invoke<NodeModulesStatus>("set_auto_install_node_modules", { enabled });
-}
-
 export function getRuntimeStatus() {
   if (!isTauriRuntime()) {
     return Promise.resolve<RuntimeStatus>({
@@ -923,20 +830,6 @@ export function startRuntimePrepare() {
   return invoke<ActionResult>("start_runtime_prepare");
 }
 
-export function startNodeModulesInstall() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("start_node_modules_install");
-}
-
-export function cancelNodeModulesInstall(removePartial = false) {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("cancel_node_modules_install", { removePartial });
-}
-
 export function exportLauncherLogs() {
   if (!isTauriRuntime()) {
     return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
@@ -951,50 +844,6 @@ export function recordFrontendActivity(level: string, message: string) {
     return Promise.resolve();
   }
   return invoke<void>("record_frontend_activity", { level, message });
-}
-
-export function readProjectDocument(kind: "readme" | "howto", locale: string) {
-  if (!isTauriRuntime()) {
-    const content = kind === "readme"
-      ? `# BiblioSmith 本地阅读翻译工作台
-
-<table align="center">
-  <tr>
-    <td align="center"><h3><a href="./README.zh-CN.md">简体中文</a></h3></td>
-    <td align="center"><h3><a href="./docs/guides/how-to-use-local-reading.zh-CN.md">How to use</a></h3></td>
-  </tr>
-</table>
-
-BiblioSmith 用于处理用户已经拥有的本地 EPUB、PDF、论文和书稿。
-
-## 快速开始
-
-- 打开 [How to use](./docs/guides/how-to-use-local-reading.zh-CN.md)
-- 从本地文件创建 \`books/local/\` 项目
-`
-      : `# How to use
-
-## 开始使用
-
-- 在 BiblioSmith Launcher 的流水线页选择本地 EPUB、PDF 或 Markdown 并新建任务。
-- 完成抽取、翻译、审校后，从 output/reading/ 打开产物。
-- 阅读 [README](./README.zh-CN.md)。
-`;
-    return Promise.resolve<ProjectDocument>({
-      kind,
-      path: `preview/${kind}.md`,
-      title: kind === "readme" ? "README" : "How to use",
-      content,
-    });
-  }
-  return invoke<ProjectDocument>("read_project_document", { kind, locale });
-}
-
-export function readProjectDocumentPath(relativePath: string, locale: string) {
-  if (!isTauriRuntime()) {
-    return readProjectDocument(relativePath.toLowerCase().includes("how-to-use") ? "howto" : "readme", locale);
-  }
-  return invoke<ProjectDocument>("read_project_document_path", { relativePath, locale });
 }
 
 export function minimizeMainWindow() {
@@ -1012,20 +861,6 @@ export function closeMainWindowToTray() {
   return invoke<void>("close_main_window_to_tray");
 }
 
-export function openRepoFolder() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("open_repo_folder");
-}
-
-export function openBooksFolder() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ActionResult>({ ok: true, message: "Preview mode." });
-  }
-  return invoke<ActionResult>("open_books_folder");
-}
-
 export function getBookPipelineState() {
   if (!isTauriRuntime()) {
     return Promise.resolve<BookPipelineState>({
@@ -1035,6 +870,251 @@ export function getBookPipelineState() {
     });
   }
   return invoke<BookPipelineState>("get_book_pipeline_state");
+}
+
+function promptPackReference(revision: TranslationPromptPackRevision): TranslationPromptPackReference {
+  return {
+    packId: revision.packId,
+    revisionId: revision.revisionId,
+    contentSha256: revision.contentSha256,
+  };
+}
+
+function canonicalPromptPackJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
+  if (typeof value === "string") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalPromptPackJson).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalPromptPackJson(record[key])}`)
+      .join(",")}}`;
+  }
+  throw new Error("Prompt pack revision contains a non-JSON value.");
+}
+
+async function previewPromptPackContentSha256(revision: TranslationPromptPackRevision): Promise<string> {
+  const snapshot: Record<string, unknown> = structuredClone(revision);
+  Reflect.deleteProperty(snapshot, "contentSha256");
+  const bytes = new TextEncoder().encode(canonicalPromptPackJson(snapshot));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function previewPromptPackRevision(reference: TranslationPromptPackReference) {
+  return [...previewTranslationPromptCatalog.packs, ...previewDeletedTranslationPromptPacks]
+    .find((pack) => pack.packId === reference.packId)
+    ?.revisions.find((revision) => revision.revisionId === reference.revisionId && revision.contentSha256 === reference.contentSha256);
+}
+
+function previewStringRecord(value: unknown, field: string): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Prompt pack ${field} must be a string map.`);
+  }
+  const entries = Object.entries(value);
+  if (entries.some(([, item]) => typeof item !== "string")) {
+    throw new Error(`Prompt pack ${field} must be a string map.`);
+  }
+  return Object.fromEntries(entries) as Record<string, string>;
+}
+
+function previewPromptPackDefaultKey(executor: string, sourceLanguage: string, targetLanguage: string) {
+  return `${executor}:${sourceLanguage}:${targetLanguage}`;
+}
+
+export function listTranslationPromptPacks() {
+  if (!isTauriRuntime()) return Promise.resolve(structuredClone(previewTranslationPromptCatalog));
+  return invoke<TranslationPromptPackCatalog>("list_translation_prompt_packs");
+}
+
+export function getTranslationPromptPackDefault(
+  executor: "programmatic" | "expert-agent",
+  sourceLanguage = "auto",
+  targetLanguage = "zh-Hans",
+) {
+  if (!isTauriRuntime()) {
+    const key = previewPromptPackDefaultKey(executor, sourceLanguage, targetLanguage);
+    const selected = previewTranslationPromptDefaults.get(key);
+    if (selected) return Promise.resolve(structuredClone(selected));
+    const packId = executor === "programmatic" ? "builtin.structure-fidelity" : "builtin.context-backtracking";
+    const revision = previewTranslationPromptCatalog.packs.find((pack) => pack.packId === packId)?.revisions.at(-1);
+    if (!revision) return Promise.reject(new Error("Preview prompt pack default not found."));
+    return Promise.resolve(promptPackReference(revision));
+  }
+  return invoke<TranslationPromptPackReference>("get_translation_prompt_pack_default", {
+    executor,
+    sourceLanguage,
+    targetLanguage,
+  });
+}
+
+export async function copyTranslationPromptPack(sourceReference: TranslationPromptPackReference, displayName: string) {
+  if (!isTauriRuntime()) {
+    const source = previewPromptPackRevision(sourceReference);
+    if (!source) throw new Error("Preview prompt pack revision not found.");
+    const packId = `local.preview-${crypto.randomUUID()}`;
+    const revision: TranslationPromptPackRevision = {
+      ...structuredClone(source),
+      packId,
+      revisionId: "local-1",
+      contentSha256: "",
+      displayName: displayName.trim(),
+      source: {
+        ...structuredClone(source.source),
+        kind: "local-copy",
+        sourcePackId: sourceReference.packId,
+        sourceRevisionId: sourceReference.revisionId,
+        sourceContentSha256: sourceReference.contentSha256,
+      },
+    };
+    revision.contentSha256 = await previewPromptPackContentSha256(revision);
+    const pack: TranslationPromptPackDefinition = {
+      packId,
+      kind: "custom",
+      summary: `“${source.displayName}”的本地副本`,
+      revisions: [revision],
+    };
+    previewTranslationPromptCatalog = {
+      ...previewTranslationPromptCatalog,
+      packs: [...previewTranslationPromptCatalog.packs, pack],
+    };
+    return structuredClone(pack);
+  }
+  return invoke<TranslationPromptPackDefinition>("copy_translation_prompt_pack", { sourceReference, displayName });
+}
+
+export async function saveTranslationPromptPackRevision(draft: TranslationPromptPackRevisionDraft) {
+  if (!isTauriRuntime()) {
+    const pack = previewTranslationPromptCatalog.packs.find((item) => item.packId === draft.packId);
+    const previous = pack?.revisions.at(-1);
+    if (!pack || pack.kind === "builtin" || !previous) throw new Error("Only local prompt packs can be edited.");
+    if (!draft.displayName.trim()) throw new Error("displayName is required.");
+    if (draft.stages.length !== previous.stages.length || draft.stages.some((stage, index) => {
+      const locked = previous.stages[index];
+      return !locked
+        || stage.stageId !== locked.stageId
+        || stage.label !== locked.label
+        || !stage.template.trim();
+    })) {
+      throw new Error("Prompt pack executor contract is read-only.");
+    }
+    if (Object.entries(draft.parameters).some(([key, value]) =>
+      !["qualityFocus", "styleGuidance"].includes(key)
+      || !value.trim()
+      || [...value].length > 2_000)) {
+      throw new Error("Prompt pack parameter is not editable.");
+    }
+    const revision: TranslationPromptPackRevision = {
+      ...structuredClone(previous),
+      revisionId: `local-${pack.revisions.length + 1}`,
+      contentSha256: "",
+      displayName: draft.displayName.trim(),
+      parameters: structuredClone(draft.parameters),
+      stages: structuredClone(draft.stages),
+    };
+    revision.contentSha256 = await previewPromptPackContentSha256(revision);
+    pack.revisions.push(revision);
+    return structuredClone(revision);
+  }
+  return invoke<TranslationPromptPackRevision>("save_translation_prompt_pack_revision", { draft });
+}
+
+export function deleteTranslationPromptPack(packId: string) {
+  if (!isTauriRuntime()) {
+    const pack = previewTranslationPromptCatalog.packs.find((item) => item.packId === packId);
+    if (!pack || pack.kind === "builtin") return Promise.reject(new Error("Only local prompt packs can be deleted."));
+    if ([...previewTranslationPromptDefaults.values()].some((reference) => reference.packId === packId)) {
+      return Promise.reject(new Error("The current default prompt pack cannot be deleted."));
+    }
+    previewDeletedTranslationPromptPacks.push({
+      ...structuredClone(pack),
+      deletedAt: new Date().toISOString(),
+    });
+    previewTranslationPromptCatalog = {
+      ...previewTranslationPromptCatalog,
+      packs: previewTranslationPromptCatalog.packs.filter((item) => item.packId !== packId),
+    };
+    return Promise.resolve();
+  }
+  return invoke<void>("delete_translation_prompt_pack", { packId });
+}
+
+export function setTranslationPromptPackDefault(
+  executor: "programmatic" | "expert-agent",
+  promptPackReference: TranslationPromptPackReference,
+  sourceLanguage = "auto",
+  targetLanguage = "zh-Hans",
+) {
+  if (!isTauriRuntime()) {
+    const revision = previewPromptPackRevision(promptPackReference);
+    if (!revision || revision.executor !== executor) return Promise.reject(new Error("Prompt pack executor mismatch."));
+    previewTranslationPromptDefaults.set(
+      previewPromptPackDefaultKey(executor, sourceLanguage, targetLanguage),
+      structuredClone(promptPackReference),
+    );
+    return Promise.resolve();
+  }
+  return invoke<void>("set_translation_prompt_pack_default", {
+    executor,
+    sourceLanguage,
+    targetLanguage,
+    promptPackReference,
+  });
+}
+
+export function diffTranslationPromptPackRevisions(
+  before: TranslationPromptPackReference,
+  after: TranslationPromptPackReference,
+) {
+  if (!isTauriRuntime()) {
+    const left = previewPromptPackRevision(before);
+    const right = previewPromptPackRevision(after);
+    if (!left || !right || left.packId !== right.packId) return Promise.reject(new Error("Prompt pack revisions must belong to the same pack."));
+    const stageIds = new Set([...left.stages, ...right.stages].map((stage) => stage.stageId));
+    const stages = [...stageIds].flatMap((stageId) => {
+      const beforeTemplate = left.stages.find((stage) => stage.stageId === stageId)?.template;
+      const afterTemplate = right.stages.find((stage) => stage.stageId === stageId)?.template;
+      return beforeTemplate === afterTemplate ? [] : [{ stageId, beforeTemplate, afterTemplate }];
+    });
+    const diff: TranslationPromptPackRevisionDiff = {
+      before,
+      after,
+      beforeMetadata: {
+        displayName: left.displayName,
+        executor: left.executor,
+        sourceLanguage: left.sourceLanguage,
+        targetLanguage: left.targetLanguage,
+        costHint: left.costHint,
+        source: structuredClone(left.source),
+        contextPolicy: left.contextPolicy,
+        requiredSkillIds: structuredClone(left.requiredSkillIds ?? []),
+        requiredEvidence: structuredClone(left.requiredEvidence ?? []),
+        excludedResponsibilities: structuredClone(left.excludedResponsibilities ?? []),
+        parameters: structuredClone(left.parameters ?? {}),
+        evidencePolicy: structuredClone(left.evidencePolicy),
+      },
+      afterMetadata: {
+        displayName: right.displayName,
+        executor: right.executor,
+        sourceLanguage: right.sourceLanguage,
+        targetLanguage: right.targetLanguage,
+        costHint: right.costHint,
+        source: structuredClone(right.source),
+        contextPolicy: right.contextPolicy,
+        requiredSkillIds: structuredClone(right.requiredSkillIds ?? []),
+        requiredEvidence: structuredClone(right.requiredEvidence ?? []),
+        excludedResponsibilities: structuredClone(right.excludedResponsibilities ?? []),
+        parameters: structuredClone(right.parameters ?? {}),
+        evidencePolicy: structuredClone(right.evidencePolicy),
+      },
+      stages,
+    };
+    return Promise.resolve(diff);
+  }
+  return invoke<TranslationPromptPackRevisionDiff>("diff_translation_prompt_pack_revisions", { before, after });
 }
 
 export function previewBookPipelineRoute(source: BookPipelineSource, mode: string, config?: BookPipelinePreviewConfig | null) {
@@ -1065,11 +1145,13 @@ export function queueBookPipelineJob(
     job.translationProfileId = translationIntent.profileId;
     job.translationConfigId = translationIntent.configId;
     job.translationSkillIds = translationIntent.skillIds;
+    job.promptPackReference = translationIntent.promptPackReference;
     job.secondPassEnabled = translationIntent.secondPassEnabled;
     job.textCleanup = translationIntent.textCleanup;
     job.digestMode = translationIntent.digestMode;
     job.outputFormats = translationIntent.outputFormats;
     for (const child of job.children) {
+      child.promptPackReference = translationIntent.promptPackReference;
       const digest = child.stages.find((stage) => stage.stageId === "build_digest");
       if (digest && child.status !== "skipped") digest.status = translationIntent.digestMode ? "pending" : "skipped";
     }
@@ -1080,28 +1162,92 @@ export function queueBookPipelineJob(
   return invoke<BookPipelineJob>("queue_book_pipeline_job", { source, mode, translationIntent, config });
 }
 
-export function saveBookPipelineCustomInstructions(
+export function selectBookTranslationPromptPack(
   jobId: string,
   childId: string | null,
-  customInstructions: BookPipelineCustomInstructions,
+  promptPackReference: TranslationPromptPackReference,
 ) {
   if (!isTauriRuntime()) {
     const job = previewBookPipelineJobs.find((item) => item.id === jobId);
     if (!job) return Promise.reject(new Error("Preview job not found."));
     const child = childId ? job.children.find((item) => item.id === childId) : job.children[0];
     if (!child) return Promise.reject(new Error("Preview child job not found."));
-    const translation = customInstructions.translation?.trim() ? customInstructions.translation : null;
-    const reflection = customInstructions.reflection?.trim() ? customInstructions.reflection : null;
-    child.customInstructions = translation || reflection ? { translation, reflection } : null;
+    const revision = previewPromptPackRevision(promptPackReference);
+    const expectedExecutor = job.translationMode === "expert" ? "expert-agent" : "programmatic";
+    if (!revision || revision.executor !== expectedExecutor) return Promise.reject(new Error("Prompt pack executor mismatch."));
+    child.promptPackReference = structuredClone(promptPackReference);
+    child.promptPackSelectionSource = "book-override";
+    if (job.children.length === 1) {
+      job.promptPackReference = structuredClone(promptPackReference);
+      job.promptPackSelectionSource = "book-override";
+    }
+    job.approvalReferences = job.approvalReferences.filter((approval) => approval.childJobId !== child.id);
     job.updatedAt = bookPipelineNow();
     previewBookPipelineRevision += 1;
     return Promise.resolve<BookPipelineJob>({ ...job });
   }
-  return invoke<BookPipelineJob>("save_book_pipeline_custom_instructions", {
+  return invoke<BookPipelineJob>("select_book_translation_prompt_pack", {
     jobId,
     childId,
-    customInstructions,
+    promptPackReference,
   });
+}
+
+export function getBookPipelineStructureCorrectionDraft(
+  jobId: string,
+  childId: string | null,
+) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("Structure correction is available only in the desktop app."));
+  }
+  return invoke<BookPipelineStructureCorrectionDraft>(
+    "get_book_pipeline_structure_correction_draft",
+    { jobId, childId },
+  );
+}
+
+export function saveBookPipelineStructureCorrection(
+  jobId: string,
+  childId: string | null,
+  correction: BookPipelineStructureCorrectionInput,
+) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("Structure correction is available only in the desktop app."));
+  }
+  return invoke<BookPipelineJob>("save_book_pipeline_structure_correction", {
+    jobId,
+    childId,
+    correction,
+  });
+}
+
+export function previewBookTranslationPrompt(jobId: string, childId: string | null) {
+  if (!isTauriRuntime()) {
+    const job = previewBookPipelineJobs.find((item) => item.id === jobId);
+    const child = childId ? job?.children.find((item) => item.id === childId) : job?.children[0];
+    if (!job || !child) return Promise.reject(new Error("Preview job not found."));
+    const revision = previewPromptPackRevision(child.promptPackReference);
+    if (!revision) return Promise.reject(new Error("Prompt pack revision not found."));
+    const parameterBlock = Object.entries(revision.parameters ?? {})
+      .map(([key, value]) => `${key}: ${value}`)
+      .join("\n");
+    return Promise.resolve({
+      promptPackReference: child.promptPackReference,
+      stages: revision.stages.map((stage) => ({
+        stageId: stage.stageId,
+        label: stage.label,
+        actualPrompt: `${stage.template}${parameterBlock ? `\n\n[开放方案参数]\n${parameterBlock}` : ""}\n\n[执行器保护约束]\n结构、术语、占位符与私人文本边界由 BiblioSmith 执行器拥有。`,
+        injections: ["template", "current-source", "neighbor-context:none-for-first-segment", "glossary", "executor-safety"],
+      })),
+      contextPolicy: revision.contextPolicy,
+      requiredSkillIds: revision.requiredSkillIds,
+      skillDependencyVersions: previewStringRecord(revision.source.skillVersions, "source.skillVersions"),
+      requiredEvidence: revision.requiredEvidence,
+      excludedResponsibilities: revision.excludedResponsibilities,
+      parameters: revision.parameters,
+    });
+  }
+  return invoke<TranslationPromptPreview>("preview_book_translation_prompt", { jobId, childId });
 }
 
 export function runBookPipelineJob(jobId: string) {
@@ -1195,9 +1341,21 @@ export function retryBookPipelineJob(jobId: string) {
   return invoke<BookPipelineJob>("retry_book_pipeline_job", { jobId });
 }
 
-export function deleteBookPipelineJob(jobId: string, childId?: string | null) {
+export function removeBooksFromShelf(selections: BookPipelineShelfSelection[]) {
   if (!isTauriRuntime()) {
-    previewBookPipelineJobs = previewBookPipelineJobs.filter((job) => job.id !== jobId);
+    const grouped = new Map<string, Set<string | null>>();
+    for (const selection of selections) {
+      const children = grouped.get(selection.jobId) ?? new Set<string | null>();
+      children.add(selection.childId ?? null);
+      grouped.set(selection.jobId, children);
+    }
+    previewBookPipelineJobs = previewBookPipelineJobs.flatMap((job) => {
+      const selectedChildren = grouped.get(job.id);
+      if (!selectedChildren) return [job];
+      if (selectedChildren.has(null)) return [];
+      const children = job.children.filter((child) => !selectedChildren.has(child.id));
+      return children.length === 0 ? [] : [{ ...job, children }];
+    });
     previewBookPipelineRevision += 1;
     return Promise.resolve<BookPipelineState>({
       schemaVersion: BOOK_PIPELINE_STATE_SCHEMA_VERSION,
@@ -1205,7 +1363,31 @@ export function deleteBookPipelineJob(jobId: string, childId?: string | null) {
       jobs: previewBookPipelineJobs,
     });
   }
-  return invoke<BookPipelineState>("delete_book_pipeline_job", {
+  return invoke<BookPipelineState>("remove_books_from_shelf", {
+    selections,
+    explicitApproval: true,
+  });
+}
+
+export function inspectBookPipelineProjectMigration(jobId: string, childId?: string | null) {
+  if (!isTauriRuntime()) {
+    return Promise.resolve<BookPipelineProjectMigration>({
+      required: false,
+      sourceRoot: "",
+      destinationRoot: "",
+    });
+  }
+  return invoke<BookPipelineProjectMigration>("inspect_book_pipeline_project_migration", {
+    jobId,
+    childId: childId ?? null,
+  });
+}
+
+export function migrateBookPipelineProject(jobId: string, childId?: string | null) {
+  if (!isTauriRuntime()) {
+    return getBookPipelineState();
+  }
+  return invoke<BookPipelineState>("migrate_book_pipeline_project", {
     jobId,
     childId: childId ?? null,
     explicitApproval: true,
@@ -1249,7 +1431,7 @@ export function approveBookPipelineGate(jobId: string, childId: string, stageId:
     if (stage.status !== "ready") return Promise.reject(new Error("Preview approval gate is not ready."));
     stage.status = "completed";
     stage.attempt += 1;
-    stage.approvalId = `preview-approval-${Date.now()}`;
+    stage.approvalId = `preview-approval-${crypto.randomUUID()}`;
     stage.finishedAt = bookPipelineNow();
     const next = child.stages.find((item) => item.status !== "completed" && item.status !== "skipped");
     if (next?.status === "pending") next.status = "ready";
@@ -1460,18 +1642,6 @@ function listenDownloadProgress(
     void recordFrontendActivity("warning", message).catch(() => undefined);
     return () => undefined;
   });
-}
-
-export function listenBiblioSmithProgress(
-  callback: (payload: DownloadProgress) => void,
-) {
-  return listenDownloadProgress("bibliosmith-project-progress", callback);
-}
-
-export function listenNodeModulesProgress(
-  callback: (payload: DownloadProgress) => void,
-) {
-  return listenDownloadProgress("node-modules-install-progress", callback);
 }
 
 export function listenRuntimeProgress(

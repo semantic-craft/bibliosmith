@@ -45,20 +45,22 @@ class TargetLanguageProfile:
         source_text: str,
         task_manifest: Mapping[str, object],
         text_cleanup: bool = False,
-        custom_instruction: str | None = None,
+        prompt_template: str | None = None,
     ) -> str:
         instruction = self.system_instruction
+        if prompt_template is not None:
+            instruction = (
+                f"{prompt_template}\n\n# ENGINE EXECUTION CONSTRAINTS\n"
+                f"{self.system_instruction}"
+            )
         if self.glossary_hook is not None:
             glossary_instruction = self.glossary_hook(source_text, task_manifest)
             if glossary_instruction:
                 instruction = f"{instruction}\n\n{glossary_instruction}"
         if text_cleanup:
             instruction = f"{instruction}\n\n{TEXT_CLEANUP_SECTION}"
-        if custom_instruction:
-            instruction = (
-                f"{instruction}\n\n# USER STYLE DIRECTIVES\n{custom_instruction}"
-                f"\n\n{MANDATORY_STRUCTURE_PROTECTION}"
-            )
+        if prompt_template is not None:
+            instruction = f"{instruction}\n\n{MANDATORY_STRUCTURE_PROTECTION}"
         return instruction
 
 

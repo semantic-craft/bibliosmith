@@ -1,46 +1,16 @@
-export type LauncherState = {
-  repoRoot: string;
-  repoReady: boolean;
-  repoStatus: string;
-  branch: string;
-  localCommit: string;
-  localCommitShort: string;
-  remoteUrl: string;
-  dirty: boolean;
+export type WorkspaceState = {
+  workspaceRoot: string;
+  recommendedWorkspaceRoot: string;
+  workspaceReady: boolean;
+  workspaceStatus: "missing" | "empty" | "ready" | "occupied";
   proxyConfigured: boolean;
   platform: string;
-};
-
-export type CommitInfo = {
-  hash: string;
-  date: string;
-  title: string;
-  summary: string;
-  fullMessage: string;
-};
-
-export type BiblioSmithUpdateInfo = {
-  repoRoot: string;
-  currentCommit: string;
-  remoteRef: string;
-  behindCount: number;
-  aheadCount: number;
-  hasUpdate: boolean;
-  commits: CommitInfo[];
 };
 
 export type ActionResult = {
   ok: boolean;
   message: string;
-  repoRoot?: string | null;
-  requiresDownload?: boolean | null;
-};
-
-export type ProjectDocument = {
-  kind: string;
-  path: string;
-  title: string;
-  content: string;
+  workspaceRoot?: string | null;
 };
 
 export type DownloadProgress = {
@@ -80,15 +50,6 @@ export type ProxyAutoDetectResult = {
   proxy?: NetworkProxySettings | null;
   test?: ProxyTestResult | null;
   message: string;
-};
-
-export type NodeModulesStatus = {
-  ready: boolean;
-  running: boolean;
-  autoInstall: boolean;
-  repoReady: boolean;
-  booksDir: string;
-  nodeModulesDir: string;
 };
 
 export type RuntimeToolStatus = {
@@ -297,7 +258,8 @@ export type BookPipelineChildJob = {
   attempts: number;
   lastError?: string | null;
   localProjectRoot?: string | null;
-  customInstructions?: BookPipelineCustomInstructions | null;
+  promptPackReference: TranslationPromptPackReference;
+  promptPackSelectionSource: "default" | "book-override" | string;
   readerEvidence?: BookPipelineReaderEvidence[];
   removedAt?: string | null;
 };
@@ -393,9 +355,127 @@ export type BookPipelineApprovalReference = {
 
 export type BookPipelineOutputFormat = "md" | "html" | "epub" | "bilingual";
 
-export type BookPipelineCustomInstructions = {
-  translation?: string | null;
-  reflection?: string | null;
+export type TranslationPromptPackReference = {
+  packId: string;
+  revisionId: string;
+  contentSha256: string;
+};
+
+export type TranslationPromptStageTemplate = {
+  stageId: string;
+  label: string;
+  template: string;
+};
+
+export type TranslationPromptPackRevision = {
+  schema: string;
+  packId: string;
+  revisionId: string;
+  contentSha256: string;
+  displayName: string;
+  executor: "programmatic" | "expert-agent";
+  sourceLanguage: string;
+  targetLanguage: string;
+  costHint: string;
+  source: Record<string, unknown>;
+  contextPolicy?: string;
+  requiredSkillIds?: string[];
+  requiredEvidence?: string[];
+  excludedResponsibilities?: string[];
+  parameters?: Record<string, string>;
+  evidencePolicy?: {
+    independentReview?: boolean;
+    requireZeroOpenIssues?: boolean;
+    requireDefectFamilyClosure?: boolean;
+  };
+  stages: TranslationPromptStageTemplate[];
+};
+
+export type TranslationPromptPackDefinition = {
+  packId: string;
+  kind: "built-in" | "local" | string;
+  summary: string;
+  revisions: TranslationPromptPackRevision[];
+  deletedAt?: string;
+};
+
+export type TranslationPromptPackCatalog = {
+  schema: string;
+  packs: TranslationPromptPackDefinition[];
+};
+
+export type TranslationPromptPackRevisionDraft = {
+  packId: string;
+  displayName: string;
+  parameters: Record<string, string>;
+  stages: TranslationPromptStageTemplate[];
+};
+
+export type TranslationPromptPackRevisionMetadata = {
+  displayName: string;
+  executor: "programmatic" | "expert-agent";
+  sourceLanguage: string;
+  targetLanguage: string;
+  costHint: string;
+  source: Record<string, unknown>;
+  contextPolicy?: string;
+  requiredSkillIds: string[];
+  requiredEvidence: string[];
+  excludedResponsibilities: string[];
+  parameters: Record<string, string>;
+  evidencePolicy?: {
+    independentReview?: boolean;
+    requireZeroOpenIssues?: boolean;
+    requireDefectFamilyClosure?: boolean;
+  };
+};
+
+export type TranslationPromptPackRevisionDiff = {
+  before: TranslationPromptPackReference;
+  after: TranslationPromptPackReference;
+  beforeMetadata: TranslationPromptPackRevisionMetadata;
+  afterMetadata: TranslationPromptPackRevisionMetadata;
+  stages: Array<{
+    stageId: string;
+    beforeTemplate?: string;
+    afterTemplate?: string;
+  }>;
+};
+
+export type TranslationPromptPreview = {
+  schema?: string;
+  promptPackReference: TranslationPromptPackReference;
+  stages: Array<{
+    stageId?: string;
+    label?: string;
+    template?: string;
+    actualPrompt: string | {
+      systemInstruction: string;
+      currentSource: string;
+    };
+    injections?: string[];
+  }>;
+  contextPolicy?: string;
+  requiredSkillIds?: string[];
+  skillDependencyVersions?: Record<string, string>;
+  requiredEvidence?: string[];
+  excludedResponsibilities?: string[];
+  parameters?: Record<string, string>;
+};
+
+export type BookPipelineStructureCorrectionDraft = {
+  schema: "publication-structure-correction-draft-v1";
+  sourceMarkdownSha256: string;
+  publicationMapSha256: string;
+  anomalies: string[];
+  sections: unknown[];
+};
+
+export type BookPipelineStructureCorrectionInput = Omit<
+  BookPipelineStructureCorrectionDraft,
+  "anomalies"
+> & {
+  reason: string;
 };
 
 export type BookPipelineTranslationIntent = {
@@ -403,6 +483,7 @@ export type BookPipelineTranslationIntent = {
   profileId: string;
   configId: string;
   skillIds: string[];
+  promptPackReference: TranslationPromptPackReference;
   secondPassEnabled: boolean;
   textCleanup: boolean;
   digestMode: boolean;
@@ -418,6 +499,8 @@ export type BookPipelineJob = {
   translationProfileId?: string;
   translationConfigId?: string;
   translationSkillIds?: string[];
+  promptPackReference: TranslationPromptPackReference;
+  promptPackSelectionSource: "default" | "book-override" | string;
   secondPassEnabled?: boolean;
   textCleanup?: boolean;
   digestMode?: boolean;
@@ -450,6 +533,17 @@ export type BookPipelineState = {
   schemaVersion: string;
   revision: number;
   jobs: BookPipelineJob[];
+};
+
+export type BookPipelineShelfSelection = {
+  jobId: string;
+  childId?: string | null;
+};
+
+export type BookPipelineProjectMigration = {
+  required: boolean;
+  sourceRoot: string;
+  destinationRoot: string;
 };
 
 export type BookPipelineZoteroDiscoveryResult = {

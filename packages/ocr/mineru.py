@@ -25,9 +25,17 @@ from urllib.parse import urlparse
 import requests
 
 _PROGRESS_SCRIPTS = Path(__file__).resolve().parent / "scripts"
+_PACKAGE_ROOT = Path(__file__).resolve().parent
+if str(_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PACKAGE_ROOT))
 if str(_PROGRESS_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_PROGRESS_SCRIPTS))
 from progress import OperationProgress
+from publication_evidence import (
+    normalize_extracted_markdown_notes,
+    persist_source_document,
+    write_markdown_evidence,
+)
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -101,6 +109,8 @@ def load_dotenv(path: Path) -> None:
 
 
 def load_root_dotenv(start: Path = APP_ROOT) -> None:
+    if os.environ.get("BIBLIOSMITH_DISABLE_DOTENV") == "1":
+        return
     for candidate in (start.resolve(), *start.resolve().parents):
         if (candidate / "pyproject.toml").is_file() and (candidate / "packages").is_dir():
             load_dotenv(candidate / ".env")
@@ -798,10 +808,27 @@ def merge_downloaded_parts(
         source_dir = output_root / source_data_id
         merged_sections: list[str] = []
         manifest_parts: list[dict] = []
+        source_document_specs: list[tuple[Path, str, int, int, tuple[int, ...]]] = []
+        next_line = 1
         for part in parts:
             relative_parent = part.markdown_path.parent.relative_to(source_dir).as_posix()
             content = part.markdown_path.read_text(encoding="utf-8").strip()
-            merged_sections.append(rewrite_relative_references(content, relative_parent))
+            rewritten_content = normalize_extracted_markdown_notes(
+                rewrite_relative_references(content, relative_parent)
+            )
+            merged_sections.append(rewritten_content)
+            line_count = max(1, len(rewritten_content.splitlines()))
+            original_pages = tuple(part.item.selected_pages or ())
+            source_document_specs.append(
+                (
+                    part.markdown_path,
+                    part.markdown_path.relative_to(source_dir).as_posix(),
+                    next_line,
+                    next_line + line_count - 1,
+                    original_pages,
+                )
+            )
+            next_line += line_count + 1
             manifest_parts.append(
                 {
                     "part_index": part.item.part_index,
@@ -816,6 +843,29 @@ def merge_downloaded_parts(
         final_markdown = source_dir / "full.md"
         final_markdown.write_text(
             "\n\n".join(merged_sections).rstrip() + "\n", encoding="utf-8"
+        )
+        source_documents = [
+            persist_source_document(
+                final_markdown,
+                source_path,
+                relative_path,
+                start_line=start_line,
+                end_line=end_line,
+                pages=pages,
+                kind="mineru_part_markdown",
+            )
+            for source_path, relative_path, start_line, end_line, pages in source_document_specs
+        ]
+        write_markdown_evidence(
+            final_markdown,
+            source_format="mineru",
+            extraction_engine=model_version_for(source_items[0], args),
+            source_documents=source_documents,
+            title=Path(source_items[0].source_name or source_items[0].name).stem,
+            extraction_facts={
+                "partCount": len(parts),
+                "sourcePageCount": source_items[0].source_pages,
+            },
         )
         manifest = {
             "source": source_items[0].source,

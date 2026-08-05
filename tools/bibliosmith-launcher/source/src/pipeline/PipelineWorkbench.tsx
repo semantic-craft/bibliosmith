@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type {
-  BookPipelineCustomInstructions,
   BookPipelineRouteItem,
+  BookPipelineShelfSelection,
   BookPipelineSource,
   BookPipelineState,
   ModelSlotView,
+  TranslationPromptPackCatalog,
+  TranslationPromptPackReference,
+  TranslationPromptPreview,
 } from "../types";
 import "./pipeline.css";
 import type { PipelineCopy } from "./copy";
@@ -28,15 +31,14 @@ export type PipelineWorkbenchProps = {
   onChooseFolder: () => void;
   onSearchZotero: (query: string) => void;
   onRetry: (jobId: string) => void;
-  onDelete: (jobId: string, childId?: string | null) => void;
+  onRemoveBooks: (selections: BookPipelineShelfSelection[]) => Promise<boolean>;
+  onMigrateProject: (jobId: string, childId?: string | null) => Promise<boolean>;
   onAdvance: (jobId: string, childId: string, invalidateDownstream?: boolean) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
-  onSaveCustomInstructions: (
-    jobId: string,
-    childId: string,
-    customInstructions: BookPipelineCustomInstructions,
-  ) => void;
+  promptPackCatalog: TranslationPromptPackCatalog | null;
+  onSelectPromptPack: (jobId: string, childId: string, value: TranslationPromptPackReference) => void;
+  onPreviewPrompt: (jobId: string, childId: string) => Promise<TranslationPromptPreview>;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
   onSampleOcr: (jobId: string, childId: string, samplePages: number) => void;
@@ -49,6 +51,9 @@ export type PipelineWorkbenchProps = {
 export function PipelineWorkbench(props: PipelineWorkbenchProps) {
   const { copy, state, busy } = props;
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [managingShelf, setManagingShelf] = useState(false);
+  const [selectedShelfKeys, setSelectedShelfKeys] = useState<Set<string>>(new Set());
+  const [confirmingBatchRemove, setConfirmingBatchRemove] = useState(false);
   const [drawerPercent, setDrawerPercent] = useState(50);
   const splitViewRef = useRef<HTMLDivElement>(null);
   const resizeHandleRef = useRef<HTMLDivElement>(null);
@@ -65,6 +70,20 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
 
   const units = useMemo(() => flattenBookUnits(state.jobs), [state.jobs]);
   const selected = units.find((unit) => unit.key === selectedKey) ?? null;
+  const disabledShelfKeys = useMemo(
+    () => new Set(units.filter((unit) => unit.status === "running" || unit.job.status === "running" || unit.job.status === "handoff_running").map((unit) => unit.key)),
+    [units],
+  );
+  const removableKeys = useMemo(
+    () => units.map((unit) => unit.key).filter((key) => !disabledShelfKeys.has(key)),
+    [disabledShelfKeys, units],
+  );
+
+  const finishManagingShelf = () => {
+    setManagingShelf(false);
+    setSelectedShelfKeys(new Set());
+    setConfirmingBatchRemove(false);
+  };
 
   useEffect(() => {
     if (!selectedKey) return undefined;
@@ -114,7 +133,39 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
       {island("compact", Boolean(selected))}
       <section className="pl-island pl-shelf-island">
         <div className={selected ? "pl-shelf-title dimmed" : "pl-shelf-title"}>
-          {copy.shelfCount(units.length)}
+          <span>{copy.shelfCount(units.length)}</span>
+          <span className="pl-spacer" />
+          {managingShelf ? (
+            <>
+              <span>{copy.selectedBooks(selectedShelfKeys.size)}</span>
+              <button
+                className="pl-text-action"
+                type="button"
+                onClick={() => {
+                  setSelectedShelfKeys((current) =>
+                    removableKeys.length > 0 && current.size === removableKeys.length ? new Set() : new Set(removableKeys),
+                  );
+                  setConfirmingBatchRemove(false);
+                }}
+              >
+                {selectedShelfKeys.size === removableKeys.length ? copy.clearShelfSelection : copy.selectAllRemovable}
+              </button>
+              <button className="pl-text-action" type="button" onClick={finishManagingShelf}>
+                {copy.finishManagingShelf}
+              </button>
+            </>
+          ) : (
+            <button
+              className="pl-text-action"
+              type="button"
+              onClick={() => {
+                setSelectedKey(null);
+                setManagingShelf(true);
+              }}
+            >
+              {copy.manageShelf}
+            </button>
+          )}
         </div>
         <div
           ref={splitViewRef}
@@ -127,7 +178,49 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
             selectedKey={selected?.key ?? null}
             onSelect={setSelectedKey}
             dimmed={Boolean(selected)}
+            manageMode={managingShelf}
+            selectedKeys={selectedShelfKeys}
+            disabledKeys={disabledShelfKeys}
+            onToggle={(key) => {
+              setSelectedShelfKeys((current) => {
+                const next = new Set(current);
+                if (next.has(key)) next.delete(key);
+                else next.add(key);
+                return next;
+              });
+              setConfirmingBatchRemove(false);
+            }}
           />
+          {managingShelf && (
+            <div className="pl-shelf-manager">
+              <span>{confirmingBatchRemove ? copy.removeSelectedConfirmHint(selectedShelfKeys.size) : copy.removeSelectedHint}</span>
+              <span className="pl-spacer" />
+              {confirmingBatchRemove && (
+                <button className="pl-btn sm quiet" type="button" disabled={busy === "delete"} onClick={() => setConfirmingBatchRemove(false)}>
+                  {copy.deleteBookCancel}
+                </button>
+              )}
+              <button
+                className="pl-btn sm danger-ghost"
+                type="button"
+                disabled={selectedShelfKeys.size === 0 || busy === "delete"}
+                onClick={async () => {
+                  if (!confirmingBatchRemove) {
+                    setConfirmingBatchRemove(true);
+                    return;
+                  }
+                  const selections = units
+                    .filter((unit) => selectedShelfKeys.has(unit.key))
+                    .map((unit) => ({ jobId: unit.job.id, childId: unit.child?.id ?? null }));
+                  if (await props.onRemoveBooks(selections)) finishManagingShelf();
+                }}
+              >
+                {confirmingBatchRemove
+                  ? copy.confirmRemoveSelected(selectedShelfKeys.size)
+                  : copy.removeSelected(selectedShelfKeys.size)}
+              </button>
+            </div>
+          )}
           {selected && (
             <div
               ref={resizeHandleRef}
@@ -178,11 +271,14 @@ export function PipelineWorkbench(props: PipelineWorkbenchProps) {
               onSelect={setSelectedKey}
               onClose={() => setSelectedKey(null)}
               onRetry={props.onRetry}
-              onDelete={props.onDelete}
+              onRemoveBooks={props.onRemoveBooks}
+              onMigrateProject={props.onMigrateProject}
               onAdvance={props.onAdvance}
               onSampleTranslation={props.onSampleTranslation}
               onApplySampleProvider={props.onApplySampleProvider}
-              onSaveCustomInstructions={props.onSaveCustomInstructions}
+              promptPackCatalog={props.promptPackCatalog}
+              onSelectPromptPack={props.onSelectPromptPack}
+              onPreviewPrompt={props.onPreviewPrompt}
               onApproveGate={props.onApproveGate}
               onRouteOverride={props.onRouteOverride}
               onSampleOcr={props.onSampleOcr}

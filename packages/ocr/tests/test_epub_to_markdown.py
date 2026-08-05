@@ -8,6 +8,8 @@ shipped book takes.
 
 from __future__ import annotations
 
+import json
+import hashlib
 import sys
 import tempfile
 from pathlib import Path
@@ -44,6 +46,9 @@ def package_document(manifest: str, spine: str) -> str:
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:title>Fixture Book</dc:title>
+    <dc:creator>Fixture Author</dc:creator>
+    <dc:publisher>Fixture Press</dc:publisher>
+    <dc:date>2026</dc:date>
     <dc:identifier id="uid">urn:uuid:fixture</dc:identifier>
     <dc:language>en</dc:language>
   </metadata>
@@ -171,6 +176,260 @@ def test_chapter_titles_fall_back_to_the_table_of_contents() -> None:
         assert markdown.startswith("# Labelled By Nav")
 
 
+def test_nested_nav_is_exported_as_structure_evidence_even_with_shared_spine_document() -> None:
+    directory = tempfile.TemporaryDirectory()
+    with directory:
+        root = Path(directory.name)
+        epub_path = root / "Fixture Book.epub"
+        nav = xhtml(
+            '<nav epub:type="toc"><ol>'
+            '<li><a href="one.xhtml">Part I</a><ol>'
+            '<li><a href="one.xhtml#chapter">Chapter 1</a><ol>'
+            '<li><a href="one.xhtml#section-a">Section A</a></li>'
+            '<li><a href="one.xhtml#section-b">Section B</a></li>'
+            '</ol></li></ol></li></ol></nav>'
+            '<nav epub:type="landmarks"><ol><li><a epub:type="bodymatter" '
+            'href="one.xhtml">Start</a></li></ol></nav>'
+        )
+        with ZipFile(epub_path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("mimetype", "application/epub+zip")
+            archive.writestr("META-INF/container.xml", CONTAINER)
+            archive.writestr(
+                "OEBPS/content.opf",
+                package_document(
+                    '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml"'
+                    ' properties="nav"/>'
+                    '<item id="d0" href="one.xhtml" media-type="application/xhtml+xml"/>',
+                    '<itemref idref="d0"/>',
+                ),
+            )
+            archive.writestr("OEBPS/nav.xhtml", nav)
+            archive.writestr(
+                "OEBPS/one.xhtml",
+                xhtml(
+                    '<h1>Part I</h1><h2 id="chapter">Chapter 1</h2>'
+                    '<h3 id="section-a">Section A</h3><p>A.</p>'
+                    '<h3 id="section-b">Section B</h3><p>B.</p>'
+                ),
+            )
+
+        result = extract_book(epub_path, root / "out")
+        structure = json.loads(result.publication_evidence_path.read_text(encoding="utf-8"))
+
+        assert structure["schema"] == "publication-extraction-evidence-v2"
+        assert structure["creator"] == "Fixture Author"
+        assert structure["publisher"] == "Fixture Press"
+        assert structure["date"] == "2026"
+        assert [section["title"] for section in structure["sections"]] == [
+            "Part I",
+            "Chapter 1",
+            "Section A",
+            "Section B",
+        ]
+        assert [section["parentId"] for section in structure["sections"]] == [
+            None,
+            "epub_section_001",
+            "epub_section_002",
+            "epub_section_002",
+        ]
+        assert structure["sections"][1]["sourceHref"].endswith("one.xhtml#chapter")
+        assert structure["sections"][0]["role"] == "bodymatter"
+        lines = result.markdown_path.read_text(encoding="utf-8").splitlines()
+        for section in structure["sections"]:
+            assert 1 <= section["sourceStartLine"] <= section["sourceEndLine"] <= len(lines)
+            section_lines = lines[section["sourceStartLine"] - 1 : section["sourceEndLine"]]
+            assert any(f"bibliosmith-nav:{section['id']}:" in line for line in section_lines)
+
+
+def test_epub3_nav_is_authoritative_when_a_legacy_ncx_is_also_packaged() -> None:
+    directory = tempfile.TemporaryDirectory()
+    with directory:
+        root = Path(directory.name)
+        epub_path = root / "Dual Navigation.epub"
+        nav = xhtml(
+            '<nav epub:type="toc"><ol><li><a href="one.xhtml">Chapter</a>'
+            '</li></ol></nav>'
+        )
+        ncx = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap><navPoint id="legacy"><navLabel><text>Legacy Chapter</text></navLabel>
+  <content src="one.xhtml"/></navPoint></navMap>
+</ncx>
+"""
+        package = package_document(
+            '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+            '<item id="chapter" href="one.xhtml" media-type="application/xhtml+xml"/>',
+            '<itemref idref="chapter"/>',
+        ).replace("<spine>", '<spine toc="ncx">')
+        with ZipFile(epub_path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("mimetype", "application/epub+zip")
+            archive.writestr("META-INF/container.xml", CONTAINER)
+            archive.writestr("OEBPS/content.opf", package)
+            archive.writestr("OEBPS/nav.xhtml", nav)
+            archive.writestr("OEBPS/toc.ncx", ncx)
+            archive.writestr("OEBPS/one.xhtml", xhtml("<h1>Chapter</h1><p>Body.</p>"))
+
+        result = extract_book(epub_path, root / "out")
+        evidence = json.loads(result.publication_evidence_path.read_text(encoding="utf-8"))
+        navigation_documents = [
+            document
+            for document in evidence["sourceDocuments"]
+            if document["kind"] in {"epub_navigation", "epub_ncx"}
+        ]
+
+        assert {document["kind"] for document in navigation_documents} == {
+            "epub_navigation",
+            "epub_ncx",
+        }
+        assert all(
+            (document["startLine"], document["endLine"]) == (0, 0)
+            for document in navigation_documents
+        )
+        assert all(document["anomalies"] for document in navigation_documents)
+        nav_document = next(
+            document["path"]
+            for document in navigation_documents
+            if document["kind"] == "epub_navigation"
+        )
+        ncx_document = next(
+            document["path"]
+            for document in navigation_documents
+            if document["kind"] == "epub_ncx"
+        )
+        assert nav_document in evidence["sections"][0]["sourceFiles"]
+        assert ncx_document not in evidence["sections"][0]["sourceFiles"]
+        assert evidence["sections"][0]["navigationSourceHref"].endswith("nav.xhtml")
+
+
+def test_nested_nav_ranges_and_source_files_contain_children_across_spine_documents() -> None:
+    directory = tempfile.TemporaryDirectory()
+    with directory:
+        root = Path(directory.name)
+        epub_path = root / "Fixture Book.epub"
+        nav = xhtml(
+            '<nav epub:type="toc"><ol>'
+            '<li><a href="part.xhtml">Part I</a><ol>'
+            '<li><a href="chapter.xhtml#chapter">Chapter 1</a><ol>'
+            '<li><a href="chapter.xhtml#section">Section A</a></li>'
+            '</ol></li></ol></li></ol></nav>'
+        )
+        with ZipFile(epub_path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("mimetype", "application/epub+zip")
+            archive.writestr("META-INF/container.xml", CONTAINER)
+            archive.writestr(
+                "OEBPS/content.opf",
+                package_document(
+                    '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+                    '<item id="part" href="part.xhtml" media-type="application/xhtml+xml"/>'
+                    '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>',
+                    '<itemref idref="part"/><itemref idref="chapter"/>',
+                ),
+            )
+            archive.writestr("OEBPS/nav.xhtml", nav)
+            archive.writestr(
+                "OEBPS/part.xhtml",
+                xhtml("<h1>Part I</h1><p>Part introduction.</p>"),
+            )
+            archive.writestr(
+                "OEBPS/chapter.xhtml",
+                xhtml(
+                    '<h1 id="chapter">Chapter 1</h1>'
+                    '<h2 id="section">Section A</h2><p>Section body.</p>'
+                ),
+            )
+
+        result = extract_book(epub_path, root / "out")
+        evidence = json.loads(result.publication_evidence_path.read_text(encoding="utf-8"))
+        lines = result.markdown_path.read_text(encoding="utf-8").splitlines()
+        part, chapter, section = evidence["sections"]
+
+        assert part["sourceStartLine"] < chapter["sourceStartLine"]
+        assert part["sourceEndLine"] >= chapter["sourceEndLine"]
+        assert chapter["sourceEndLine"] >= section["sourceEndLine"]
+        for node in (part, chapter, section):
+            selected = lines[node["sourceStartLine"] - 1 : node["sourceEndLine"]]
+            assert any(f"bibliosmith-nav:{node['id']}:" in line for line in selected)
+
+        xhtml_documents = [
+            document
+            for document in evidence["sourceDocuments"]
+            if document["kind"] == "epub_xhtml"
+        ]
+        assert len(xhtml_documents) == 2
+        part_source = next(
+            document["path"]
+            for document in xhtml_documents
+            if b"Part I" in (result.markdown_path.parent / document["path"]).read_bytes()
+        )
+        chapter_source = next(
+            document["path"]
+            for document in xhtml_documents
+            if b"Chapter 1" in (result.markdown_path.parent / document["path"]).read_bytes()
+        )
+        assert {part_source, chapter_source}.issubset(set(part["sourceFiles"]))
+        assert chapter_source in chapter["sourceFiles"]
+        assert part_source not in chapter["sourceFiles"]
+
+
+def test_nav_ranges_use_targets_not_titles_for_non_heading_and_duplicate_anchors() -> None:
+    directory = tempfile.TemporaryDirectory()
+    with directory:
+        root = Path(directory.name)
+        epub_path = root / "Fixture Book.epub"
+        nav = xhtml(
+            '<nav epub:type="toc"><ol>'
+            '<li><a href="one.xhtml#first">Repeated</a></li>'
+            '<li><a href="one.xhtml#topic">Topic label</a></li>'
+            '<li><a href="one.xhtml#second">Repeated</a></li>'
+            '</ol></nav>'
+        )
+        with ZipFile(epub_path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("mimetype", "application/epub+zip")
+            archive.writestr("META-INF/container.xml", CONTAINER)
+            archive.writestr(
+                "OEBPS/content.opf",
+                package_document(
+                    '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+                    '<item id="d0" href="one.xhtml" media-type="application/xhtml+xml"/>',
+                    '<itemref idref="d0"/>',
+                ),
+            )
+            archive.writestr("OEBPS/nav.xhtml", nav)
+            archive.writestr(
+                "OEBPS/one.xhtml",
+                xhtml(
+                    '<h1 id="first">Repeated</h1><p>First.</p>'
+                    '<p id="topic">A non-heading target.</p>'
+                    '<h2 id="second">Repeated</h2><p>Second.</p>'
+                ),
+            )
+
+        result = extract_book(epub_path, root / "out")
+        evidence = json.loads(result.publication_evidence_path.read_text(encoding="utf-8"))
+        starts = [section["sourceStartLine"] for section in evidence["sections"]]
+        assert starts == sorted(starts)
+        assert len(set(starts)) == 3
+        assert all(section["sourceEndLine"] >= section["sourceStartLine"] for section in evidence["sections"])
+
+        source_document = evidence["sourceDocuments"][0]
+        persisted = result.markdown_path.parent / source_document["path"]
+        assert persisted.is_file()
+        assert hashlib.sha256(persisted.read_bytes()).hexdigest() == source_document["sha256"]
+        navigation_documents = [
+            document
+            for document in evidence["sourceDocuments"]
+            if document["kind"] == "epub_navigation"
+        ]
+        assert len(navigation_documents) == 1
+        navigation_path = result.markdown_path.parent / navigation_documents[0]["path"]
+        assert navigation_path.is_file()
+        assert all(
+            navigation_documents[0]["path"] in section["sourceFiles"]
+            for section in evidence["sections"]
+        )
+
+
 def test_images_land_in_the_sidecar_and_are_referenced_relatively() -> None:
     result, markdown, output_dir, directory = extract(
         {"one.xhtml": xhtml('<h1>Figures</h1><p><img src="images/figure.png" alt="A figure"/></p>')},
@@ -181,6 +440,33 @@ def test_images_land_in_the_sidecar_and_are_referenced_relatively() -> None:
         sidecar = output_dir / "Fixture_Book_assets"
         assert (sidecar / "figure.png").read_bytes() == PNG
         assert "![A figure](Fixture_Book_assets/figure.png)" in markdown
+
+
+def test_declared_cover_is_exported_as_a_first_class_source_asset() -> None:
+    directory = tempfile.TemporaryDirectory()
+    with directory:
+        root = Path(directory.name)
+        epub_path = root / "Fixture Book.epub"
+        with ZipFile(epub_path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("mimetype", "application/epub+zip")
+            archive.writestr("META-INF/container.xml", CONTAINER)
+            archive.writestr(
+                "OEBPS/content.opf",
+                package_document(
+                    '<item id="d0" href="one.xhtml" media-type="application/xhtml+xml"/>'
+                    '<item id="cover" href="images/cover.png" media-type="image/png"'
+                    ' properties="cover-image"/>',
+                    '<itemref idref="d0"/>',
+                ),
+            )
+            archive.writestr("OEBPS/one.xhtml", xhtml("<h1>Opening</h1><p>Body.</p>"))
+            archive.writestr("OEBPS/images/cover.png", PNG)
+
+        result = extract_book(epub_path, root / "out")
+        evidence = json.loads(result.publication_evidence_path.read_text(encoding="utf-8"))
+
+        assert evidence["coverPath"] == "Fixture_Book_assets/cover.png"
+        assert (root / "out/Fixture_Book_assets/cover.png").read_bytes() == PNG
 
 
 def test_output_names_have_no_spaces_so_image_urls_stay_protected() -> None:
@@ -213,10 +499,170 @@ def test_footnotes_are_pulled_into_the_chapter_that_cites_them() -> None:
     with directory:
         assert "Claim[^fn-1-1]." in markdown
         assert "[^fn-1-1]: The note body." in markdown
+        evidence = json.loads(
+            result.publication_evidence_path.read_text(encoding="utf-8")
+        )
+        assert evidence["notes"][0]["id"] == "note_001"
+        assert evidence["notes"][0]["sourceLabel"] == "fn-1-1"
+        assert evidence["notes"][0]["referenceIds"] == [
+            "noteref_note_001_001"
+        ]
+        note_files = evidence["notes"][0]["sourceFiles"]
+        assert len(note_files) == 2
+        assert evidence["notes"][0]["sourceAnchor"].endswith(
+            "notes.xhtml#fn1"
+        )
+        retained_xhtml = [
+            document
+            for document in evidence["sourceDocuments"]
+            if document["kind"] == "epub_xhtml"
+        ]
+        assert len(retained_xhtml) == 2
+        assert all(
+            (result.markdown_path.parent / document["path"]).is_file()
+            for document in retained_xhtml
+        )
+        assert evidence["notes"][0]["anomalies"] == []
         # The endnotes document had nothing else in it, so it does not survive as
         # a chapter and the body is not printed twice.
         assert markdown.count("The note body.") == 1
         assert result.chapters == 1
+
+
+def test_explicit_footnote_bodies_are_not_silently_dropped_by_length() -> None:
+    body = "Long legal note " + ("substantive evidence " * 140)
+    result, markdown, _, directory = extract(
+        {
+            "one.xhtml": xhtml(
+                '<h1>Citing</h1><p>Claim<a epub:type="noteref" '
+                'href="notes.xhtml#fn-long">1</a>.</p>'
+            ),
+            "notes.xhtml": xhtml(
+                '<aside epub:type="footnote" id="fn-long"><p>'
+                f"{body}</p></aside>"
+            ),
+        }
+    )
+    with directory:
+        assert len(body) > 2000
+        assert "Claim[^fn-1-1]." in markdown
+        assert body.strip() in markdown
+        evidence = json.loads(
+            result.publication_evidence_path.read_text(encoding="utf-8")
+        )
+        assert len(evidence["notes"]) == 1
+        assert evidence["notes"][0]["sourceAnchor"].endswith(
+            "notes.xhtml#fn-long"
+        )
+
+
+def test_endnote_semantics_and_navigation_survive_when_the_note_page_is_consumed() -> None:
+    directory = tempfile.TemporaryDirectory()
+    with directory:
+        root = Path(directory.name)
+        epub_path = root / "Endnote Navigation.epub"
+        nav = xhtml(
+            '<nav epub:type="toc"><ol>'
+            '<li><a href="one.xhtml">Chapter</a></li>'
+            '<li><a href="notes.xhtml">Endnotes</a></li>'
+            '</ol></nav>'
+        )
+        with ZipFile(epub_path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("mimetype", "application/epub+zip")
+            archive.writestr("META-INF/container.xml", CONTAINER)
+            archive.writestr(
+                "OEBPS/content.opf",
+                package_document(
+                    '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+                    '<item id="chapter" href="one.xhtml" media-type="application/xhtml+xml"/>'
+                    '<item id="notes" href="notes.xhtml" media-type="application/xhtml+xml"/>',
+                    '<itemref idref="chapter"/><itemref idref="notes"/>',
+                ),
+            )
+            archive.writestr("OEBPS/nav.xhtml", nav)
+            archive.writestr(
+                "OEBPS/one.xhtml",
+                xhtml(
+                    '<h1>Chapter</h1><p>Claim<a epub:type="noteref" '
+                    'href="notes.xhtml#n1">1</a>.</p>'
+                ),
+            )
+            archive.writestr(
+                "OEBPS/notes.xhtml",
+                xhtml('<aside epub:type="endnote" id="n1"><p>Endnote body.</p></aside>'),
+            )
+
+        result = extract_book(epub_path, root / "out")
+        markdown = result.markdown_path.read_text(encoding="utf-8")
+        evidence = json.loads(result.publication_evidence_path.read_text(encoding="utf-8"))
+
+        assert evidence["notes"][0]["kind"] == "endnote"
+        assert [section["title"] for section in evidence["sections"]] == [
+            "Chapter",
+            "Endnotes",
+        ]
+        assert "# Endnotes" in markdown
+        assert "bibliosmith-nav:epub_section_002:" in markdown
+        assert markdown.count("Endnote body.") == 1
+
+
+def test_a_declared_noteref_with_an_unrecoverable_target_fails_closed() -> None:
+    directory = tempfile.TemporaryDirectory()
+    with directory:
+        root = Path(directory.name)
+        epub_path = root / "Missing Note.epub"
+        build_epub(
+            epub_path,
+            {
+                "one.xhtml": xhtml(
+                    '<h1>Citing</h1><p>Claim<a epub:type="noteref" '
+                    'href="notes.xhtml#missing">1</a>.</p>'
+                ),
+                "notes.xhtml": xhtml("<h1>Notes</h1><p>No matching note.</p>"),
+            },
+        )
+
+        try:
+            extract_book(epub_path, root / "out")
+        except EpubExtractError as error:
+            assert "declared note reference target could not be recovered" in str(error)
+            assert "notes.xhtml#missing" in str(error)
+        else:  # pragma: no cover - extraction must not certify missing notes
+            raise AssertionError("a declared noteref with no source body must fail")
+
+
+def test_one_external_note_cited_from_two_spine_documents_remains_one_note() -> None:
+    result, markdown, _, directory = extract(
+        {
+            "one.xhtml": xhtml(
+                '<h1>First</h1><p>First claim<sup><a epub:type="noteref" '
+                'href="notes.xhtml#fn1">1</a></sup>.</p>'
+            ),
+            "two.xhtml": xhtml(
+                '<h1>Second</h1><p>Second claim<sup><a epub:type="noteref" '
+                'href="notes.xhtml#fn1">1</a></sup>.</p>'
+            ),
+            "notes.xhtml": xhtml(
+                '<h1>Notes</h1><aside epub:type="footnote" id="fn1">'
+                '<p>Shared note body.</p></aside>'
+            ),
+        }
+    )
+    with directory:
+        assert markdown.count("[^fn-1-1]") == 3
+        assert markdown.count("[^fn-1-1]: Shared note body.") == 1
+        evidence = json.loads(
+            result.publication_evidence_path.read_text(encoding="utf-8")
+        )
+        assert len(evidence["notes"]) == 1
+        assert evidence["notes"][0]["referenceIds"] == [
+            "noteref_note_001_001",
+            "noteref_note_001_002",
+        ]
+        assert len(evidence["notes"][0]["sourceFiles"]) == 3
+        assert evidence["notes"][0]["sourceAnchor"].endswith(
+            "notes.xhtml#fn1"
+        )
 
 
 def test_calibre_style_notes_are_recognised_without_any_epub_type() -> None:

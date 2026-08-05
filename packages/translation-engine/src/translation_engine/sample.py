@@ -8,7 +8,6 @@ from .engine import (
     ProviderFactory,
     TargetProfileFactory,
     _candidate_preserves_structure,
-    _parse_custom_instructions,
     _parse_text_cleanup,
     _project_path,
     _read_json,
@@ -16,10 +15,20 @@ from .engine import (
     apply_model_override,
     load_translation_unit,
 )
-from .pipeline import translate_chunk_with_fallback
+from .pipeline import (
+    SecondPassRequest,
+    WindowedReflectionSecondPass,
+    run_second_pass_chunk,
+    translate_chunk_with_fallback,
+)
 from .placeholders import protect_chunk_structure, protect_markdown_for_chunking
 from .profiles import get_target_profile
-from .providers import TranslationRequest, create_provider
+from .prompt_packs import (
+    PromptPackError,
+    compile_translation_prompt,
+    parse_prompt_pack_revision,
+)
+from .providers import create_provider
 from .sampling import select_internal_blocks, truncate_at_sentence_boundary
 
 
@@ -36,10 +45,23 @@ def run_sample_manifest(
     source_map = _read_json(
         _project_path(project_root, _required_string(manifest, "sourceMapPath"))
     )
-    if source_map.get("schema") != "local-reading-source-map-v1":
+    if source_map.get("schema") != "local-reading-source-map-v2":
         raise EngineError("unsupported_source_map_schema")
 
     target_language = _required_string(manifest, "targetLanguage")
+    source_language = str(manifest.get("sourceLanguage", "auto"))
+    if "customInstructions" in manifest:
+        raise EngineError("unsupported_manifest_field:customInstructions")
+    try:
+        prompt_pack = parse_prompt_pack_revision(
+            manifest.get("promptPack"),
+            executor="programmatic",
+            source_language=source_language,
+            target_language=target_language,
+        )
+        prompt_pack.template_for("translate")
+    except PromptPackError as error:
+        raise EngineError(str(error)) from error
     try:
         target_profile = target_profile_factory(target_language)
         provider = provider_factory(
@@ -65,16 +87,7 @@ def run_sample_manifest(
     ):
         raise EngineError("invalid_placeholder_retries")
 
-    # Both parsed with the engine's own helpers rather than re-read here, so the
-    # sample cannot drift from the full run it is meant to preview.
     text_cleanup = _parse_text_cleanup(manifest)
-    custom_translation, custom_reflection = _parse_custom_instructions(manifest)
-    # custom_reflection is parsed for validation and then deliberately unused:
-    # the sample path runs one translation pass and no reflection pass, so there
-    # is nothing for a reflection instruction to apply to. Parsing it anyway
-    # means a malformed instruction is rejected here exactly as the full run
-    # would reject it, instead of passing review and failing later.
-    del custom_reflection
 
     # Two units or fewer leaves nothing between the excluded endpoints, so the
     # report comes back empty and the provider is never called. That is the
@@ -102,27 +115,54 @@ def run_sample_manifest(
         )
         result = translate_chunk_with_fallback(
             provider,
-            TranslationRequest(
-                text=protected.text,
-                source_language=str(manifest.get("sourceLanguage", "auto")),
+            compile_translation_prompt(
+                revision=prompt_pack,
+                target_profile=target_profile,
+                source_text=protected.text,
+                source_language=source_language,
                 target_language=target_language,
-                system_instruction=target_profile.build_system_instruction(
-                    source_text=protected.text,
-                    task_manifest=unit.profile_task,
-                    text_cleanup=text_cleanup,
-                    custom_instruction=custom_translation,
-                ),
-            ),
+                task_manifest=unit.profile_task,
+                text_cleanup=text_cleanup,
+            ).request,
             placeholder_retries=placeholder_retries,
             candidate_validator=lambda candidate, current=protected: (
                 _candidate_preserves_structure(current, candidate)
             ),
         )
+        translated_text = result.text
+        if prompt_pack.uses_reflection and result.degradation != "source":
+            second_pass_result = run_second_pass_chunk(
+                WindowedReflectionSecondPass(provider),
+                SecondPassRequest(
+                    source_text=protected.text,
+                    draft_text=result.text,
+                    previous_source_text=None,
+                    previous_draft_text=None,
+                    next_source_text=None,
+                    next_draft_text=None,
+                    source_language=source_language,
+                    target_language=target_language,
+                    terminology_criteria=target_profile.build_system_instruction(
+                        source_text=protected.text,
+                        task_manifest=unit.profile_task,
+                    ),
+                    reflection_template=prompt_pack.compiled_template_for("reflect"),
+                    improve_template=prompt_pack.compiled_template_for("improve"),
+                ),
+                candidate_retries=placeholder_retries,
+                candidate_validator=lambda candidate, current=protected: (
+                    _candidate_preserves_structure(current, candidate)
+                ),
+                draft_fallback_validator=lambda candidate, current=protected: (
+                    _candidate_preserves_structure(current, candidate)
+                ),
+            )
+            translated_text = second_pass_result.revised_text
         samples.append(
             {
                 "chunkRef": unit.unit_id,
                 "sourceExcerpt": source_excerpt,
-                "translatedExcerpt": protected.restore(result.text),
+                "translatedExcerpt": protected.restore(translated_text),
                 "degradation": result.degradation,
             }
         )

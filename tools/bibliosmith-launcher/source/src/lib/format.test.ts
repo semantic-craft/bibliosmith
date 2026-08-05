@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { copies } from "../i18n";
-import type { CommitInfo } from "../types";
 import {
   UNKNOWN_VALUE,
   clampPercent,
-  commitDate,
   formatBytes,
   formatDownloadProgress,
   formatPercent,
@@ -26,27 +24,6 @@ describe("versionFromDate", () => {
     expect(versionFromDate()).toBe(UNKNOWN_VALUE);
     expect(versionFromDate("")).toBe(UNKNOWN_VALUE);
     expect(versionFromDate()).not.toMatch(/^v\d{4}\./);
-  });
-});
-
-describe("commitDate", () => {
-  const commit = (date: string): CommitInfo => ({
-    hash: "abc1234",
-    date,
-    title: "fix: something",
-    summary: "",
-    fullMessage: "fix: something",
-  });
-
-  it("trims a commit timestamp to minutes", () => {
-    expect(commitDate(commit("2026-07-25T22:43:22+08:00"))).toBe("2026-07-25 22:43");
-  });
-
-  // Regression: the fallback was a fabricated "2025-05-25 10:15".
-  it("reports a missing commit as unknown instead of inventing a date", () => {
-    expect(commitDate()).toBe(UNKNOWN_VALUE);
-    expect(commitDate(commit(""))).toBe(UNKNOWN_VALUE);
-    expect(commitDate()).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });
 

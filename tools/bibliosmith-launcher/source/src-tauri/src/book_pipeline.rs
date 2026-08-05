@@ -7,8 +7,8 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::Write,
-    path::{Path, PathBuf},
+    io::{BufReader, Read, Write},
+    path::{Component, Path, PathBuf},
     process::{Command, Output},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -26,11 +26,17 @@ const LIVE_PROGRESS_PATH_ENV: &str = "BIBLIOSMITH_PROGRESS_PATH";
 mod contract;
 mod domain;
 mod migrate;
+mod prompt_packs;
+mod publication;
+mod publication_logic;
 mod store;
 
 pub(crate) use contract::*;
 pub use domain::*;
 pub(crate) use migrate::*;
+pub use prompt_packs::*;
+use publication::*;
+use publication_logic::*;
 pub(crate) use store::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,11 +457,9 @@ fn derive_job_progress(job: &BookPipelineJob) -> BookPipelineProgress {
     BookPipelineProgress {
         stage_total,
         stage_completed,
-        percent: if stage_total == 0 {
-            0
-        } else {
-            ((stage_completed * 100) / stage_total) as u8
-        },
+        percent: (stage_completed * 100)
+            .checked_div(stage_total)
+            .unwrap_or_default() as u8,
         active_stage_id: active
             .map(|stage| stage.stage_id.clone())
             .unwrap_or_else(|| job.current_stage_id.clone()),
@@ -654,7 +658,8 @@ fn overlay_current_mineru_source_evidence(job: &mut BookPipelineJob) {
             continue;
         };
         let Some(expected_sha256) = manifest
-            .get("source_sha256")
+            .get("cleaned_markdown_sha256")
+            .or_else(|| manifest.get("source_sha256"))
             .and_then(serde_json::Value::as_str)
         else {
             continue;
@@ -966,14 +971,33 @@ fn enrich_artifact(
             .sha256
             .as_deref()
             .is_some_and(|expected| sha256_file(&path).ok().as_deref() == Some(expected));
+    let required_checks_passed = match artifact.kind.as_str() {
+        "epubcheck_report" | "bilingual_epubcheck_report" | "digest_epubcheck_report" => {
+            fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<EpubCheckReport>(&text).ok())
+                .map(|report| report.checker.n_fatal == 0 && report.checker.n_error == 0)
+        }
+        "structural_readability_report"
+        | "bilingual_structural_readability_report"
+        | "structure_recovery_report"
+        | "publication_note_report" => fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|report| {
+                report
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|status| hash_matches && nonempty && status == "passed")
+            }),
+        _ if artifact.kind.contains("report") => Some(hash_matches && nonempty),
+        _ => None,
+    };
     artifact.validation = BookPipelineArtifactValidation {
         exists,
         nonempty,
         hash_matches,
-        required_checks_passed: artifact
-            .kind
-            .contains("report")
-            .then_some(hash_matches && nonempty),
+        required_checks_passed,
     };
     if artifact.created_at.is_empty() {
         artifact.created_at = if created_at.is_empty() {
@@ -1015,15 +1039,26 @@ fn source_reference_sha256(source: &BookPipelineSource) -> String {
 fn artifact_default_stage(kind: &str) -> &'static str {
     match kind {
         "collection_manifest" => "discover",
-        "markdown" | "html" | "epub" | "pdf" | "metadata" | "index" | "ocr_sample_report" => {
-            "extract"
-        }
+        "markdown"
+        | "html"
+        | "epub"
+        | "pdf"
+        | "source_book"
+        | "reading_bilingual_pdf"
+        | "metadata"
+        | "index"
+        | "ocr_sample_report" => "extract",
         "translation_source"
         | "source_manifest"
         | "translation_draft"
         | "translation_reflection"
         | "translation_revised" => "handoff",
-        "source_map" | "chapter_source" => "split",
+        "publication_map"
+        | "structure_recovery_report"
+        | "publication_note_report"
+        | "structure_correction"
+        | "source_map"
+        | "chapter_source" => "split",
         "glossary" | "style_profile" | "translation_task_manifest" => "prepare",
         "approval_packet" | "translation_sample_report" => "approve_translation",
         "chapter_translation" | "translation_run_manifest" | "translation_handoff" => "translate",
@@ -1032,9 +1067,12 @@ fn artifact_default_stage(kind: &str) -> &'static str {
         "reading_markdown" | "reading_html" | "reading_epub" | "reading_bilingual_epub" => {
             "build_reading"
         }
-        "qa_status" | "epubcheck_report" | "bilingual_epubcheck_report" | "layout_check_report" => {
-            "validate_reading"
-        }
+        "qa_status"
+        | "epubcheck_report"
+        | "bilingual_epubcheck_report"
+        | "structural_readability_report"
+        | "bilingual_structural_readability_report"
+        | "layout_check_report" => "validate_reading",
         _ => "unknown",
     }
 }
@@ -1063,6 +1101,7 @@ fn artifact_privacy(kind: &str) -> &'static str {
     } else if matches!(
         kind,
         "markdown"
+            | "source_book"
             | "translation_source"
             | "translation_draft"
             | "translation_revised"
@@ -1077,6 +1116,7 @@ fn artifact_privacy(kind: &str) -> &'static str {
             | "reading_html"
             | "reading_epub"
             | "reading_bilingual_epub"
+            | "reading_bilingual_pdf"
     ) {
         "private_text"
     } else {
@@ -1215,21 +1255,23 @@ fn refresh_navigation_targets(job: &mut BookPipelineJob) {
             Path::new(output_dir),
             None,
         );
-        // The layout track's whole deliverable is one PDF sitting in the job
-        // output directory -- it builds no reading project, so without this the
-        // finished book offers "Open workspace" and leaves the user to find the
-        // file themselves.
+        // The layout track promotes its final PDF from Cache into a user-owned
+        // project before completion. Open that durable copy directly.
         if job.mode == MODE_LAYOUT_PRESERVING {
-            if let Some(artifact) = job
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.kind == "pdf" && artifact.validation.hash_matches)
-            {
+            if let Some(artifact) = job.artifacts.iter().find(|artifact| {
+                artifact.kind == "reading_bilingual_pdf" && artifact.validation.hash_matches
+            }) {
+                let durable_root = job
+                    .children
+                    .iter()
+                    .find_map(|child| child.local_project_root.as_deref())
+                    .map(Path::new)
+                    .unwrap_or_else(|| Path::new(output_dir));
                 register_navigation_target(
                     &mut targets,
                     "bilingual_pdf",
                     Path::new(&artifact.path),
-                    Path::new(output_dir),
+                    durable_root,
                     Some(&artifact.artifact_id),
                 );
             }
@@ -1679,7 +1721,19 @@ fn validate_state(state: &BookPipelineState) -> Result<(), String> {
             }
         }
         for child in &job.children {
-            validate_custom_instructions(child.custom_instructions.as_ref())?;
+            if child.prompt_pack_reference.pack_id.is_empty()
+                || child.prompt_pack_reference.revision_id.is_empty()
+                || child.prompt_pack_reference.content_sha256.len() != 64
+                || !matches!(
+                    child.prompt_pack_selection_source.as_str(),
+                    "default" | "book-override"
+                )
+            {
+                return Err(format!(
+                    "Book Pipeline child {} has an invalid prompt pack reference",
+                    child.id
+                ));
+            }
             if child.parent_job_id != job.id {
                 return Err(format!(
                     "Book Pipeline child {} does not belong to parent {}",
@@ -2009,42 +2063,10 @@ impl SystemWebhookSink {
     fn from_config() -> Option<Self> {
         std::env::var("BOOK_PIPELINE_WEBHOOK_URL")
             .ok()
-            .or_else(|| {
-                let env_path = local_reading_repo_root().ok()?.join(".env");
-                let raw = fs::read_to_string(env_path).ok()?;
-                dotenv_value(&raw, "BOOK_PIPELINE_WEBHOOK_URL")
-            })
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(|endpoint| Self { endpoint })
     }
-}
-
-fn dotenv_value(raw: &str, key: &str) -> Option<String> {
-    raw.lines().find_map(|line| {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            return None;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let (candidate, value) = line.split_once('=')?;
-        if candidate.trim() != key {
-            return None;
-        }
-        let value = value.trim();
-        Some(
-            value
-                .strip_prefix('"')
-                .and_then(|value| value.strip_suffix('"'))
-                .or_else(|| {
-                    value
-                        .strip_prefix('\'')
-                        .and_then(|value| value.strip_suffix('\''))
-                })
-                .unwrap_or(value)
-                .to_string(),
-        )
-    })
 }
 
 impl BookPipelineNotificationSink for SystemWebhookSink {
@@ -2429,13 +2451,13 @@ fn preview_book_pipeline_route_with_executor<E: RunnerCommandExecutor>(
             mode,
             config,
             20,
-            &book_ocr_conversion_root(),
+            &book_ocr_conversion_root()?,
         );
     }
     // A local folder gets the same treatment as a Zotero source: the route is
     // real evidence about the books on disk, not a guess from the source kind.
     if source.kind == "local_pdf_folder" {
-        let plan = local_pdf_route_plan(executor, source, &book_ocr_conversion_root());
+        let plan = local_pdf_route_plan(executor, source, &book_ocr_conversion_root()?);
         return Ok(preview_route_with_local_plan(source, mode, config, &plan));
     }
     Ok(preview_route(source, mode, config))
@@ -2450,6 +2472,22 @@ pub async fn queue_book_pipeline_job(
 ) -> Result<BookPipelineJob, String> {
     crate::run_blocking(move || {
         let store = BookPipelineStore::default()?;
+        let prompt_store = PromptPackStore::default()?;
+        let executor = if translation_intent.translation_mode == TRANSLATION_MODE_EXPERT {
+            "expert-agent"
+        } else {
+            "programmatic"
+        };
+        let revision =
+            prompt_store.resolve_revision(&translation_intent.prompt_pack_reference, executor)?;
+        validate_prompt_pack_skill_dependencies(&translation_intent.skill_ids, &revision)?;
+        let current_default = prompt_store.resolve_default(executor, "auto", "zh-Hans")?;
+        if translation_intent.prompt_pack_reference != current_default {
+            return Err(
+                "prompt_pack_default_changed: refresh the prompt pack defaults before queueing"
+                    .into(),
+            );
+        }
         queue_job_with_translation_intent(
             &store,
             source,
@@ -2462,33 +2500,337 @@ pub async fn queue_book_pipeline_job(
 }
 
 #[tauri::command]
-pub async fn save_book_pipeline_custom_instructions(
-    job_id: String,
-    child_id: Option<String>,
-    custom_instructions: BookPipelineCustomInstructions,
-) -> Result<BookPipelineJob, String> {
+pub async fn list_translation_prompt_packs() -> Result<PromptPackCatalog, String> {
+    crate::run_blocking(move || PromptPackStore::default()?.list()).await
+}
+
+#[tauri::command]
+pub async fn get_translation_prompt_pack_default(
+    executor: String,
+    source_language: String,
+    target_language: String,
+) -> Result<PromptPackReference, String> {
     crate::run_blocking(move || {
-        let store = BookPipelineStore::default()?;
-        save_book_custom_instructions(&store, &job_id, child_id.as_deref(), custom_instructions)
+        PromptPackStore::default()?.resolve_default(&executor, &source_language, &target_language)
     })
     .await
 }
 
-fn save_book_custom_instructions(
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookPipelineStructureCorrectionDraft {
+    schema: String,
+    source_markdown_sha256: String,
+    publication_map_sha256: String,
+    anomalies: Vec<String>,
+    sections: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BookPipelineStructureCorrectionInput {
+    schema: String,
+    source_markdown_sha256: String,
+    publication_map_sha256: String,
+    reason: String,
+    sections: serde_json::Value,
+}
+
+fn structure_correction_draft(
     store: &dyn BookPipelineStateStore,
     job_id: &str,
     child_id: Option<&str>,
-    custom_instructions: BookPipelineCustomInstructions,
+) -> Result<BookPipelineStructureCorrectionDraft, String> {
+    let state = store.load()?;
+    let job_index = find_job_index(&state, job_id)?;
+    let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
+    let child = &state.jobs[job_index].children[child_index];
+    let split = stage_ref(child, "split")
+        .ok_or_else(|| "This book has no structure-recovery stage.".to_string())?;
+    if !matches!(split.status.as_str(), STATUS_FAILED | STATUS_BLOCKED) {
+        return Err(
+            "Structure correction is available only after the split gate reports a failure.".into(),
+        );
+    }
+    let project_root = project_root_from_child(child)?;
+    let source_path = project_root.join("source/source.md");
+    let publication_path = project_root.join("metadata/publication_map.json");
+    let source = fs::read_to_string(&source_path).map_err(|_| {
+        "Source Markdown is missing; rerun handoff before correcting structure.".to_string()
+    })?;
+    let publication_json = fs::read_to_string(&publication_path).map_err(|_| {
+        "The failed split stage produced no Publication Map to correct.".to_string()
+    })?;
+    let publication: PublicationMapDocument = serde_json::from_str(&publication_json)
+        .map_err(|err| format!("Publication Map is invalid: {err}"))?;
+    let source_sha256 = sha256_str(&source);
+    if publication.source_markdown_sha256 != source_sha256 {
+        return Err("Publication Map no longer binds the current source Markdown.".into());
+    }
+    Ok(BookPipelineStructureCorrectionDraft {
+        schema: "publication-structure-correction-draft-v1".into(),
+        source_markdown_sha256: source_sha256,
+        publication_map_sha256: sha256_str(&publication_json),
+        anomalies: publication.audit.anomalies,
+        sections: serde_json::to_value(publication.sections).map_err(|err| err.to_string())?,
+    })
+}
+
+fn correction_keeps_source_identity(
+    current: &PublicationSection,
+    corrected: &PublicationSection,
+) -> bool {
+    current.id == corrected.id
+        && current.ordinal == corrected.ordinal
+        && current.source_start_line == corrected.source_start_line
+        && current.source_end_line == corrected.source_end_line
+        && current.source_start_character == corrected.source_start_character
+        && current.source_end_character == corrected.source_end_character
+        && current.source_pages == corrected.source_pages
+        && current.source_files == corrected.source_files
+        && current.source_href == corrected.source_href
+}
+
+fn recovered_structure_sha256(sections: &[PublicationSection]) -> Result<String, String> {
+    let recovered = sections
+        .iter()
+        .map(|section| {
+            serde_json::json!({
+                "id": section.id,
+                "ordinal": section.ordinal,
+                "title": section.title,
+                "shortTitle": section.short_title,
+                "headingLevel": section.heading_level,
+                "parentId": section.parent_id,
+                "role": section.role,
+                "kind": section.kind,
+                "sourceStartLine": section.source_start_line,
+                "sourceEndLine": section.source_end_line,
+                "sourceStartCharacter": section.source_start_character,
+                "sourceEndCharacter": section.source_end_character,
+                "sourcePages": section.source_pages,
+                "sourceFiles": section.source_files,
+                "sourceHref": section.source_href,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&recovered)
+        .map(|value| sha256_str(&value))
+        .map_err(|error| error.to_string())
+}
+
+fn save_structure_correction(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    correction: BookPipelineStructureCorrectionInput,
 ) -> Result<BookPipelineJob, String> {
-    let custom_instructions = normalize_custom_instructions(custom_instructions)?;
+    let current = structure_correction_draft(store, job_id, child_id)?;
+    if correction.schema != current.schema
+        || correction.source_markdown_sha256 != current.source_markdown_sha256
+        || correction.publication_map_sha256 != current.publication_map_sha256
+    {
+        return Err(
+            "Structure correction draft is stale; reload it from the current failed split.".into(),
+        );
+    }
+    let reason = correction.reason.trim();
+    if reason.is_empty() || reason.chars().count() > 1000 {
+        return Err("Structure correction requires a reason of 1 to 1000 characters.".into());
+    }
+    let current_sections: Vec<PublicationSection> =
+        serde_json::from_value(current.sections).map_err(|err| err.to_string())?;
+    let mut corrected_sections: Vec<PublicationSection> =
+        serde_json::from_value(correction.sections)
+            .map_err(|err| format!("Corrected sections are invalid: {err}"))?;
+    if corrected_sections.len() != current_sections.len()
+        || corrected_sections
+            .iter()
+            .zip(&current_sections)
+            .any(|(corrected, current)| !correction_keeps_source_identity(current, corrected))
+    {
+        return Err(
+            "Structure correction may edit titles, hierarchy, roles, and kinds, but not source identity, order, ranges, pages, files, or anchors."
+                .into(),
+        );
+    }
+    for section in &mut corrected_sections {
+        section.evidence = vec![format!("manual correction: {reason}")];
+        section.confidence = 1.0;
+        section.anomalies.clear();
+    }
+
     let mut state = store.load()?;
     let job_index = find_job_index(&state, job_id)?;
     let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
-    let approval_order = ordered_stage_index("approve_translation").unwrap_or_default();
+    let project_root = project_root_from_child(&state.jobs[job_index].children[child_index])?;
+    let source = fs::read_to_string(project_root.join("source/source.md"))
+        .map_err(|_| "Source Markdown disappeared while saving the correction.".to_string())?;
+    if sha256_str(&source) != correction.source_markdown_sha256 {
+        return Err("Source Markdown changed while saving the structure correction.".into());
+    }
+    let audit = audit_publication_structure(&source, &mut corrected_sections, "manual_correction");
+    if audit.status != "passed" {
+        return Err(format!(
+            "Corrected structure is still unsafe: {}",
+            audit.anomalies.join("; ")
+        ));
+    }
+    let correction_path = project_root.join("metadata/publication_map.correction.json");
+    let bound_recovered_structure_sha256 = if correction_path.is_file() {
+        fs::read_to_string(&correction_path)
+            .ok()
+            .and_then(|json| serde_json::from_str::<PublicationStructureCorrection>(&json).ok())
+            .filter(|existing| existing.source_markdown_sha256 == correction.source_markdown_sha256)
+            .map(|existing| existing.recovered_structure_sha256)
+            .unwrap_or(recovered_structure_sha256(&current_sections)?)
+    } else {
+        recovered_structure_sha256(&current_sections)?
+    };
+    let correction_json = serde_json::to_string_pretty(&serde_json::json!({
+        "schema": "publication-structure-correction-v1",
+        "sourceMarkdownSha256": correction.source_markdown_sha256,
+        "recoveredStructureSha256": bound_recovered_structure_sha256,
+        "reason": reason,
+        "sections": corrected_sections,
+    }))
+    .map_err(|err| err.to_string())?
+        + "\n";
+    let mut temporary = tempfile::NamedTempFile::new_in(project_root.join("metadata"))
+        .map_err(|err| err.to_string())?;
+    temporary
+        .write_all(correction_json.as_bytes())
+        .and_then(|()| temporary.as_file_mut().sync_all())
+        .map_err(|err| err.to_string())?;
+    temporary
+        .persist(&correction_path)
+        .map_err(|err| err.error.to_string())?;
+
+    let job = &mut state.jobs[job_index];
+    job.log_summary
+        .push("Publication structure correction saved for split retry.".into());
+    job.updated_at = now_label();
+    derive_job(job);
+    let saved = job.clone();
+    store.save(&state)?;
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn get_book_pipeline_structure_correction_draft(
+    job_id: String,
+    child_id: Option<String>,
+) -> Result<BookPipelineStructureCorrectionDraft, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        structure_correction_draft(&store, &job_id, child_id.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn copy_translation_prompt_pack(
+    source_reference: PromptPackReference,
+    display_name: String,
+) -> Result<PromptPackDefinition, String> {
+    crate::run_blocking(move || {
+        PromptPackStore::default()?.copy_builtin(&source_reference, &display_name)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn save_book_pipeline_structure_correction(
+    job_id: String,
+    child_id: Option<String>,
+    correction: BookPipelineStructureCorrectionInput,
+) -> Result<BookPipelineJob, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        save_structure_correction(&store, &job_id, child_id.as_deref(), correction)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn save_translation_prompt_pack_revision(
+    draft: PromptPackRevisionDraft,
+) -> Result<PromptPackRevision, String> {
+    crate::run_blocking(move || PromptPackStore::default()?.save_custom_revision(draft)).await
+}
+
+#[tauri::command]
+pub async fn delete_translation_prompt_pack(pack_id: String) -> Result<(), String> {
+    crate::run_blocking(move || PromptPackStore::default()?.delete_custom(&pack_id)).await
+}
+
+#[tauri::command]
+pub async fn set_translation_prompt_pack_default(
+    executor: String,
+    source_language: String,
+    target_language: String,
+    prompt_pack_reference: PromptPackReference,
+) -> Result<(), String> {
+    crate::run_blocking(move || {
+        PromptPackStore::default()?.set_default(
+            &executor,
+            &source_language,
+            &target_language,
+            prompt_pack_reference,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn diff_translation_prompt_pack_revisions(
+    before: PromptPackReference,
+    after: PromptPackReference,
+) -> Result<PromptPackRevisionDiff, String> {
+    crate::run_blocking(move || PromptPackStore::default()?.diff_revisions(&before, &after)).await
+}
+
+#[tauri::command]
+pub async fn select_book_translation_prompt_pack(
+    job_id: String,
+    child_id: Option<String>,
+    prompt_pack_reference: PromptPackReference,
+) -> Result<BookPipelineJob, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let prompt_store = PromptPackStore::default()?;
+        select_book_prompt_pack(
+            &store,
+            &prompt_store,
+            &job_id,
+            child_id.as_deref(),
+            prompt_pack_reference,
+        )
+    })
+    .await
+}
+
+fn select_book_prompt_pack(
+    store: &dyn BookPipelineStateStore,
+    prompt_store: &PromptPackStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    prompt_pack_reference: PromptPackReference,
+) -> Result<BookPipelineJob, String> {
+    let mut state = store.load()?;
+    let job_index = find_job_index(&state, job_id)?;
+    let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
+    let executor = if state.jobs[job_index].translation_mode == TRANSLATION_MODE_EXPERT {
+        "expert-agent"
+    } else {
+        "programmatic"
+    };
+    prompt_store.resolve_revision(&prompt_pack_reference, executor)?;
     let child = &state.jobs[job_index].children[child_index];
-    if child.custom_instructions == custom_instructions {
+    if child.prompt_pack_reference == prompt_pack_reference {
         return Ok(state.jobs[job_index].clone());
     }
+    let approval_order = ordered_stage_index("approve_translation").unwrap_or_default();
     let later_stage_is_active = child.stages.iter().any(|stage| {
         ordered_stage_index(&stage.stage_id).is_some_and(|order| order > approval_order)
             && (matches!(
@@ -2497,16 +2839,174 @@ fn save_book_custom_instructions(
             ) || is_agent_handoff_waiting(stage))
     });
     if later_stage_is_active {
-        return Err("custom_instructions_locked: translation or a later stage is active.".into());
+        return Err("prompt_pack_selection_locked: translation or a later stage is active.".into());
     }
 
-    state.jobs[job_index].children[child_index].custom_instructions = custom_instructions;
+    state.jobs[job_index].children[child_index].prompt_pack_reference =
+        prompt_pack_reference.clone();
+    state.jobs[job_index].children[child_index].prompt_pack_selection_source =
+        "book-override".into();
+    if state.jobs[job_index].children.len() == 1 {
+        state.jobs[job_index].prompt_pack_reference = prompt_pack_reference;
+        state.jobs[job_index].prompt_pack_selection_source = "book-override".into();
+    }
+    if executor == "expert-agent" {
+        let mut required_skill_ids = BTreeSet::new();
+        for child in &state.jobs[job_index].children {
+            let revision =
+                prompt_store.resolve_revision(&child.prompt_pack_reference, "expert-agent")?;
+            required_skill_ids.extend(revision.required_skill_ids);
+        }
+        state.jobs[job_index].translation_skill_ids = required_skill_ids.into_iter().collect();
+    }
     ready_translation_approval_gate(&mut state.jobs[job_index], child_index);
     state.jobs[job_index].updated_at = now_label();
     derive_job(&mut state.jobs[job_index]);
     let saved = state.jobs[job_index].clone();
     store.save(&state)?;
     Ok(saved)
+}
+
+#[tauri::command]
+pub async fn preview_book_translation_prompt(
+    job_id: String,
+    child_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        preview_book_prompt_with_executor(
+            &store,
+            &PromptPackStore::default()?,
+            &job_id,
+            child_id.as_deref(),
+            &SystemCommandExecutor,
+        )
+    })
+    .await
+}
+
+fn preview_book_prompt_with_executor(
+    store: &dyn BookPipelineStateStore,
+    prompt_store: &PromptPackStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    executor: &dyn RunnerCommandExecutor,
+) -> Result<serde_json::Value, String> {
+    let state = store.load()?;
+    let job = state
+        .jobs
+        .iter()
+        .find(|job| job.id == job_id)
+        .ok_or_else(|| "Book Pipeline job not found".to_string())?;
+    let child_index = locate_child_index(job, child_id)?;
+    let child = &job.children[child_index];
+    if job.translation_mode == TRANSLATION_MODE_EXPERT {
+        let (source_sample, glossary_entries) = expert_prompt_preview_inputs(child)?;
+        let handoff = prompt_store.compile_expert_handoff(
+            &child.prompt_pack_reference,
+            &source_sample,
+            &glossary_entries,
+        )?;
+        return serde_json::to_value(serde_json::json!({
+            "schema": "expert-agent-prompt-preview-v1",
+            "promptPackReference": handoff.prompt_pack_reference,
+            "sourceLanguage": handoff.source_language,
+            "targetLanguage": handoff.target_language,
+            "stages": [{
+                "actualPrompt": handoff.actual_prompt,
+                "injections": ["template", "current-source", "context-policy", "glossary", "executor-safety"]
+            }],
+            "contextPolicy": handoff.context_policy,
+            "requiredSkillIds": handoff.required_skill_ids,
+            "skillDependencyVersions": handoff.skill_dependency_versions,
+            "requiredEvidence": handoff.required_evidence,
+            "excludedResponsibilities": handoff.excluded_responsibilities,
+            "parameters": handoff.parameters,
+            "promptPackProvenance": handoff.prompt_pack_provenance,
+            "stageInstructions": handoff.stage_instructions,
+            "evidencePolicy": handoff.evidence_policy,
+        }))
+        .map_err(|err| err.to_string());
+    }
+
+    let project_root = project_root_from_child(child)?;
+    let units = translation_task_units(child, &project_root)?;
+    let prompt_pack =
+        prompt_store.resolve_revision(&child.prompt_pack_reference, "programmatic")?;
+    let manifest = serde_json::json!({
+        "schema": "translation-engine-prompt-preview-v1",
+        "projectRoot": display_path(&project_root),
+        "sourceMapPath": "metadata/source_map.json",
+        "sourceLanguage": "auto",
+        "targetLanguage": "zh-Hans",
+        "maxTokens": TRANSLATION_ENGINE_MAX_TOKENS,
+        "textCleanup": job.text_cleanup,
+        "promptPack": prompt_pack,
+        "units": units.iter().map(|unit| serde_json::json!({
+            "taskManifestPath": unit.task_manifest_path.as_str()
+        })).collect::<Vec<_>>(),
+    });
+    let mut temporary = tempfile::NamedTempFile::new()
+        .map_err(|err| format!("Could not create private prompt preview manifest: {err}"))?;
+    temporary
+        .write_all(
+            (serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())? + "\n")
+                .as_bytes(),
+        )
+        .map_err(|err| err.to_string())?;
+    let command = build_translation_prompt_preview_command(child, temporary.path())?;
+    let result = executor.execute(&command)?;
+    serde_json::from_str(&result.stdout)
+        .map_err(|err| format!("Translation engine returned invalid prompt preview JSON: {err}"))
+}
+
+fn build_translation_prompt_preview_command(
+    child: &BookPipelineChildJob,
+    manifest_path: &Path,
+) -> Result<RunnerCommand, String> {
+    Ok(RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: "translation prompt preview".into(),
+        program: PathBuf::from("uv"),
+        args: vec![
+            "run".into(),
+            "--package".into(),
+            "translation-engine".into(),
+            "translation-engine-prompt-preview".into(),
+            "--manifest".into(),
+            display_path(manifest_path),
+        ],
+        env: Vec::new(),
+        cwd: Some(translation_engine_resource_root()?),
+        output_dir: project_root_from_child(child)?,
+        attempts: 0,
+        accepted_exit_codes: vec![0],
+    })
+}
+
+fn expert_prompt_preview_inputs(
+    child: &BookPipelineChildJob,
+) -> Result<(String, Vec<String>), String> {
+    let project_root = project_root_from_child(child)?;
+    let unit = translation_task_units(child, &project_root)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No translation unit is available for prompt preview".to_string())?;
+    let source = fs::read_to_string(project_root.join(unit.source_chapter_path))
+        .map_err(|err| err.to_string())?;
+    let sample = source
+        .chars()
+        .take(TRANSLATION_SAMPLE_CHARACTER_BUDGET)
+        .collect();
+    let glossary_path = project_root.join("glossary").join("terms.csv");
+    let glossary_entries = fs::read_to_string(glossary_path)
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .take(20)
+        .map(str::to_string)
+        .collect();
+    Ok((sample, glossary_entries))
 }
 
 #[tauri::command]
@@ -2557,18 +3057,66 @@ fn retry_job_from_ui(
     retry_job_to_quiescence(store, runner, job_id)
 }
 
-/// Remove a job from the shelf. Files on disk (extraction output, the local
-/// reading project, Zotero attachments) are deliberately left untouched — this
-/// only forgets the job, so a re-queued book can reuse the converted Markdown.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct BookPipelineShelfSelection {
+    pub job_id: String,
+    pub child_id: Option<String>,
+}
+
 #[tauri::command]
-pub async fn delete_book_pipeline_job(
+pub async fn remove_books_from_shelf(
+    selections: Vec<BookPipelineShelfSelection>,
+    explicit_approval: bool,
+) -> Result<BookPipelineState, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        remove_books_from_shelf_in_store(&store, &selections, explicit_approval)
+    })
+    .await
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BookPipelineProjectMigration {
+    pub required: bool,
+    pub source_root: String,
+    pub destination_root: String,
+}
+
+#[tauri::command]
+pub async fn inspect_book_pipeline_project_migration(
+    job_id: String,
+    child_id: Option<String>,
+) -> Result<BookPipelineProjectMigration, String> {
+    crate::run_blocking(move || {
+        let store = BookPipelineStore::default()?;
+        let state = store.load()?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| format!("Book Pipeline job not found: {job_id}"))?;
+        inspect_book_project_migration(job, child_id.as_deref(), &user_workspace_root()?)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn migrate_book_pipeline_project(
     job_id: String,
     child_id: Option<String>,
     explicit_approval: bool,
 ) -> Result<BookPipelineState, String> {
     crate::run_blocking(move || {
         let store = BookPipelineStore::default()?;
-        delete_job(&store, &job_id, child_id.as_deref(), explicit_approval)
+        migrate_book_project_in_store(
+            &store,
+            &job_id,
+            child_id.as_deref(),
+            &user_workspace_root()?,
+            explicit_approval,
+        )
     })
     .await
 }
@@ -2582,14 +3130,321 @@ fn live_children(job: &BookPipelineJob) -> impl Iterator<Item = &BookPipelineChi
         .filter(|child| child.removed_at.is_none())
 }
 
-fn delete_job(
+fn remove_books_from_shelf_in_store(
     store: &dyn BookPipelineStateStore,
-    job_id: &str,
-    child_id: Option<&str>,
+    selections: &[BookPipelineShelfSelection],
     explicit_approval: bool,
 ) -> Result<BookPipelineState, String> {
     if !explicit_approval {
-        return Err("Explicit approval is required to delete a Book Pipeline job.".into());
+        return Err("Explicit approval is required to remove books from the shelf.".into());
+    }
+    if selections.is_empty() {
+        return Err("Select at least one book to remove from the shelf.".into());
+    }
+    let unique = selections.iter().cloned().collect::<BTreeSet<_>>();
+    if unique.len() != selections.len() {
+        return Err("The shelf selection contains the same book more than once.".into());
+    }
+
+    let mut state = store.load()?;
+    let mut grouped = BTreeMap::<String, BTreeSet<Option<String>>>::new();
+    for selection in selections {
+        grouped
+            .entry(selection.job_id.clone())
+            .or_default()
+            .insert(selection.child_id.clone());
+    }
+
+    // Validate the complete selection before changing anything. A stale card,
+    // an active batch, or an already-removed child rejects the whole request.
+    for (job_id, child_ids) in &grouped {
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == *job_id)
+            .ok_or_else(|| format!("Book Pipeline job not found: {job_id}"))?;
+        if job_is_actively_running(job) {
+            return Err(format!(
+                "Book Pipeline job {job_id} is currently running; no selected books were removed."
+            ));
+        }
+        if child_ids.contains(&None) && child_ids.len() > 1 {
+            return Err(format!(
+                "Book Pipeline job {job_id} was selected both as a whole job and as individual books."
+            ));
+        }
+        for child_id in child_ids.iter().flatten() {
+            if !live_children(job).any(|child| child.id == *child_id) {
+                return Err(format!("Book Pipeline child not found: {child_id}"));
+            }
+        }
+    }
+
+    let removed_at = now_label();
+    let mut remove_job_ids = BTreeSet::new();
+    for job in &mut state.jobs {
+        let Some(child_ids) = grouped.get(&job.id) else {
+            continue;
+        };
+        let live_count = live_children(job).count();
+        let remove_whole_job = child_ids.contains(&None) || child_ids.len() == live_count;
+        if remove_whole_job {
+            remove_job_ids.insert(job.id.clone());
+            continue;
+        }
+        let mut removed_titles = Vec::new();
+        for child in &mut job.children {
+            if child_ids.contains(&Some(child.id.clone())) {
+                child.removed_at = Some(removed_at.clone());
+                removed_titles.push(source_title(&child.source));
+            }
+        }
+        job.current_step = format!("Removed {} books from this batch", removed_titles.len());
+        for title in removed_titles {
+            job.log_summary
+                .push(format!("Removed {title} from this batch"));
+        }
+        job.log_summary = trim_log_summary(&job.log_summary);
+        job.updated_at = removed_at.clone();
+        derive_job(job);
+    }
+    state.jobs.retain(|job| !remove_job_ids.contains(&job.id));
+    store.save(&state)?;
+    store.load()
+}
+
+fn selected_project_child<'a>(
+    job: &'a BookPipelineJob,
+    child_id: Option<&str>,
+) -> Result<&'a BookPipelineChildJob, String> {
+    if let Some(child_id) = child_id {
+        return live_children(job)
+            .find(|child| child.id == child_id)
+            .ok_or_else(|| format!("Book Pipeline child not found: {child_id}"));
+    }
+    let children = live_children(job).collect::<Vec<_>>();
+    if children.len() != 1 {
+        return Err("Choose one book before migrating its local project.".into());
+    }
+    Ok(children[0])
+}
+
+fn books_local_suffix(project_root: &Path) -> Result<PathBuf, String> {
+    let components = project_root.components().collect::<Vec<_>>();
+    let index = components
+        .windows(2)
+        .position(|pair| pair[0].as_os_str() == "books" && pair[1].as_os_str() == "local")
+        .ok_or_else(|| {
+            format!(
+                "The existing project is not inside a books/local tree: {}",
+                display_path(project_root)
+            )
+        })?;
+    let mut suffix = PathBuf::new();
+    for component in &components[index + 2..] {
+        suffix.push(component.as_os_str());
+    }
+    if suffix.as_os_str().is_empty() {
+        return Err("The existing project root cannot be books/local itself.".into());
+    }
+    Ok(suffix)
+}
+
+fn inspect_book_project_migration(
+    job: &BookPipelineJob,
+    child_id: Option<&str>,
+    workspace_root: &Path,
+) -> Result<BookPipelineProjectMigration, String> {
+    let child = selected_project_child(job, child_id)?;
+    let source_root = child
+        .local_project_root
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| "This book does not have a local project to migrate.".to_string())?;
+    if !source_root.is_dir() {
+        return Err(format!(
+            "The existing local project is missing: {}",
+            display_path(&source_root)
+        ));
+    }
+    let source_canonical = fs::canonicalize(&source_root).map_err(|error| error.to_string())?;
+    let workspace_canonical =
+        fs::canonicalize(workspace_root).map_err(|error| error.to_string())?;
+    if source_canonical.starts_with(&workspace_canonical) {
+        return Ok(BookPipelineProjectMigration {
+            required: false,
+            source_root: display_path(&source_root),
+            destination_root: display_path(&source_root),
+        });
+    }
+    let destination = workspace_root
+        .join("books/local")
+        .join(books_local_suffix(&source_canonical)?);
+    Ok(BookPipelineProjectMigration {
+        required: true,
+        source_root: display_path(&source_root),
+        destination_root: display_path(&destination),
+    })
+}
+
+fn project_tree_hashes(root: &Path) -> Result<BTreeMap<PathBuf, String>, String> {
+    fn walk(
+        root: &Path,
+        current: &Path,
+        hashes: &mut BTreeMap<PathBuf, String>,
+    ) -> Result<(), String> {
+        let mut entries = fs::read_dir(current)
+            .map_err(|error| format!("Cannot read {}: {error}", display_path(current)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Project migration does not follow symbolic links: {}",
+                    display_path(&path)
+                ));
+            }
+            if metadata.is_dir() {
+                walk(root, &path, hashes)?;
+            } else if metadata.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| error.to_string())?
+                    .to_path_buf();
+                hashes.insert(relative, sha256_file(&path)?);
+            } else {
+                return Err(format!(
+                    "Unsupported project entry: {}",
+                    display_path(&path)
+                ));
+            }
+        }
+        Ok(())
+    }
+    let metadata = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("The local project root must be a real directory, not a symbolic link.".into());
+    }
+    let mut hashes = BTreeMap::new();
+    walk(root, root, &mut hashes)?;
+    Ok(hashes)
+}
+
+fn copy_project_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    fn copy_entries(source: &Path, destination: &Path) -> Result<(), String> {
+        fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+        for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let metadata = fs::symlink_metadata(&source_path).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Project migration does not follow symbolic links: {}",
+                    display_path(&source_path)
+                ));
+            }
+            if metadata.is_dir() {
+                copy_entries(&source_path, &destination_path)?;
+            } else if metadata.is_file() {
+                fs::copy(&source_path, &destination_path).map_err(|error| {
+                    format!("Cannot copy {}: {error}", display_path(&source_path))
+                })?;
+            } else {
+                return Err(format!(
+                    "Unsupported project entry: {}",
+                    display_path(&source_path)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    let expected = project_tree_hashes(source)?;
+    if destination.exists() {
+        let actual = project_tree_hashes(destination)?;
+        if actual != expected {
+            return Err(format!(
+                "The migration destination already exists with different contents: {}",
+                display_path(destination)
+            ));
+        }
+        return Ok(());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Migration destination has no parent.".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = parent.join(format!(".bibliosmith-migration-{}", new_job_id()));
+    let copied = copy_entries(source, &temporary).and_then(|_| {
+        let actual = project_tree_hashes(&temporary)?;
+        if actual != expected {
+            return Err(
+                "Project migration verification failed; the copied files do not match the source."
+                    .into(),
+            );
+        }
+        fs::rename(&temporary, destination).map_err(|error| error.to_string())
+    });
+    if copied.is_err() && temporary.exists() {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    copied
+}
+
+fn relocated_path(path: &str, old_root: &Path, new_root: &Path) -> Option<String> {
+    Path::new(path).strip_prefix(old_root).ok().map(|relative| {
+        if relative.as_os_str().is_empty() {
+            display_path(new_root)
+        } else {
+            display_path(&new_root.join(relative))
+        }
+    })
+}
+
+fn relocate_project_value(
+    value: &mut serde_json::Value,
+    old_root: &Path,
+    new_root: &Path,
+    artifact_ids: &BTreeMap<String, String>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                relocate_project_value(item, old_root, new_root, artifact_ids);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for field in fields.values_mut() {
+                relocate_project_value(field, old_root, new_root, artifact_ids);
+            }
+        }
+        serde_json::Value::String(text) => {
+            if let Some(replacement) = artifact_ids.get(text) {
+                *text = replacement.clone();
+            } else if let Some(replacement) = relocated_path(text, old_root, new_root) {
+                *text = replacement;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn migrate_book_project_in_store(
+    store: &dyn BookPipelineStateStore,
+    job_id: &str,
+    child_id: Option<&str>,
+    workspace_root: &Path,
+    explicit_approval: bool,
+) -> Result<BookPipelineState, String> {
+    if !explicit_approval {
+        return Err(
+            "Explicit approval is required to copy a local project into the current library."
+                .into(),
+        );
     }
     let mut state = store.load()?;
     let job_index = find_job_index(&state, job_id)?;
@@ -2598,35 +3453,55 @@ fn delete_job(
             "This book is currently running; wait for the active stage to finish first.".into(),
         );
     }
-    // The shelf shows one row per book and a collection queues many under one
-    // job, so removing the job for the book the user pointed at took the rest of
-    // the batch with it. Drop just that book when others would remain.
-    if let Some(child_id) = child_id {
-        let job = &mut state.jobs[job_index];
-        let remaining = live_children(job)
-            .filter(|child| child.id != child_id)
-            .count();
-        let target = job
-            .children
-            .iter_mut()
-            .find(|child| child.id == child_id && child.removed_at.is_none())
-            .ok_or_else(|| "Book Pipeline child not found.".to_string())?;
-        if remaining > 0 {
-            target.removed_at = Some(now_label());
-            let title = source_title(&target.source);
-            job.current_step = "Removed one book from this batch".into();
-            job.log_summary
-                .push(format!("Removed {title} from this batch"));
-            job.log_summary = trim_log_summary(&job.log_summary);
-            job.updated_at = now_label();
-            derive_job(job);
-            store.save(&state)?;
-            return store.load();
-        }
-        // Nothing would be left on the shelf, so the row and the job are the
-        // same thing again and an empty batch is not worth keeping.
+    let plan = inspect_book_project_migration(&state.jobs[job_index], child_id, workspace_root)?;
+    if !plan.required {
+        return Err("This book project is already inside the current BiblioSmith library.".into());
     }
-    state.jobs.remove(job_index);
+    let old_root = PathBuf::from(&plan.source_root);
+    let new_root = PathBuf::from(&plan.destination_root);
+    copy_project_tree(&old_root, &new_root)?;
+
+    let job = &state.jobs[job_index];
+    let artifacts = job
+        .artifacts
+        .iter()
+        .chain(job.children.iter().flat_map(|child| child.artifacts.iter()))
+        .chain(
+            job.collection_items
+                .iter()
+                .flat_map(|item| item.artifacts.iter()),
+        );
+    let mut artifact_ids = BTreeMap::new();
+    for artifact in artifacts {
+        if artifact.artifact_id.is_empty() {
+            continue;
+        }
+        let Some(path) = relocated_path(&artifact.path, &old_root, &new_root) else {
+            continue;
+        };
+        let identity = format!(
+            "{}\0{}\0{}",
+            artifact.kind,
+            path,
+            artifact.sha256.as_deref().unwrap_or("missing")
+        );
+        artifact_ids.insert(
+            artifact.artifact_id.clone(),
+            format!("artifact-{}", sha256_str(&identity)),
+        );
+    }
+    let mut value = serde_json::to_value(job).map_err(|error| error.to_string())?;
+    relocate_project_value(&mut value, &old_root, &new_root, &artifact_ids);
+    let mut relocated: BookPipelineJob =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    relocated.updated_at = now_label();
+    relocated.log_summary.push(format!(
+        "Copied and verified local project in the current library: {}",
+        display_path(&new_root)
+    ));
+    relocated.log_summary = trim_log_summary(&relocated.log_summary);
+    derive_job(&mut relocated);
+    state.jobs[job_index] = relocated;
     store.save(&state)?;
     store.load()
 }
@@ -2986,8 +3861,8 @@ pub async fn open_book_pipeline_output(job_id: String) -> Result<BookPipelineAct
             .find(|job| job.id == job_id)
             .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
         let mut allowed_roots = vec![store.job_output_dir(&job.id)];
-        if let Ok(repo_root) = local_reading_repo_root() {
-            allowed_roots.push(repo_root.join("books").join("local"));
+        if let Ok(workspace_root) = user_workspace_root() {
+            allowed_roots.push(workspace_root.join("books").join("local"));
         }
         let resolved = resolve_book_pipeline_open_target(job, &allowed_roots)?;
         open::that(&resolved.path).map_err(|err| err.to_string())?;
@@ -3031,8 +3906,8 @@ pub async fn read_book_pipeline_artifact_excerpt(
             .find(|job| job.id == job_id)
             .ok_or_else(|| "Book Pipeline job not found.".to_string())?;
         let mut allowed_roots = vec![store.job_output_dir(&job.id)];
-        if let Ok(repo_root) = local_reading_repo_root() {
-            allowed_roots.push(repo_root.join("books").join("local"));
+        if let Ok(workspace_root) = user_workspace_root() {
+            allowed_roots.push(workspace_root.join("books").join("local"));
         }
         read_artifact_excerpt(job, &artifact_id, max_chars, &allowed_roots)
     })
@@ -3095,8 +3970,8 @@ pub async fn attach_book_pipeline_artifact_to_zotero(
     crate::run_blocking(move || {
         let store = BookPipelineStore::default()?;
         let mut allowed_roots = vec![store.job_output_dir(&job_id)];
-        if let Ok(repo_root) = local_reading_repo_root() {
-            allowed_roots.push(repo_root.join("books").join("local"));
+        if let Ok(workspace_root) = user_workspace_root() {
+            allowed_roots.push(workspace_root.join("books").join("local"));
         }
         attach_artifact_to_zotero_with_executor(
             &store,
@@ -3446,7 +4321,7 @@ pub async fn handoff_book_pipeline_markdown(
             &store,
             &job_id,
             artifact_path.as_deref(),
-            &local_reading_repo_root()?,
+            &user_workspace_root()?,
         )
     })
     .await
@@ -3486,6 +4361,42 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
     if intent.config_id.trim().is_empty() {
         return Err("translationIntent.configId is required.".into());
     }
+    if intent.prompt_pack_reference.pack_id.trim().is_empty()
+        || intent.prompt_pack_reference.revision_id.trim().is_empty()
+        || intent.prompt_pack_reference.content_sha256.len() != 64
+    {
+        return Err("translationIntent.promptPackReference is invalid.".into());
+    }
+    if intent.prompt_pack_reference.pack_id.starts_with("builtin.") {
+        let catalog = builtin_prompt_pack_catalog()?;
+        let revision = catalog
+            .packs
+            .iter()
+            .find(|pack| pack.pack_id == intent.prompt_pack_reference.pack_id)
+            .and_then(|pack| {
+                pack.revisions.iter().find(|revision| {
+                    revision.revision_id == intent.prompt_pack_reference.revision_id
+                })
+            })
+            .ok_or_else(|| "prompt_pack_revision_not_found".to_string())?;
+        if revision.content_sha256 != intent.prompt_pack_reference.content_sha256 {
+            return Err("prompt_pack_content_hash_mismatch".into());
+        }
+        let expected_executor = if intent.translation_mode == TRANSLATION_MODE_EXPERT {
+            "expert-agent"
+        } else {
+            "programmatic"
+        };
+        if revision.executor != expected_executor {
+            return Err("prompt_pack_executor_mismatch".into());
+        }
+        let uses_reflection = prompt_pack_revision_uses_reflection(revision);
+        if intent.translation_mode == TRANSLATION_MODE_FAST
+            && intent.second_pass_enabled != uses_reflection
+        {
+            return Err("prompt_pack_stage_graph_mismatch".into());
+        }
+    }
     if intent
         .skill_ids
         .iter()
@@ -3516,6 +4427,32 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
         return Err("digestMode requires epub in outputFormats.".into());
     }
     Ok(())
+}
+
+fn validate_prompt_pack_skill_dependencies(
+    selected_skill_ids: &[String],
+    revision: &PromptPackRevision,
+) -> Result<(), String> {
+    if revision.executor == "expert-agent"
+        && revision
+            .required_skill_ids
+            .iter()
+            .any(|required| !selected_skill_ids.contains(required))
+    {
+        return Err("prompt_pack_required_skill_missing".into());
+    }
+    Ok(())
+}
+
+fn prompt_pack_revision_uses_reflection(revision: &PromptPackRevision) -> bool {
+    revision
+        .stages
+        .iter()
+        .any(|stage| stage.stage_id == "reflect")
+        && revision
+            .stages
+            .iter()
+            .any(|stage| stage.stage_id == "improve")
 }
 
 /// Guards the queue boundary. An unknown mode is refused instead of being given
@@ -3611,7 +4548,7 @@ fn queue_standard_job_with_translation_intent<E: RunnerCommandExecutor>(
         mode,
         translation_intent,
         config,
-        &book_ocr_conversion_root(),
+        &book_ocr_conversion_root()?,
     )
 }
 
@@ -3656,6 +4593,8 @@ fn queue_standard_job_for_root<E: RunnerCommandExecutor>(
         translation_profile_id: translation_intent.profile_id,
         translation_config_id: translation_intent.config_id,
         translation_skill_ids: translation_intent.skill_ids,
+        prompt_pack_reference: translation_intent.prompt_pack_reference,
+        prompt_pack_selection_source: "default".into(),
         second_pass_enabled: translation_intent.second_pass_enabled,
         text_cleanup: translation_intent.text_cleanup,
         digest_mode: translation_intent.digest_mode,
@@ -3757,7 +4696,7 @@ fn queue_zotero_collection_snapshot_job<E: RunnerCommandExecutor>(
                 &collection_key,
                 member,
                 &mode,
-                translation_intent.digest_mode,
+                &translation_intent,
                 &source.route_overrides,
             )
         })
@@ -3810,6 +4749,8 @@ fn queue_zotero_collection_snapshot_job<E: RunnerCommandExecutor>(
         translation_profile_id: translation_intent.profile_id,
         translation_config_id: translation_intent.config_id,
         translation_skill_ids: translation_intent.skill_ids,
+        prompt_pack_reference: translation_intent.prompt_pack_reference,
+        prompt_pack_selection_source: "default".into(),
         second_pass_enabled: translation_intent.second_pass_enabled,
         text_cleanup: translation_intent.text_cleanup,
         digest_mode: translation_intent.digest_mode,
@@ -3873,7 +4814,8 @@ fn queue_zotero_collection_snapshot_job<E: RunnerCommandExecutor>(
 }
 
 fn build_zotero_collection_snapshot_command(collection_key: &str) -> Result<RunnerCommand, String> {
-    let repo_root = local_reading_repo_root()?;
+    let resource_root = bundled_resource_root()?;
+    let scratch_dir = default_output_root()?.join("zotero-commands");
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: ZOTERO_COLLECTION_SNAPSHOT_COMMAND_LABEL.into(),
@@ -3887,8 +4829,8 @@ fn build_zotero_collection_snapshot_command(collection_key: &str) -> Result<Runn
             collection_key.into(),
         ],
         env: Vec::new(),
-        cwd: Some(repo_root.clone()),
-        output_dir: repo_root,
+        cwd: Some(resource_root),
+        output_dir: scratch_dir,
         attempts: 1,
         accepted_exit_codes: vec![0],
     })
@@ -4094,7 +5036,7 @@ fn collection_snapshot_child(
     collection_key: &str,
     member: &ZoteroCollectionSnapshotMember,
     mode: &str,
-    digest_mode: bool,
+    translation_intent: &BookPipelineTranslationIntent,
     route_overrides: &BTreeMap<String, String>,
 ) -> Option<BookPipelineChildJob> {
     let attachment_key = member.attachment_key.as_deref()?;
@@ -4112,7 +5054,7 @@ fn collection_snapshot_child(
                 } else {
                     STATUS_BLOCKED.into()
                 }
-            } else if stage_id == "build_digest" && !digest_mode {
+            } else if stage_id == "build_digest" && !translation_intent.digest_mode {
                 STATUS_SKIPPED.into()
             } else {
                 STATUS_PENDING.into()
@@ -4168,7 +5110,8 @@ fn collection_snapshot_child(
             eligibility: member.eligibility.clone(),
             reason: member.reason.clone(),
         }),
-        custom_instructions: None,
+        prompt_pack_reference: translation_intent.prompt_pack_reference.clone(),
+        prompt_pack_selection_source: "default".into(),
         reader_evidence: Vec::new(),
         removed_at: None,
     };
@@ -4227,6 +5170,7 @@ fn queue_job(
         profile_id: "fake-provider-profile".into(),
         config_id: "fake-provider-config".into(),
         skill_ids: Vec::new(),
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         second_pass_enabled: false,
         text_cleanup: false,
         digest_mode: false,
@@ -5548,7 +6492,7 @@ fn continue_after_item_index(
             handoff_job_markdown_with_runner(store, job_id, None, repo_root, handoff_runner)
         }
         None => {
-            let repo_root = local_reading_repo_root()?;
+            let repo_root = user_workspace_root()?;
             handoff_job_markdown_with_runner(store, job_id, None, &repo_root, handoff_runner)
         }
     }
@@ -6185,7 +7129,7 @@ fn run_durable_collection_handoff_stage(
             &markdown_path,
             repo_root,
         ),
-        None => local_reading_repo_root().and_then(|repo_root| {
+        None => user_workspace_root().and_then(|repo_root| {
             handoff_runner.handoff_attachment(
                 &running_job,
                 &running_child,
@@ -6395,6 +7339,20 @@ fn run_job_with_handoff_mode(
 
     let output_dir = store.job_output_dir(&running_job.id);
     let result = runner.run(&running_job, &output_dir);
+    let result = match result {
+        Ok(output) if running_job.mode == MODE_LAYOUT_PRESERVING => {
+            let workspace_root = repo_root
+                .map(Path::to_path_buf)
+                .map(Ok)
+                .unwrap_or_else(user_workspace_root);
+            workspace_root.and_then(|workspace_root| {
+                promote_layout_output_to_workspace(&running_job, output, &workspace_root)
+                    .map(|(output, project_root)| (output, Some(project_root)))
+            })
+        }
+        Ok(output) => Ok((output, None)),
+        Err(error) => Err(error),
+    };
     let mut state = store.load()?;
     let index = state
         .jobs
@@ -6405,13 +7363,18 @@ fn run_job_with_handoff_mode(
     let should_handoff = should_handoff_after_run(&state.jobs[index].mode);
 
     match result {
-        Ok(output) => {
+        Ok((output, durable_project_root)) => {
             state.jobs[index].last_error = None;
             state.jobs[index].artifacts = output.artifacts;
             state.jobs[index].collection_items = output.collection_items;
             state.jobs[index].output_dir = output.output_dir.map(|path| display_path(&path));
             state.jobs[index].log_summary.extend(output.log_summary);
             apply_runner_output_to_children(&mut state.jobs[index]);
+            if let Some(project_root) = durable_project_root {
+                for child in &mut state.jobs[index].children {
+                    child.local_project_root = Some(display_path(&project_root));
+                }
+            }
             if runnable_item_index_child(&state.jobs[index], None).is_some() {
                 state.jobs[index].current_step =
                     "Extraction completed; item-scoped index ready".into();
@@ -6496,7 +7459,7 @@ fn run_job_with_handoff_mode(
                     let handoff_result = if let Some(repo_root) = repo_root {
                         handoff_runner.handoff(&handoff_job, selected, repo_root)
                     } else {
-                        local_reading_repo_root().and_then(|repo_root| {
+                        user_workspace_root().and_then(|repo_root| {
                             handoff_runner.handoff(&handoff_job, selected, &repo_root)
                         })
                     };
@@ -6666,8 +7629,14 @@ impl TranslationHandoffRunner for LocalProjectHandoffRunner {
         artifact_path: &str,
         repo_root: &Path,
     ) -> Result<TranslationHandoffOutput, String> {
+        let mut child_scoped_job = job.clone();
+        child_scoped_job.source = child.source.clone();
+        child_scoped_job.route = child.route.clone();
+        if let Some(identity) = child.source_identity.as_ref() {
+            child_scoped_job.source.path = Some(identity.attachment_path.clone());
+        }
         create_translation_handoff_project_with_title(
-            job,
+            &child_scoped_job,
             Some(artifact_path),
             repo_root,
             child.source.title.as_deref(),
@@ -6693,11 +7662,10 @@ impl<E: RunnerCommandExecutor> PipelineRunner for CommandPipelineRunner<E> {
             if job.source.kind == "markdown_source" {
                 return run_markdown_source_job(job, output_dir);
             }
-            let root = self
-                .book_ocr_conversion_root
-                .as_deref()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(book_ocr_conversion_root);
+            let root = match self.book_ocr_conversion_root.as_deref() {
+                Some(root) => root.to_path_buf(),
+                None => book_ocr_conversion_root()?,
+            };
             return run_zotero_batch_job(&self.executor, job, output_dir, &root);
         }
 
@@ -6715,11 +7683,10 @@ impl<E: RunnerCommandExecutor> PipelineRunner for CommandPipelineRunner<E> {
         child: &BookPipelineChildJob,
         _output_dir: &Path,
     ) -> Result<AttachmentRouteOutput, String> {
-        let root = self
-            .book_ocr_conversion_root
-            .as_deref()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(book_ocr_conversion_root);
+        let root = match self.book_ocr_conversion_root.as_deref() {
+            Some(root) => root.to_path_buf(),
+            None => book_ocr_conversion_root()?,
+        };
         route_zotero_attachment_from_worker(&self.executor, child, &root)
     }
 
@@ -6729,11 +7696,10 @@ impl<E: RunnerCommandExecutor> PipelineRunner for CommandPipelineRunner<E> {
         child: &BookPipelineChildJob,
         output_dir: &Path,
     ) -> Result<RunnerOutput, String> {
-        let root = self
-            .book_ocr_conversion_root
-            .as_deref()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(book_ocr_conversion_root);
+        let root = match self.book_ocr_conversion_root.as_deref() {
+            Some(root) => root.to_path_buf(),
+            None => book_ocr_conversion_root()?,
+        };
         let command = build_zotero_child_conversion_command_for_root(child, output_dir, &root)?;
         execute_conversion_command(&self.executor, command)
     }
@@ -6911,8 +7877,8 @@ fn build_zotero_item_index_command(
             "--embedding-profile-id".into(),
             index_input.embedding_profile_id,
         ],
-        env: Vec::new(),
-        cwd: Some(local_reading_repo_root()?),
+        env: vec![zotero_index_env_for(&crate::app_paths::current()?)],
+        cwd: Some(bundled_resource_root()?),
         output_dir: output_dir.to_path_buf(),
         attempts: child
             .stages
@@ -6939,8 +7905,8 @@ fn build_zotero_item_index_profile_command(
             "zfulltext".into(),
             "profile".into(),
         ],
-        env: Vec::new(),
-        cwd: Some(local_reading_repo_root()?),
+        env: vec![zotero_index_env_for(&crate::app_paths::current()?)],
+        cwd: Some(bundled_resource_root()?),
         output_dir: output_dir.to_path_buf(),
         attempts: child
             .stages
@@ -6953,8 +7919,7 @@ fn build_zotero_item_index_profile_command(
 }
 
 /// Inject the Keychain-stored key for the Zotero full-text search embedding
-/// backend. A no-op when no key is stored, so indexing still falls back to a
-/// key in the repository-root .env.
+/// backend. A no-op when no key is stored.
 fn inject_embedding_credential(command: &mut RunnerCommand) {
     if let Some((key_env, value)) = crate::embedding_settings::resolve_credential_env() {
         command.env.push((key_env, value));
@@ -6962,8 +7927,7 @@ fn inject_embedding_credential(command: &mut RunnerCommand) {
 }
 
 /// Inject the Keychain-stored PaddleOCR / MinerU tokens into an OCR worker
-/// command. A no-op when nothing is stored; the worker's own repo-root .env
-/// lookup remains the fallback (it never overrides an injected variable).
+/// command. A no-op when nothing is stored.
 /// Routing/discovery commands need this too — the worker decides between
 /// paddle-ocr and missing-paddleocr-token routes by looking at these vars.
 fn inject_ocr_credentials(command: &mut RunnerCommand) {
@@ -6973,9 +7937,7 @@ fn inject_ocr_credentials(command: &mut RunnerCommand) {
 }
 
 /// Inject the Keychain-stored Zotero Web API credentials into a `zsearch`
-/// write command. A no-op when nothing is stored; the CLI's own repo-root
-/// `.env` lookup remains the fallback, and it never overrides an injected
-/// variable.
+/// write command. A no-op when nothing is stored.
 fn inject_zotero_credentials(command: &mut RunnerCommand) {
     for (key_env, value) in crate::zotero_settings::resolve_credential_env() {
         command.env.push((key_env, value));
@@ -6989,8 +7951,8 @@ fn inject_zotero_credentials(command: &mut RunnerCommand) {
 /// to fail here with something the user can act on rather than a stack trace from
 /// inside the subprocess.
 fn inject_layout_pdf_model_env(command: &mut RunnerCommand) -> Result<(), String> {
-    let repo_root = translation_engine_repo_root()?;
-    let endpoint = crate::model_settings::resolve_openai_compatible_endpoint(&repo_root)?;
+    let resource_root = translation_engine_resource_root()?;
+    let endpoint = crate::model_settings::resolve_openai_compatible_endpoint(&resource_root)?;
     command
         .env
         .push((LAYOUT_PDF_BASE_URL_ENV.into(), endpoint.base_url));
@@ -7286,6 +8248,8 @@ fn zotero_item_job(parent: &BookPipelineJob, route: &BookPipelineRouteItem) -> B
         translation_profile_id: parent.translation_profile_id.clone(),
         translation_config_id: parent.translation_config_id.clone(),
         translation_skill_ids: parent.translation_skill_ids.clone(),
+        prompt_pack_reference: parent.prompt_pack_reference.clone(),
+        prompt_pack_selection_source: parent.prompt_pack_selection_source.clone(),
         second_pass_enabled: parent.second_pass_enabled,
         text_cleanup: parent.text_cleanup,
         digest_mode: parent.digest_mode,
@@ -7406,6 +8370,13 @@ fn run_markdown_source_job(
             display_path(&source_path)
         )
     })?;
+    let publication_evidence = source_path.with_extension("publication.json");
+    if publication_evidence.is_file() {
+        copy_file_verified(
+            &publication_evidence,
+            &copied.with_extension("publication.json"),
+        )?;
+    }
     let mineru_source = source_path.with_extension("mineru");
     if mineru_source.is_dir() {
         // `.mineru` may be renamed to follow the staged file: nothing refers to
@@ -7471,8 +8442,8 @@ fn build_external_adapter_command(
 }
 
 /// The OCR and Zotero wrappers import PyMuPDF, pypdf, requests and markdown,
-/// which the `ocr` workspace member declares and uv installs into the repo-root
-/// `.venv`. A bare interpreter only ever found them where a machine happened to
+/// which the `ocr` workspace member declares and uv installs into the app's
+/// Application Support runtime environment. A bare interpreter only ever found them where a machine happened to
 /// have them installed globally, so these scripts go through `uv run --package`
 /// exactly like the translation, index and digest stages already do. The command
 /// runs from the OCR root, from which uv discovers the enclosing workspace.
@@ -7490,7 +8461,7 @@ fn build_local_pdf_folder_command(
     job: &BookPipelineJob,
     output_dir: &Path,
 ) -> Result<RunnerCommand, String> {
-    build_local_pdf_folder_command_for_root(job, output_dir, &book_ocr_conversion_root())
+    build_local_pdf_folder_command_for_root(job, output_dir, &book_ocr_conversion_root()?)
 }
 
 fn build_local_pdf_folder_command_for_root(
@@ -7659,13 +8630,12 @@ fn build_epub_extract_command(
     })
 }
 
-/// The repository root, having checked that the layout-preserving package is
-/// actually there. `uv run --package` resolves against the workspace root, so a
-/// repoRoot pointing somewhere without this member fails inside uv with a much
-/// worse message than this one.
-fn layout_pdf_repo_root() -> Result<PathBuf, String> {
-    let repo_root = local_reading_repo_root()?;
-    let package_manifest = repo_root
+/// The bundled resource root, having checked that the layout-preserving package
+/// is actually there. `uv run --package` resolves against this packaged Python
+/// workspace.
+fn layout_pdf_resource_root() -> Result<PathBuf, String> {
+    let resource_root = bundled_resource_root()?;
+    let package_manifest = resource_root
         .join("packages")
         .join("layout-pdf")
         .join("pyproject.toml");
@@ -7675,7 +8645,7 @@ fn layout_pdf_repo_root() -> Result<PathBuf, String> {
             display_path(&package_manifest)
         ));
     }
-    Ok(repo_root)
+    Ok(resource_root)
 }
 
 /// The source PDF for a layout-track route.
@@ -7749,7 +8719,7 @@ fn build_layout_pdf_command(
     job: &BookPipelineJob,
     output_dir: &Path,
 ) -> Result<RunnerCommand, String> {
-    build_layout_pdf_command_for_root(job, output_dir, &layout_pdf_repo_root()?)
+    build_layout_pdf_command_for_root(job, output_dir, &layout_pdf_resource_root()?)
 }
 
 fn build_layout_pdf_command_for_root(
@@ -7789,7 +8759,7 @@ fn build_zotero_conversion_command(
     job: &BookPipelineJob,
     output_dir: &Path,
 ) -> Result<RunnerCommand, String> {
-    build_zotero_conversion_command_for_root(job, output_dir, &book_ocr_conversion_root())
+    build_zotero_conversion_command_for_root(job, output_dir, &book_ocr_conversion_root()?)
 }
 
 fn build_zotero_conversion_command_for_root(
@@ -7947,9 +8917,8 @@ fn build_zotero_discovery_command_for_root(
         args,
         env: Vec::new(),
         cwd: Some(root.to_path_buf()),
-        output_dir: root
-            .join("output")
-            .join("book-pipeline")
+        output_dir: default_output_root()?
+            .join("probes")
             .join("zotero-discovery"),
         attempts: 0,
         accepted_exit_codes: vec![0],
@@ -7964,7 +8933,7 @@ fn discover_zotero_sources<E: RunnerCommandExecutor>(
     if source.kind == "zotero_collection" && source.fake_zotero_items.is_none() {
         return discover_zotero_collection_snapshot(executor, source);
     }
-    discover_zotero_sources_with_root(executor, source, limit, &book_ocr_conversion_root())
+    discover_zotero_sources_with_root(executor, source, limit, &book_ocr_conversion_root()?)
 }
 
 fn discover_zotero_sources_with_root<E: RunnerCommandExecutor>(
@@ -8449,12 +9418,30 @@ fn resolve_runner_program_in(dirs: &[PathBuf], program: &Path) -> PathBuf {
 }
 
 /// The launcher downloads a private JRE and CPython, and `run_epubcheck.js` /
-/// `run_python.js` already honour `BIBLIOSMITH_JAVA` / `BIBLIOSMITH_PYTHON`;
+/// `run_python.cjs` already honours `BIBLIOSMITH_JAVA` / `BIBLIOSMITH_PYTHON`;
 /// resolving the same way here keeps the Rust EPUBCheck and bilingual-build
 /// calls on that contract instead of whatever interpreter a desktop session
 /// inherited. Resolved per call, not cached: preparing a runtime from Settings
 /// mid-session has to take effect on the next stage rather than after a restart.
+fn bundled_tool_path(paths: &crate::app_paths::AppPaths, name: &str) -> PathBuf {
+    paths
+        .runtime_bin_root()
+        .join(if cfg!(target_os = "windows") {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        })
+}
+
 fn resolve_runner_program(program: &Path) -> PathBuf {
+    if let Some(name @ ("uv" | "node")) = program.as_os_str().to_str() {
+        if let Ok(paths) = crate::app_paths::current() {
+            let bundled = bundled_tool_path(&paths, name);
+            if bundled.is_file() || !cfg!(debug_assertions) {
+                return bundled;
+            }
+        }
+    }
     let managed = match program.as_os_str().to_str() {
         Some("java") => crate::managed_java_executable(),
         Some("python3") => crate::managed_python_executable(),
@@ -8468,22 +9455,58 @@ fn resolve_runner_program(program: &Path) -> PathBuf {
 
 /// The child needs the same search path: `uv` has to find a Python, `node` has
 /// to find its own tooling, and neither inherits anything useful from a desktop
-/// launch. `command.env` is applied afterwards so a command can still override.
-fn runner_path_env_value() -> Option<OsString> {
-    env::join_paths(program_search_dirs()).ok()
+/// launch.
+fn runner_path_env_value(resource_root: &Path) -> Option<OsString> {
+    let mut dirs = vec![resource_root.join("bin")];
+    dirs.extend(program_search_dirs().iter().cloned());
+    env::join_paths(dirs).ok()
+}
+
+/// Every pipeline process can indirectly launch the bundled Python runner.
+/// Apply command-specific values first, then protect the four-layer runtime
+/// paths so a nested Node process cannot send uv back into the signed resource
+/// tree or re-enable repository dotenv discovery.
+fn runner_runtime_env_for(
+    paths: &crate::app_paths::AppPaths,
+    command: &RunnerCommand,
+) -> Vec<(String, String)> {
+    let mut values = command.env.iter().cloned().collect::<BTreeMap<_, _>>();
+    values.insert(
+        "BIBLIOSMITH_UV".into(),
+        display_path(&bundled_tool_path(paths, "uv")),
+    );
+    values.insert(
+        "BIBLIOSMITH_RUNTIME_ROOT".into(),
+        display_path(&paths.resource_root()),
+    );
+    values.insert(
+        "PYTHONPYCACHEPREFIX".into(),
+        display_path(&paths.cache_root().join("python-bytecode")),
+    );
+    for (key, value) in uv_runtime_env_for(paths) {
+        values.insert(key, value);
+    }
+    values.insert("BIBLIOSMITH_DISABLE_DOTENV".into(), "1".into());
+    values.into_iter().collect()
 }
 
 fn run_process_command(command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+    let paths = crate::app_paths::current()?;
+    let resource_root = paths.resource_root();
+    fs::create_dir_all(paths.cache_root().join("python-bytecode"))
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(paths.support_root().join("runtimes")).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&command.output_dir).map_err(|error| error.to_string())?;
     let program = resolve_runner_program(&command.program);
     let mut process = Command::new(&program);
     process.args(&command.args);
     let live_progress_path = command.output_dir.join(LIVE_PROGRESS_FILE);
     let _ = fs::remove_file(&live_progress_path);
     process.env(LIVE_PROGRESS_PATH_ENV, &live_progress_path);
-    if let Some(path_value) = runner_path_env_value() {
+    if let Some(path_value) = runner_path_env_value(&resource_root) {
         process.env("PATH", path_value);
     }
-    process.envs(command.env.iter().map(|(key, value)| (key, value)));
+    process.envs(runner_runtime_env_for(&paths, command));
     if let Some(cwd) = &command.cwd {
         process.current_dir(cwd);
     }
@@ -9434,9 +10457,8 @@ fn build_local_pdf_route_plan_command(
         // does not create its output tree. This is only the directory the runner
         // hangs its live-progress file off, named the way Zotero discovery names
         // its own -- never the user's book folder.
-        output_dir: root
-            .join("output")
-            .join("book-pipeline")
+        output_dir: default_output_root()?
+            .join("probes")
             .join("local-pdf-route-plan"),
         attempts: 0,
         accepted_exit_codes: vec![0],
@@ -9677,6 +10699,151 @@ fn collect_artifacts(dir: &Path, artifacts: &mut Vec<BookPipelineArtifact>) -> R
     Ok(())
 }
 
+fn promote_layout_output_to_workspace(
+    job: &BookPipelineJob,
+    mut output: RunnerOutput,
+    workspace_root: &Path,
+) -> Result<(RunnerOutput, PathBuf), String> {
+    let source_path = layout_pdf_source_path(layout_pdf_route(job)?)?;
+    let cached_pdf = output
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "pdf")
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .filter(|path| path.is_file())
+        .ok_or_else(|| {
+            "Layout-preserving translation finished without a bilingual PDF to preserve."
+                .to_string()
+        })?;
+    let target_dir = workspace_root.join("books").join("local").join("zh-Hans");
+    let project_slug = clean_project_slug(
+        job.source
+            .title
+            .as_deref()
+            .or_else(|| source_path.file_stem().and_then(|name| name.to_str()))
+            .unwrap_or("layout_pdf"),
+    );
+    let project_root = create_new_local_project(&target_dir, &project_slug)?;
+
+    let promotion = (|| -> Result<Vec<BookPipelineArtifact>, String> {
+        let source_extension = source_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("pdf")
+            .to_ascii_lowercase();
+        let stored_source = project_root
+            .join("source")
+            .join(format!("original.{source_extension}"));
+        copy_file_verified(&source_path, &stored_source)?;
+        fs::write(
+            project_root.join("source").join("source.md"),
+            "# Layout-preserving source\n\nThe original source is stored as [original.pdf](original.pdf). This project preserves the translated reading output without extracting a Markdown source.\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let final_name = cached_pdf
+            .file_name()
+            .ok_or_else(|| "The bilingual PDF has no file name.".to_string())?;
+        let durable_pdf = project_root.join("output").join("reading").join(final_name);
+        copy_file_verified(&cached_pdf, &durable_pdf)?;
+        write_binary_source_manifest(&project_root, &source_path, &stored_source)?;
+        let manifest = project_root.join("metadata").join("source_manifest.json");
+        Ok(vec![
+            BookPipelineArtifact {
+                kind: "source_book".into(),
+                path: display_path(&stored_source),
+                sha256: Some(sha256_file(&stored_source)?),
+                producer_stage: Some("extract".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "source_manifest".into(),
+                path: display_path(&manifest),
+                sha256: Some(sha256_file(&manifest)?),
+                producer_stage: Some("extract".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "reading_bilingual_pdf".into(),
+                path: display_path(&durable_pdf),
+                sha256: Some(sha256_file(&durable_pdf)?),
+                producer_stage: Some("extract".into()),
+                ..BookPipelineArtifact::default()
+            },
+        ])
+    })();
+
+    let artifacts = match promotion {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&project_root);
+            return Err(error);
+        }
+    };
+    output.artifacts = artifacts;
+    output.log_summary.push(format!(
+        "Layout-preserving book saved in the user workspace at {}",
+        display_path(&project_root)
+    ));
+    output.current_step = Some("Layout-preserving bilingual PDF ready".into());
+    Ok((output, project_root))
+}
+
+fn copy_file_verified(source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "BiblioSmith only imports regular source files: {}",
+            display_path(source)
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let expected = sha256_file(source)?;
+    fs::copy(source, target).map_err(|error| error.to_string())?;
+    let actual = sha256_file(target)?;
+    if expected != actual {
+        let _ = fs::remove_file(target);
+        return Err(format!(
+            "Copied file failed SHA-256 verification: {}",
+            display_path(target)
+        ));
+    }
+    Ok(())
+}
+
+fn write_binary_source_manifest(
+    project_root: &Path,
+    original_path: &Path,
+    stored_path: &Path,
+) -> Result<(), String> {
+    let stored_relative = stored_path
+        .strip_prefix(project_root)
+        .map_err(|_| "Stored source escaped its book project.".to_string())?;
+    let source_format = original_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
+    let manifest = serde_json::json!({
+        "schema": "local-reading-source-manifest-v1",
+        "project_type": "book",
+        "source_file_name": original_path.file_name().and_then(|name| name.to_str()).unwrap_or("original"),
+        "stored_source_path": display_path(stored_relative),
+        "source_sha256": sha256_file(stored_path)?,
+        "source_format": source_format,
+        "source_language": "auto",
+        "target_language": "zh-Hans",
+        "extraction_status": "layout_translation_completed",
+        "notes": "The user-owned original and final bilingual PDF were copied and hash-verified by BiblioSmith.",
+    });
+    fs::write(
+        project_root.join("metadata").join("source_manifest.json"),
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())? + "\n",
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn create_translation_handoff_project(
     job: &BookPipelineJob,
     artifact_path: Option<&str>,
@@ -9713,71 +10880,262 @@ fn create_translation_handoff_project_with_title(
             display_path(&markdown_path)
         ));
     }
+    let original_source = original_source_for_handoff(job, &markdown_path, project_title)?;
+    let original_extension = original_source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
+    let extracted_publication_evidence = markdown_path.with_extension("publication.json");
+    if matches!(original_extension.as_str(), "epub" | "pdf")
+        && !extracted_publication_evidence.is_file()
+    {
+        return Err(format!(
+            "The {original_extension} extractor finished without required publication evidence at {}.",
+            display_path(&extracted_publication_evidence)
+        ));
+    }
     let target_dir = repo_root.join("books").join("local").join("zh-Hans");
     let project_slug = clean_project_slug(
         project_title
             .or_else(|| markdown_path.file_stem().and_then(|name| name.to_str()))
             .unwrap_or("book_pipeline_handoff"),
     );
-    let project_root = target_dir.join(format!(
-        "{:03}_{}",
-        next_local_project_number(&target_dir)?,
-        project_slug
-    ));
-    create_local_project_contract(&project_root)?;
-    let original = project_root.join("source").join("original.md");
-    let source = project_root.join("source").join("source.md");
-    fs::copy(&markdown_path, &original).map_err(|err| err.to_string())?;
-    fs::copy(&markdown_path, &source).map_err(|err| err.to_string())?;
-    let source_resources_path = match markdown_resource_directory(&markdown_path) {
-        Some(resources) => {
-            let directory_name = resources
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| "Markdown resource directory has an invalid name.".to_string())?;
-            // Keep the directory name: the Markdown references it by that exact
-            // relative path, so renaming it here would dangle every figure link.
-            let target = project_root.join("source").join(directory_name);
-            copy_directory_tree(&resources, &target)?;
-            Some(format!("source/{directory_name}"))
+    let project_root = create_new_local_project(&target_dir, &project_slug)?;
+    let handoff = (|| -> Result<TranslationHandoffOutput, String> {
+        let original = project_root
+            .join("source")
+            .join(format!("original.{original_extension}"));
+        let source = project_root.join("source").join("source.md");
+        copy_file_verified(&original_source, &original)?;
+        copy_file_verified(&markdown_path, &source)?;
+        let stored_publication_evidence = if extracted_publication_evidence.is_file() {
+            let target = project_root
+                .join("metadata")
+                .join("extracted_publication_evidence.json");
+            copy_file_verified(&extracted_publication_evidence, &target)?;
+            Some(target)
+        } else {
+            None
+        };
+        let source_resources_path = match markdown_resource_directory(&markdown_path) {
+            Some(resources) => {
+                let directory_name = resources
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        "Markdown resource directory has an invalid name.".to_string()
+                    })?;
+                // Keep the directory name: the Markdown references it by that exact
+                // relative path, so renaming it here would dangle every figure link.
+                let target = project_root.join("source").join(directory_name);
+                copy_directory_tree(&resources, &target)?;
+                Some(format!("source/{directory_name}"))
+            }
+            None => None,
+        };
+        if let Some(evidence_path) = stored_publication_evidence.as_deref() {
+            apply_extracted_book_metadata(&project_root, evidence_path)?;
         }
-        None => None,
-    };
-    let source_sha256 = sha256_file(&markdown_path)?;
-    write_source_manifest(
-        &project_root,
-        &markdown_path,
-        &source_sha256,
-        "cleaned_markdown_ready",
-        source_resources_path.as_deref(),
-    )?;
-    let manifest = project_root.join("metadata").join("source_manifest.json");
-    let artifacts = vec![
-        BookPipelineArtifact {
-            kind: "translation_source".into(),
-            path: display_path(&source),
-            sha256: Some(sha256_file(&source)?),
-            zotero_key: markdown.zotero_key.clone(),
-            producer_stage: Some("handoff".into()),
-            ..BookPipelineArtifact::default()
-        },
-        BookPipelineArtifact {
-            kind: "source_manifest".into(),
-            path: display_path(&manifest),
-            sha256: Some(sha256_file(&manifest)?),
-            zotero_key: markdown.zotero_key.clone(),
-            producer_stage: Some("handoff".into()),
-            ..BookPipelineArtifact::default()
-        },
-    ];
-    let log_summary = vec![format!(
-        "Translation handoff ready at {}",
-        display_path(&project_root)
-    )];
-    Ok(TranslationHandoffOutput {
-        log_summary,
-        artifacts,
-    })
+        write_source_manifest(
+            &project_root,
+            &original_source,
+            &original,
+            &source,
+            "cleaned_markdown_ready",
+            source_resources_path.as_deref(),
+            stored_publication_evidence.as_deref(),
+        )?;
+        let manifest = project_root.join("metadata").join("source_manifest.json");
+        let mut artifacts = vec![
+            BookPipelineArtifact {
+                kind: "source_book".into(),
+                path: display_path(&original),
+                sha256: Some(sha256_file(&original)?),
+                zotero_key: markdown.zotero_key.clone(),
+                producer_stage: Some("handoff".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "translation_source".into(),
+                path: display_path(&source),
+                sha256: Some(sha256_file(&source)?),
+                zotero_key: markdown.zotero_key.clone(),
+                producer_stage: Some("handoff".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "source_manifest".into(),
+                path: display_path(&manifest),
+                sha256: Some(sha256_file(&manifest)?),
+                zotero_key: markdown.zotero_key.clone(),
+                producer_stage: Some("handoff".into()),
+                ..BookPipelineArtifact::default()
+            },
+        ];
+        if let Some(path) = stored_publication_evidence {
+            artifacts.push(BookPipelineArtifact {
+                kind: "publication_structure_evidence".into(),
+                path: display_path(&path),
+                sha256: Some(sha256_file(&path)?),
+                zotero_key: markdown.zotero_key.clone(),
+                producer_stage: Some("handoff".into()),
+                ..BookPipelineArtifact::default()
+            });
+        }
+        let log_summary = vec![format!(
+            "Translation handoff ready at {}",
+            display_path(&project_root)
+        )];
+        Ok(TranslationHandoffOutput {
+            log_summary,
+            artifacts,
+        })
+    })();
+    match handoff {
+        Ok(output) => Ok(output),
+        Err(error) => {
+            let _ = fs::remove_dir_all(&project_root);
+            Err(error)
+        }
+    }
+}
+
+fn apply_extracted_book_metadata(project_root: &Path, evidence_path: &Path) -> Result<(), String> {
+    let evidence: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(evidence_path).map_err(|err| err.to_string())?)
+            .map_err(|err| err.to_string())?;
+    // Only package metadata is authoritative. PDF/OCR/MinerU sidecar titles are
+    // extraction hints derived from attachment file names; overwriting Zotero
+    // or user-owned book metadata with them would leak file naming into the
+    // publication title and reader navigation.
+    if evidence
+        .get("sourceFormat")
+        .and_then(serde_json::Value::as_str)
+        != Some("epub")
+    {
+        return Ok(());
+    }
+    let book_yaml = project_root.join("metadata/book.yaml");
+    let mut lines = fs::read_to_string(&book_yaml)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for (yaml_key, evidence_key) in [
+        ("title", "title"),
+        ("author", "creator"),
+        ("publisher", "publisher"),
+        ("date", "date"),
+    ] {
+        let Some(value) = evidence
+            .get(evidence_key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let replacement = format!(
+            "{yaml_key}: {}",
+            serde_json::to_string(value).map_err(|err| err.to_string())?
+        );
+        if let Some(line) = lines
+            .iter_mut()
+            .find(|line| line.starts_with(&format!("{yaml_key}:")))
+        {
+            *line = replacement;
+        } else {
+            lines.push(replacement);
+        }
+    }
+    fs::write(&book_yaml, lines.join("\n") + "\n").map_err(|err| err.to_string())?;
+    if let Some(relative_cover) = evidence
+        .get("coverPath")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let source_root = project_root.join("source");
+        let source_cover = source_root.join(relative_cover);
+        let extension = source_cover
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(str::to_ascii_lowercase)
+            .filter(|extension| {
+                matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp" | "svg")
+            })
+            .ok_or_else(|| "Extracted EPUB cover has an unsupported file type.".to_string())?;
+        if !source_cover.is_file() {
+            return Err("Extracted EPUB cover evidence points to a missing source asset.".into());
+        }
+        let canonical_source_root = source_root.canonicalize().map_err(|err| err.to_string())?;
+        let canonical_cover = source_cover.canonicalize().map_err(|err| err.to_string())?;
+        if !canonical_cover.starts_with(&canonical_source_root) {
+            return Err("Extracted EPUB cover path escapes the project source directory.".into());
+        }
+        copy_file_verified(
+            &canonical_cover,
+            &source_root.join(format!("cover.{extension}")),
+        )?;
+    }
+    Ok(())
+}
+
+fn original_source_for_handoff(
+    job: &BookPipelineJob,
+    markdown_path: &Path,
+    project_title: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = job
+        .source
+        .path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Ok(path);
+    }
+    let mut candidates = job
+        .route
+        .iter()
+        .filter(|route| route.can_run && route.route_kind != "translation_handoff")
+        .filter_map(|route| {
+            let path = route
+                .source_ref
+                .rsplit_once("#source_md5=")
+                .map(|(path, _)| path)
+                .unwrap_or(&route.source_ref)
+                .trim();
+            (!path.is_empty()).then_some(path)
+        })
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0));
+    }
+    let expected_slugs = [
+        markdown_path.file_stem().and_then(|name| name.to_str()),
+        project_title,
+    ]
+    .into_iter()
+    .flatten()
+    .map(clean_project_slug)
+    .collect::<BTreeSet<_>>();
+    candidates
+        .into_iter()
+        .find(|path| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|stem| expected_slugs.contains(&clean_project_slug(stem)))
+        })
+        .ok_or_else(|| {
+            "BiblioSmith could not identify the original source book for this translation project."
+                .to_string()
+        })
 }
 
 /// The sibling directory a cleaned Markdown file needs in order to render.
@@ -9962,33 +11320,125 @@ fn create_local_project_contract(project_root: &Path) -> Result<(), String> {
     .map_err(|err| err.to_string())?;
     fs::write(
         project_root.join("AGENTS.md"),
-        "# Book Project Instructions\n\n- Use `skills/local-book-reading-pipeline/SKILL.md` from the repository root.\n- Put source chapters in `chapters/src/`, drafts in `chapters/translated/`, final text in `chapters/final/`.\n",
+        "# BiblioSmith Book Project\n\n- This directory is user-owned reading data managed by the BiblioSmith App.\n- Put source chapters in `chapters/src/`, drafts in `chapters/translated/`, final text in `chapters/final/`.\n- App resources and runtime scripts do not belong in this directory.\n",
     )
     .map_err(|err| err.to_string())?;
     Ok(())
 }
 
+fn create_new_local_project(target_dir: &Path, project_slug: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(target_dir).map_err(|error| error.to_string())?;
+    let first_number = next_local_project_number(target_dir)?;
+    for number in first_number..=u32::MAX {
+        let project_root = target_dir.join(format!("{number:03}_{project_slug}"));
+        match fs::create_dir(&project_root) {
+            Ok(()) => {
+                if let Err(error) = create_local_project_contract(&project_root) {
+                    let _ = fs::remove_dir_all(&project_root);
+                    return Err(error);
+                }
+                return Ok(project_root);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("BiblioSmith could not reserve a unique book project directory.".into())
+}
+
 fn write_source_manifest(
     project_root: &Path,
-    markdown_path: &Path,
-    sha256: &str,
+    original_path: &Path,
+    stored_original: &Path,
+    cleaned_markdown: &Path,
     extraction_status: &str,
     source_resources_path: Option<&str>,
+    publication_evidence_path: Option<&Path>,
 ) -> Result<(), String> {
+    let stored_source_path = stored_original
+        .strip_prefix(project_root)
+        .map_err(|_| "Stored source escaped its book project.".to_string())?;
+    let cleaned_markdown_path = cleaned_markdown
+        .strip_prefix(project_root)
+        .map_err(|_| "Cleaned Markdown escaped its book project.".to_string())?;
     let mut manifest = serde_json::json!({
         "schema": "local-reading-source-manifest-v1",
         "project_type": "book",
-        "source_file_name": markdown_path.file_name().and_then(|name| name.to_str()).unwrap_or("source.md"),
-        "stored_source_path": "source/original.md",
-        "source_sha256": sha256,
-        "source_format": "md",
+        "source_file_name": original_path.file_name().and_then(|name| name.to_str()).unwrap_or("original"),
+        "stored_source_path": display_path(stored_source_path),
+        "source_sha256": sha256_file(stored_original)?,
+        "source_format": original_path.extension().and_then(|extension| extension.to_str()).unwrap_or("bin").to_ascii_lowercase(),
+        "cleaned_markdown_path": display_path(cleaned_markdown_path),
+        "cleaned_markdown_sha256": sha256_file(cleaned_markdown)?,
         "source_language": "auto",
         "target_language": "zh-Hans",
         "extraction_status": extraction_status,
-        "notes": "Created by Book Pipeline translation handoff from a cleaned Markdown artifact.",
+        "notes": "The original source and cleaned Markdown were copied and hash-verified by BiblioSmith.",
     });
+    let source_format = original_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
+    let evidence_source_format = publication_evidence_path
+        .map(|path| {
+            let evidence: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(path).map_err(|err| err.to_string())?)
+                    .map_err(|err| format!("Publication evidence is invalid JSON: {err}"))?;
+            if evidence.get("schema").and_then(serde_json::Value::as_str)
+                != Some("publication-extraction-evidence-v2")
+            {
+                return Err("Publication evidence has an unsupported schema.".to_string());
+            }
+            evidence
+                .get("sourceFormat")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| "Publication evidence has no sourceFormat.".to_string())
+        })
+        .transpose()?;
+    if let Some(evidence_format) = evidence_source_format.as_deref() {
+        let format_matches_original = match source_format.as_str() {
+            "epub" => evidence_format == "epub",
+            "pdf" => matches!(evidence_format, "pdf" | "ocr" | "mineru"),
+            "md" | "markdown" => {
+                matches!(evidence_format, "epub" | "pdf" | "ocr" | "mineru")
+            }
+            _ => false,
+        };
+        if !format_matches_original {
+            return Err(format!(
+                "Publication evidence sourceFormat {evidence_format} does not match original {source_format}."
+            ));
+        }
+    }
+    let structure_evidence_kind = match evidence_source_format.as_deref() {
+        Some("epub") => "epub_navigation".to_string(),
+        Some("pdf") => "direct_pdf_evidence".to_string(),
+        Some("ocr") => "ocr_layout_evidence".to_string(),
+        Some("mineru") => "mineru_layout_evidence".to_string(),
+        Some(other) => {
+            return Err(format!(
+                "Publication evidence has an unsupported sourceFormat: {other}."
+            ))
+        }
+        None if source_format == "epub" => "epub_navigation".to_string(),
+        None if source_format == "pdf" => "direct_pdf_markdown".to_string(),
+        None => "normalized_markdown".to_string(),
+    };
+    manifest["structure_evidence_kind"] = serde_json::Value::String(structure_evidence_kind);
+    manifest["publication_evidence_required"] =
+        serde_json::Value::Bool(publication_evidence_path.is_some());
     if let Some(path) = source_resources_path {
         manifest["source_resources_path"] = serde_json::Value::String(path.to_string());
+    }
+    if let Some(path) = publication_evidence_path {
+        let relative = path
+            .strip_prefix(project_root)
+            .map_err(|_| "Publication evidence escaped its book project.".to_string())?;
+        manifest["publication_evidence_path"] = serde_json::Value::String(display_path(relative));
+        manifest["publication_evidence_sha256"] = serde_json::Value::String(sha256_file(path)?);
     }
     fs::write(
         project_root.join("metadata").join("source_manifest.json"),
@@ -10029,9 +11479,17 @@ fn is_index_artifact(path: &Path) -> bool {
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let file = File::open(path).map_err(|err| err.to_string())?;
+    let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
-    hasher.update(bytes);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).map_err(|err| err.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -10175,104 +11633,83 @@ fn is_runtime_staging_path(path: &Path) -> bool {
 }
 
 fn default_state_dir() -> Result<PathBuf, String> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::config_local_dir)
-        .ok_or_else(|| "Could not locate local app data directory.".to_string())?;
-    Ok(base
-        .join("BiblioSmith")
-        .join("launcher")
-        .join("book-pipeline"))
+    Ok(state_dir_for(&crate::app_paths::current()?))
 }
 
 fn default_output_root() -> Result<PathBuf, String> {
-    let ocr_root = book_ocr_conversion_root();
-    if ocr_root.is_dir() {
-        return Ok(ocr_root.join("output").join("book-pipeline"));
-    }
-    Ok(default_state_dir()?.join("output"))
+    Ok(output_root_for(&crate::app_paths::current()?))
 }
 
-fn book_ocr_conversion_root() -> PathBuf {
-    let fallback_root = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Projects")
-        .join("book-ocr-conversion");
+fn state_dir_for(paths: &crate::app_paths::AppPaths) -> PathBuf {
+    paths.support_root().join("book-pipeline")
+}
 
-    match local_reading_repo_root() {
-        Ok(repo_root) => {
-            let monorepo_root = repo_root.join("packages").join("ocr");
-            if monorepo_root.is_dir() {
-                return monorepo_root;
-            }
-            eprintln!(
-                "Warning: monorepo OCR package not found at {}; falling back to legacy OCR root at {}.",
-                display_path(&monorepo_root),
-                display_path(&fallback_root)
-            );
-        }
-        Err(error) => eprintln!(
-            "Warning: could not locate the local reading repository ({error}); falling back to legacy OCR root at {}.",
-            display_path(&fallback_root)
+fn output_root_for(paths: &crate::app_paths::AppPaths) -> PathBuf {
+    paths.cache_root().join("book-pipeline").join("output")
+}
+
+fn bundled_resource_root() -> Result<PathBuf, String> {
+    let root = crate::app_paths::current()?.resource_root();
+    if root.is_dir() {
+        Ok(root)
+    } else {
+        Err(format!(
+            "BiblioSmith App resource root is missing: {}",
+            display_path(&root)
+        ))
+    }
+}
+
+fn user_workspace_root() -> Result<PathBuf, String> {
+    let root = crate::configured_or_recommended_workspace_root()?;
+    if crate::app_paths::workspace_status(&root) == crate::app_paths::WorkspaceStatus::Ready {
+        Ok(root)
+    } else {
+        Err(format!(
+            "BiblioSmith 书库尚未准备好：{}",
+            display_path(&root)
+        ))
+    }
+}
+
+fn book_ocr_conversion_root() -> Result<PathBuf, String> {
+    let root = bundled_resource_root()?.join("packages").join("ocr");
+    if root.join("pyproject.toml").is_file() {
+        Ok(root)
+    } else {
+        Err(format!(
+            "BiblioSmith OCR resource is missing: {}",
+            display_path(&root)
+        ))
+    }
+}
+
+fn uv_runtime_env_for(paths: &crate::app_paths::AppPaths) -> Vec<(String, String)> {
+    vec![
+        (
+            "UV_PROJECT_ENVIRONMENT".into(),
+            display_path(&paths.support_root().join("runtimes").join("python-env")),
         ),
-    }
-
-    fallback_root
+        (
+            "UV_CACHE_DIR".into(),
+            display_path(&paths.cache_root().join("uv")),
+        ),
+        (
+            "UV_PYTHON_INSTALL_DIR".into(),
+            display_path(&paths.support_root().join("runtimes").join("uv-python")),
+        ),
+        ("UV_NO_MODIFY_PATH".into(), "1".into()),
+        // The packaged lockfile is part of the read-only resource tree. uv may
+        // sync the mutable environment, but it must never rewrite that lock.
+        ("UV_FROZEN".into(), "1".into()),
+    ]
 }
 
-fn local_reading_repo_root() -> Result<PathBuf, String> {
-    #[cfg(test)]
-    {
-        let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        if let Some(repo_root) = start.ancestors().find(|path| {
-            path.join("AGENTS.md").is_file()
-                && path
-                    .join("tools")
-                    .join("create_local_book_project.py")
-                    .is_file()
-        }) {
-            return Ok(repo_root.to_path_buf());
-        }
-    }
-
-    // The installed app's repo root is a runtime choice (configured repoRoot,
-    // then BIBLIOSMITH_HOME), never the machine that happened to compile the
-    // binary. CARGO_MANIFEST_DIR is a build-time constant baked into the
-    // executable, so it only points at the right tree by coincidence (e.g. a
-    // self-hosted CI runner's own checkout sitting on the same disk); it stays
-    // here purely as the dev/test fallback when no runtime config exists yet.
-    if let Some(repo_root) = crate::configured_repo_root() {
-        return existing_repo_root(repo_root);
-    }
-    if let Some(repo_root) = crate::bibliosmith_home_repo_root() {
-        return existing_repo_root(repo_root);
-    }
-
-    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    start
-        .ancestors()
-        .find(|path| {
-            path.join("AGENTS.md").is_file()
-                && path
-                    .join("tools")
-                    .join("create_local_book_project.py")
-                    .is_file()
-        })
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "Could not locate bibliosmith repo root.".to_string())
-}
-
-/// The repo root is the cwd of nearly every runner command, and the default one
-/// (`~/BiblioSmith`) is a guess that need not exist. Left unchecked the spawn
-/// itself fails and the user reads an errno about a directory they never chose,
-/// so the missing root is named here together with the settings that fix it.
-fn existing_repo_root(repo_root: PathBuf) -> Result<PathBuf, String> {
-    if repo_root.is_dir() {
-        return Ok(repo_root);
-    }
-    Err(format!(
-        "BiblioSmith 仓库目录不存在：{}。请在设置里选择本地 bibliosmith 仓库目录，或把 BIBLIOSMITH_HOME 指向已有的仓库。",
-        display_path(&repo_root)
-    ))
+fn zotero_index_env_for(paths: &crate::app_paths::AppPaths) -> (String, String) {
+    (
+        "BIBLIOSMITH_ZOTERO_INDEX_PATH".into(),
+        display_path(&paths.cache_root().join("zotero").join("vectors.sqlite")),
+    )
 }
 
 fn source_title(source: &BookPipelineSource) -> String {
@@ -10373,61 +11810,6 @@ fn redact_message_tail(message: &str) -> String {
 
 // ---- Staged-gates runner: deterministic split + prepare stages (issue #38) ----
 
-struct SplitPlan {
-    primary_heading_level: usize,
-    chapters: Vec<SplitChapter>,
-}
-
-struct SplitChapter {
-    ordinal: usize,
-    id: String,
-    title: String,
-    start_line: usize,
-    end_line: usize,
-    text: String,
-    blocks: Vec<SplitBlock>,
-}
-
-struct SplitBlock {
-    id: String,
-    start_line: usize,
-    end_line: usize,
-    sha256: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SourceMapDocument {
-    schema: String,
-    split_policy_version: String,
-    source_markdown_sha256: String,
-    source_path: String,
-    primary_heading_level: usize,
-    chapters: Vec<SourceMapChapter>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SourceMapChapter {
-    id: String,
-    ordinal: usize,
-    title: String,
-    source_start_line: usize,
-    source_end_line: usize,
-    chapter_source_path: String,
-    chapter_source_sha256: String,
-    blocks: Vec<SourceMapBlock>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SourceMapBlock {
-    id: String,
-    source_start_line: usize,
-    source_end_line: usize,
-    sha256: String,
-}
-
 struct StageRunOutput {
     artifacts: Vec<BookPipelineArtifact>,
     artifact_kinds: Vec<&'static str>,
@@ -10462,452 +11844,6 @@ fn sha256_str(text: &str) -> String {
 /// any leading preamble as a front-matter chapter, and treat a heading-free
 /// document as a single chapter. Fenced code blocks are never scanned for
 /// headings so their `#` lines cannot create phantom chapters.
-const MAX_TRANSLATION_UNIT_BYTES: usize = 64 * 1024;
-
-#[derive(Clone, Copy)]
-struct MarkdownFence {
-    marker: u8,
-    width: usize,
-}
-
-fn update_markdown_fence(line: &str, state: &mut Option<MarkdownFence>) -> bool {
-    let bytes = line.as_bytes();
-    let leading_spaces = bytes.iter().take_while(|byte| **byte == b' ').count();
-    if leading_spaces > 3 || leading_spaces == bytes.len() {
-        return false;
-    }
-    let marker = bytes[leading_spaces];
-    if marker != b'`' && marker != b'~' {
-        return false;
-    }
-    let width = bytes[leading_spaces..]
-        .iter()
-        .take_while(|byte| **byte == marker)
-        .count();
-    if width < 3 {
-        return false;
-    }
-
-    if let Some(active) = state {
-        let remainder = &bytes[leading_spaces + width..];
-        if marker == active.marker
-            && width >= active.width
-            && remainder.iter().all(u8::is_ascii_whitespace)
-        {
-            *state = None;
-            return true;
-        }
-        return false;
-    }
-
-    let remainder = &bytes[leading_spaces + width..];
-    if marker == b'`' && remainder.contains(&b'`') {
-        return false;
-    }
-    *state = Some(MarkdownFence { marker, width });
-    true
-}
-
-fn split_source_markdown(text: &str) -> SplitPlan {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut fence = None;
-    let heading_levels: Vec<Option<usize>> = lines
-        .iter()
-        .map(|line| {
-            if update_markdown_fence(line, &mut fence) {
-                return None;
-            }
-            if fence.is_some() {
-                return None;
-            }
-            atx_heading_level(line)
-        })
-        .collect();
-    let primary = heading_levels.iter().flatten().min().copied();
-    let chapters = match primary {
-        None => {
-            if lines.iter().all(|line| line.trim().is_empty()) {
-                Vec::new()
-            } else {
-                vec![build_chapter(1, "Chapter 1", 1, lines.len(), &lines)]
-            }
-        }
-        Some(level) => split_at_headings(&lines, &heading_levels, level),
-    };
-    let chapters = bound_oversized_chapters(chapters, &lines, &heading_levels, primary);
-    SplitPlan {
-        primary_heading_level: primary.unwrap_or(0),
-        chapters,
-    }
-}
-
-fn bound_oversized_chapters(
-    chapters: Vec<SplitChapter>,
-    lines: &[&str],
-    heading_levels: &[Option<usize>],
-    primary: Option<usize>,
-) -> Vec<SplitChapter> {
-    let mut slices = Vec::new();
-    for chapter in chapters {
-        let start = chapter.start_line.saturating_sub(1);
-        let end = chapter.end_line;
-        if chapter.text.len() <= MAX_TRANSLATION_UNIT_BYTES {
-            slices.push((chapter.title, start, end));
-            continue;
-        }
-        let deeper_level = heading_levels[start..end]
-            .iter()
-            .flatten()
-            .copied()
-            .filter(|level| primary.is_none_or(|primary| *level > primary))
-            .min();
-        let boundaries = if let Some(deeper_level) = deeper_level {
-            heading_levels[start..end]
-                .iter()
-                .enumerate()
-                .filter_map(|(offset, level)| {
-                    (*level == Some(deeper_level)).then_some(start + offset)
-                })
-                .collect::<Vec<_>>()
-        } else {
-            paragraph_start_lines(lines, start, end)
-        };
-        if boundaries.is_empty() {
-            slices.push((chapter.title, start, end));
-            continue;
-        }
-
-        let mut unit_starts = vec![start];
-        unit_starts.extend(boundaries.iter().skip(1).copied());
-        let mut group_start = start;
-        let mut group_title = chapter.title;
-        for (position, &unit_start) in unit_starts.iter().enumerate().skip(1) {
-            let unit_end = unit_starts.get(position + 1).copied().unwrap_or(end);
-            if rendered_slice_len(&lines[group_start..unit_end]) > MAX_TRANSLATION_UNIT_BYTES {
-                slices.push((group_title, group_start, unit_start));
-                group_start = unit_start;
-                let title = heading_levels[unit_start]
-                    .is_some()
-                    .then(|| heading_title(lines[unit_start]))
-                    .filter(|title| !title.is_empty());
-                group_title = title.unwrap_or_else(|| "Continuation".into());
-            }
-        }
-        slices.push((group_title, group_start, end));
-    }
-
-    let chapters = slices
-        .into_iter()
-        .enumerate()
-        .map(|(index, (title, start, end))| {
-            build_chapter(index + 1, &title, start + 1, end, &lines[start..end])
-        })
-        .collect();
-    hard_bound_unstructured_text(chapters)
-}
-
-fn hard_bound_unstructured_text(chapters: Vec<SplitChapter>) -> Vec<SplitChapter> {
-    let mut bounded = Vec::new();
-    for chapter in chapters {
-        let pieces = hard_bound_text(&chapter.text);
-        if pieces.len() == 1 {
-            bounded.push(chapter);
-            continue;
-        }
-
-        let mut start_line = chapter.start_line;
-        for (piece_index, text) in pieces.into_iter().enumerate() {
-            let newline_count = text.bytes().filter(|byte| *byte == b'\n').count();
-            let end_line = if newline_count == 0 {
-                start_line
-            } else {
-                start_line + newline_count - usize::from(text.ends_with('\n'))
-            };
-            let title = if piece_index == 0 {
-                chapter.title.clone()
-            } else {
-                "Continuation".into()
-            };
-            bounded.push(build_chapter_from_text(
-                bounded.len() + 1,
-                &title,
-                start_line,
-                end_line,
-                text,
-            ));
-            start_line += newline_count;
-        }
-    }
-
-    for (index, chapter) in bounded.iter_mut().enumerate() {
-        chapter.ordinal = index + 1;
-        chapter.id = format!("chapter_{:03}", index + 1);
-        chapter.blocks = paragraph_blocks_for_text(&chapter.text, chapter.start_line, &chapter.id);
-    }
-    bounded
-}
-
-fn hard_bound_text(text: &str) -> Vec<String> {
-    if text.len() <= MAX_TRANSLATION_UNIT_BYTES {
-        return vec![text.to_string()];
-    }
-
-    let mut pieces = Vec::new();
-    let mut current = String::new();
-    for (atom, splittable) in structural_text_atoms(text) {
-        let atom_pieces = if splittable {
-            hard_bound_plain_text(atom)
-        } else {
-            vec![atom.to_string()]
-        };
-        for piece in atom_pieces {
-            if piece.len() > MAX_TRANSLATION_UNIT_BYTES {
-                if !current.is_empty() {
-                    pieces.push(std::mem::take(&mut current));
-                }
-                pieces.push(piece);
-            } else if current.len() + piece.len() <= MAX_TRANSLATION_UNIT_BYTES {
-                current.push_str(&piece);
-            } else {
-                pieces.push(std::mem::take(&mut current));
-                current = piece;
-            }
-        }
-    }
-    if !current.is_empty() {
-        pieces.push(current);
-    }
-    pieces
-}
-
-fn hard_bound_plain_text(text: &str) -> Vec<String> {
-    let mut pieces = Vec::new();
-    let mut remaining = text;
-    while remaining.len() > MAX_TRANSLATION_UNIT_BYTES {
-        let mut boundary = MAX_TRANSLATION_UNIT_BYTES;
-        while !remaining.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        let preferred = remaining[..boundary]
-            .char_indices()
-            .rev()
-            .find_map(|(index, character)| {
-                character
-                    .is_whitespace()
-                    .then_some(index + character.len_utf8())
-            })
-            .filter(|preferred| *preferred >= MAX_TRANSLATION_UNIT_BYTES / 2);
-        let split_at = preferred.unwrap_or(boundary);
-        pieces.push(remaining[..split_at].to_string());
-        remaining = &remaining[split_at..];
-    }
-    if !remaining.is_empty() {
-        pieces.push(remaining.to_string());
-    }
-    pieces
-}
-
-fn structural_text_atoms(text: &str) -> Vec<(&str, bool)> {
-    let mut atoms = Vec::new();
-    let mut fence = None;
-    let mut plain_start = 0;
-    let mut fence_start = None;
-    let mut offset = 0;
-    for segment in text.split_inclusive('\n') {
-        let line = segment.strip_suffix('\n').unwrap_or(segment);
-        let before = fence;
-        let fence_line = update_markdown_fence(line, &mut fence);
-        let next_offset = offset + segment.len();
-        if fence_line && before.is_none() && fence.is_some() {
-            if plain_start < offset {
-                atoms.push((&text[plain_start..offset], true));
-            }
-            fence_start = Some(offset);
-        } else if fence_line && before.is_some() && fence.is_none() {
-            let start = fence_start.take().unwrap_or(offset);
-            atoms.push((&text[start..next_offset], false));
-            plain_start = next_offset;
-        }
-        offset = next_offset;
-    }
-    if let Some(start) = fence_start {
-        atoms.push((&text[start..], false));
-    } else if plain_start < text.len() {
-        atoms.push((&text[plain_start..], true));
-    }
-    atoms
-}
-
-fn rendered_slice_len(slice: &[&str]) -> usize {
-    slice.iter().map(|line| line.len() + 1).sum()
-}
-
-fn paragraph_start_lines(lines: &[&str], start: usize, end: usize) -> Vec<usize> {
-    let mut starts = Vec::new();
-    let mut in_paragraph = false;
-    let mut fence = None;
-    for (index, line) in lines.iter().enumerate().take(end).skip(start) {
-        if update_markdown_fence(line, &mut fence) {
-            if !in_paragraph {
-                starts.push(index);
-                in_paragraph = true;
-            }
-            continue;
-        }
-        if fence.is_some() {
-            continue;
-        }
-        if line.trim().is_empty() {
-            in_paragraph = false;
-        } else if !in_paragraph {
-            starts.push(index);
-            in_paragraph = true;
-        }
-    }
-    starts
-}
-
-fn atx_heading_level(line: &str) -> Option<usize> {
-    let trimmed = line.trim_start();
-    let hashes = trimmed
-        .chars()
-        .take_while(|character| *character == '#')
-        .count();
-    if (1..=6).contains(&hashes) {
-        let rest = &trimmed[hashes..];
-        if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
-            return Some(hashes);
-        }
-    }
-    None
-}
-
-fn heading_title(line: &str) -> String {
-    line.trim_start().trim_start_matches('#').trim().to_string()
-}
-
-fn split_at_headings(
-    lines: &[&str],
-    heading_levels: &[Option<usize>],
-    primary: usize,
-) -> Vec<SplitChapter> {
-    let boundaries: Vec<usize> = heading_levels
-        .iter()
-        .enumerate()
-        .filter_map(|(index, level)| (*level == Some(primary)).then_some(index))
-        .collect();
-    let mut chapters = Vec::new();
-    let mut ordinal = 0;
-    let first = boundaries.first().copied().unwrap_or(0);
-    if first > 0 && lines[..first].iter().any(|line| !line.trim().is_empty()) {
-        ordinal += 1;
-        chapters.push(build_chapter(
-            ordinal,
-            "Front Matter",
-            1,
-            first,
-            &lines[..first],
-        ));
-    }
-    for (position, &start) in boundaries.iter().enumerate() {
-        let end = boundaries.get(position + 1).copied().unwrap_or(lines.len());
-        ordinal += 1;
-        let title = heading_title(lines[start]);
-        let title = if title.is_empty() {
-            format!("Chapter {ordinal}")
-        } else {
-            title
-        };
-        chapters.push(build_chapter(
-            ordinal,
-            &title,
-            start + 1,
-            end,
-            &lines[start..end],
-        ));
-    }
-    chapters
-}
-
-fn build_chapter(
-    ordinal: usize,
-    title: &str,
-    start_line: usize,
-    end_line: usize,
-    slice: &[&str],
-) -> SplitChapter {
-    let id = format!("chapter_{ordinal:03}");
-    let text = if slice.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", slice.join("\n"))
-    };
-    let blocks = paragraph_blocks(slice, start_line, &id);
-    SplitChapter {
-        ordinal,
-        id,
-        title: title.to_string(),
-        start_line,
-        end_line,
-        text,
-        blocks,
-    }
-}
-
-fn build_chapter_from_text(
-    ordinal: usize,
-    title: &str,
-    start_line: usize,
-    end_line: usize,
-    text: String,
-) -> SplitChapter {
-    let id = format!("chapter_{ordinal:03}");
-    let blocks = paragraph_blocks_for_text(&text, start_line, &id);
-    SplitChapter {
-        ordinal,
-        id,
-        title: title.to_string(),
-        start_line,
-        end_line,
-        text,
-        blocks,
-    }
-}
-
-fn paragraph_blocks_for_text(
-    text: &str,
-    slice_start_line: usize,
-    chapter_id: &str,
-) -> Vec<SplitBlock> {
-    let lines = text.lines().collect::<Vec<_>>();
-    paragraph_blocks(&lines, slice_start_line, chapter_id)
-}
-
-fn paragraph_blocks(slice: &[&str], slice_start_line: usize, chapter_id: &str) -> Vec<SplitBlock> {
-    let mut blocks = Vec::new();
-    let mut index = 0;
-    let mut ordinal = 0;
-    while index < slice.len() {
-        if slice[index].trim().is_empty() {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        while index < slice.len() && !slice[index].trim().is_empty() {
-            index += 1;
-        }
-        ordinal += 1;
-        let block_text = format!("{}\n", slice[start..index].join("\n"));
-        blocks.push(SplitBlock {
-            id: format!("{chapter_id}_block_{ordinal:03}"),
-            start_line: slice_start_line + start,
-            end_line: slice_start_line + index - 1,
-            sha256: sha256_str(&block_text),
-        });
-    }
-    blocks
-}
-
 fn project_root_from_child(child: &BookPipelineChildJob) -> Result<PathBuf, String> {
     child
         .local_project_root
@@ -11016,26 +11952,480 @@ fn clear_generated_files(dir: &Path, prefix: &str, suffix: &str) -> Result<(), S
     Ok(())
 }
 
-/// Split stage (order 4): deterministically write `chapters/src/` and a source
-/// map with chapter/block traceability, registering the `source_map` and
-/// `chapter_source` artifacts with SHA-256. Idempotency key is the source
-/// Markdown SHA-256 plus the split policy version.
+fn validate_extracted_source_documents(
+    project_root: &Path,
+    evidence: &ExtractedPublicationEvidence,
+) -> Result<String, String> {
+    if evidence.source_documents.is_empty() {
+        return Err("Extracted publication evidence has no retained source documents.".into());
+    }
+    let source_root = project_root.join("source");
+    let canonical_source_root = source_root.canonicalize().map_err(|error| {
+        format!("The local book source directory cannot be opened for evidence validation: {error}")
+    })?;
+    let mut bindings = Vec::with_capacity(evidence.source_documents.len());
+    for document in &evidence.source_documents {
+        let relative = Path::new(&document.path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!(
+                "Extractor source-document path is unsafe: {}",
+                document.path
+            ));
+        }
+        let candidate = source_root.join(relative);
+        let canonical = candidate.canonicalize().map_err(|_| {
+            format!(
+                "Extractor source document is missing from the local project: {}",
+                document.path
+            )
+        })?;
+        if !canonical.starts_with(&canonical_source_root) || !canonical.is_file() {
+            return Err(format!(
+                "Extractor source-document path escapes the local project: {}",
+                document.path
+            ));
+        }
+        let actual_sha256 = sha256_file(&canonical)?;
+        if actual_sha256 != document.sha256 {
+            return Err(format!(
+                "Extractor source document failed its SHA-256 check: {}",
+                document.path
+            ));
+        }
+        bindings.push(format!("{}:{actual_sha256}", document.path));
+    }
+    bindings.sort();
+    Ok(sha256_str(&bindings.join("\n")))
+}
+
+#[derive(Debug, Default)]
+struct SourceManifestStructureContract {
+    source_format: Option<String>,
+    extraction_status: Option<String>,
+    structure_kind: Option<String>,
+    publication_evidence_path: Option<String>,
+    publication_evidence_sha256: Option<String>,
+    publication_evidence_required: bool,
+}
+
+impl SourceManifestStructureContract {
+    fn requires_extractor_evidence(&self) -> bool {
+        self.publication_evidence_required
+            || self.publication_evidence_path.is_some()
+            || self.publication_evidence_sha256.is_some()
+            || self
+                .structure_kind
+                .as_deref()
+                .is_some_and(structure_kind_requires_extractor_evidence)
+            || (matches!(self.source_format.as_deref(), Some("epub" | "pdf"))
+                && self.extraction_status.as_deref() == Some("cleaned_markdown_ready"))
+    }
+}
+
+fn source_manifest_structure_contract(
+    child: &BookPipelineChildJob,
+    project_root: &Path,
+) -> Result<SourceManifestStructureContract, String> {
+    let manifest_path = project_root.join("metadata").join("source_manifest.json");
+    let manifest_artifacts = child
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "source_manifest")
+        .collect::<Vec<_>>();
+    if manifest_artifacts.len() != 1 {
+        return Err(format!(
+            "Split requires exactly one handoff source_manifest artifact; found {}.",
+            manifest_artifacts.len()
+        ));
+    }
+    let manifest_artifact = manifest_artifacts[0];
+    if manifest_artifact.producer.stage_id != "handoff"
+        || manifest_artifact.producer_stage.as_deref() != Some("handoff")
+    {
+        return Err("The source_manifest artifact was not produced by handoff.".into());
+    }
+    if Path::new(&manifest_artifact.path) != manifest_path {
+        return Err(
+            "The handoff source_manifest artifact does not identify this project manifest.".into(),
+        );
+    }
+    if !manifest_path.is_file() {
+        return Err(
+            "The handoff source_manifest artifact is missing from the local project.".into(),
+        );
+    }
+    let expected_manifest_sha256 = manifest_artifact
+        .sha256
+        .as_deref()
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| "The handoff source_manifest artifact has no valid SHA-256.".to_string())?;
+    if sha256_file(&manifest_path)? != expected_manifest_sha256 {
+        return Err("The handoff source_manifest artifact failed its SHA-256 check.".into());
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|err| err.to_string())?)
+            .map_err(|err| format!("Source manifest is invalid JSON: {err}"))?;
+    if manifest.get("schema").and_then(serde_json::Value::as_str)
+        != Some("local-reading-source-manifest-v1")
+    {
+        return Err("Source manifest has an unsupported schema.".into());
+    }
+    let publication_evidence_required = match manifest.get("publication_evidence_required") {
+        Some(value) => value.as_bool().ok_or_else(|| {
+            "Source manifest publication_evidence_required must be a boolean.".to_string()
+        })?,
+        None => false,
+    };
+    let string_field = |name: &str| -> Result<Option<String>, String> {
+        match manifest.get(name) {
+            Some(value) => value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(|value| Some(value.to_string()))
+                .ok_or_else(|| format!("Source manifest {name} must be a non-empty string.")),
+            None => Ok(None),
+        }
+    };
+    let source_format = string_field("source_format")?
+        .ok_or_else(|| "Source manifest has no source_format.".to_string())?;
+    let extraction_status = string_field("extraction_status")?
+        .ok_or_else(|| "Source manifest has no extraction_status.".to_string())?;
+    Ok(SourceManifestStructureContract {
+        source_format: Some(source_format),
+        extraction_status: Some(extraction_status),
+        structure_kind: string_field("structure_evidence_kind")?,
+        publication_evidence_path: string_field("publication_evidence_path")?,
+        publication_evidence_sha256: string_field("publication_evidence_sha256")?,
+        publication_evidence_required,
+    })
+}
+
+fn validate_publication_evidence_manifest_binding(
+    project_root: &Path,
+    evidence_path: &Path,
+    contract: &SourceManifestStructureContract,
+) -> Result<(), String> {
+    if !contract.requires_extractor_evidence() {
+        return Ok(());
+    }
+    let relative = evidence_path
+        .strip_prefix(project_root)
+        .map_err(|_| "Publication evidence escaped its local project.".to_string())?;
+    let expected_relative = display_path(relative);
+    if contract.publication_evidence_path.as_deref() != Some(expected_relative.as_str()) {
+        return Err(format!(
+            "Source manifest publication evidence path does not bind {expected_relative}."
+        ));
+    }
+    let expected_sha256 = contract
+        .publication_evidence_sha256
+        .as_deref()
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let actual_sha256 = sha256_file(evidence_path)?;
+    if expected_sha256 != Some(actual_sha256.as_str()) {
+        return Err(
+            "Extracted publication evidence SHA-256 no longer matches the handoff manifest.".into(),
+        );
+    }
+    Ok(())
+}
+
+fn structure_kind_requires_extractor_evidence(kind: &str) -> bool {
+    matches!(
+        kind,
+        "epub_navigation"
+            | "direct_pdf_evidence"
+            | "direct_pdf_markdown"
+            | "ocr_layout_evidence"
+            | "ocr_markdown"
+            | "mineru_layout_evidence"
+            | "mineru_markdown"
+    ) || kind.ends_with("_extraction_evidence")
+}
+
+/// Split stage (order 4): recover reader-visible publication structure, then
+/// write independently bounded translation units with source/block traceability.
 fn run_split_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, String> {
     let project_root = project_root_from_child(child)?;
     let source_md = project_root.join("source").join("source.md");
-    let source_text = fs::read_to_string(&source_md)
+    let original_source_text = fs::read_to_string(&source_md)
         .map_err(|_| "Source Markdown is missing; run the handoff stage first.".to_string())?;
-    let source_sha256 = sha256_str(&source_text);
-    let source_text =
-        rewrite_sidecar_asset_references_for_chapters(&project_root.join("source"), &source_text)?;
-    let plan = split_source_markdown(&source_text);
+    let source_sha256 = sha256_str(&original_source_text);
+    let source_text = rewrite_sidecar_asset_references_for_chapters(
+        &project_root.join("source"),
+        &original_source_text,
+    )?;
+    let mut plan = split_source_markdown(&source_text);
+    let extracted_evidence_path = project_root
+        .join("metadata")
+        .join("extracted_publication_evidence.json");
+    let manifest_contract = source_manifest_structure_contract(child, &project_root)?;
+    let declared_structure_kind = manifest_contract.structure_kind.clone();
+    if !extracted_evidence_path.is_file() && manifest_contract.requires_extractor_evidence() {
+        return Err(format!(
+            "The source manifest requires extracted publication evidence, but metadata/extracted_publication_evidence.json is missing (source format: {}, structure route: {}).",
+            manifest_contract.source_format.as_deref().unwrap_or("unknown"),
+            declared_structure_kind.as_deref().unwrap_or("missing")
+        ));
+    }
+    if extracted_evidence_path.is_file() {
+        validate_publication_evidence_manifest_binding(
+            &project_root,
+            &extracted_evidence_path,
+            &manifest_contract,
+        )?;
+    }
+    let mut extracted_evidence_documents_sha256 = None;
+    let mut extracted_evidence_contract = None;
+    let mut structure_source = if extracted_evidence_path.is_file() {
+        let evidence: ExtractedPublicationEvidence = serde_json::from_str(
+            &fs::read_to_string(&extracted_evidence_path).map_err(|err| err.to_string())?,
+        )
+        .map_err(|_| "Extracted publication evidence is invalid JSON.".to_string())?;
+        let expected_structure_kind = match evidence.source_format {
+            ExtractedSourceFormat::Epub => "epub_navigation",
+            ExtractedSourceFormat::Pdf => "direct_pdf_evidence",
+            ExtractedSourceFormat::Ocr => "ocr_layout_evidence",
+            ExtractedSourceFormat::Mineru => "mineru_layout_evidence",
+        };
+        match declared_structure_kind.as_deref() {
+            Some(declared) if declared == expected_structure_kind => {}
+            Some(declared) => {
+                return Err(format!(
+                    "Source manifest structure route {declared} does not match extractor sourceFormat {}.",
+                    evidence.source_format
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "Source manifest has no structure route for extractor sourceFormat {}.",
+                    evidence.source_format
+                ))
+            }
+        }
+        extracted_evidence_documents_sha256 = Some(validate_extracted_source_documents(
+            &project_root,
+            &evidence,
+        )?);
+        plan.publication_sections =
+            publication_sections_from_extracted_evidence(&source_text, &evidence)?;
+        let source = expected_structure_kind.to_string();
+        extracted_evidence_contract = Some(evidence);
+        source
+    } else {
+        declared_structure_kind.unwrap_or_else(|| "normalized_markdown".into())
+    };
+    apply_section_character_ranges(&original_source_text, &mut plan.publication_sections);
+    let current_recovered_structure_sha256 =
+        recovered_structure_sha256(&plan.publication_sections)?;
+    let correction_path = project_root
+        .join("metadata")
+        .join("publication_map.correction.json");
+    let correction_artifact = if correction_path.is_file() {
+        let correction_json =
+            fs::read_to_string(&correction_path).map_err(|err| err.to_string())?;
+        let mut correction: PublicationStructureCorrection = serde_json::from_str(&correction_json)
+            .map_err(|err| format!("Publication structure correction is invalid: {err}"))?;
+        if correction.schema != "publication-structure-correction-v1"
+            || correction.source_markdown_sha256 != source_sha256
+            || correction.recovered_structure_sha256 != current_recovered_structure_sha256
+            || correction.reason.trim().is_empty()
+            || correction.sections.is_empty()
+        {
+            return Err(
+                "Publication structure correction does not bind the current source/recovered structure or has no reason/sections."
+                    .into(),
+            );
+        }
+        if correction.sections.len() != plan.publication_sections.len()
+            || correction
+                .sections
+                .iter()
+                .zip(&plan.publication_sections)
+                .any(|(corrected, recovered)| {
+                    !correction_keeps_source_identity(recovered, corrected)
+                })
+        {
+            return Err(
+                "Publication structure correction changed source identity, order, ranges, pages, files, or anchors."
+                    .into(),
+            );
+        }
+        for section in &mut correction.sections {
+            section.evidence = vec![format!("manual correction: {}", correction.reason.trim())];
+            section.confidence = 1.0;
+            section.anomalies.clear();
+        }
+        plan.publication_sections = correction.sections;
+        structure_source = "manual_correction".into();
+        Some(BookPipelineArtifact {
+            kind: "structure_correction".into(),
+            path: display_path(&correction_path),
+            sha256: Some(sha256_str(&correction_json)),
+            zotero_key: None,
+            producer_stage: Some("split".into()),
+            ..BookPipelineArtifact::default()
+        })
+    } else {
+        None
+    };
+    // Structure is a preproduction gate: write its durable evidence, but do
+    // not create translation units when the recovered book tree is unsafe.
+    let mut preproduction_notes = recover_publication_notes(
+        &original_source_text,
+        &plan.publication_sections,
+        &plan.chapters,
+    );
+    if let Some(evidence) = extracted_evidence_contract.as_ref() {
+        validate_extracted_note_evidence(
+            &original_source_text,
+            evidence,
+            &plan.publication_sections,
+            &mut preproduction_notes,
+        )?;
+    }
+    let preproduction_note_audit =
+        audit_publication_notes(&original_source_text, &preproduction_notes);
+    let mut preproduction_audit = audit_publication_structure(
+        &source_text,
+        &mut plan.publication_sections,
+        &structure_source,
+    );
+    if preproduction_note_audit.status != "passed" {
+        preproduction_audit.status = "failed".into();
+        preproduction_audit.anomalies.push(format!(
+            "semantic note recovery failed: {} orphan reference(s), {} orphan note(s), {} duplicate label(s)",
+            preproduction_note_audit.orphan_references.len(),
+            preproduction_note_audit.orphan_notes.len(),
+            preproduction_note_audit.duplicate_labels.len(),
+        ));
+    }
+    if preproduction_audit.status != "passed" {
+        clear_generated_files(
+            &project_root.join("chapters").join("src"),
+            "chapter_",
+            ".md",
+        )?;
+        let map_dir = project_root.join("metadata");
+        let qa_dir = project_root.join("qa");
+        fs::create_dir_all(&map_dir).map_err(|err| err.to_string())?;
+        fs::create_dir_all(&qa_dir).map_err(|err| err.to_string())?;
+        let publication_document = PublicationMapDocument {
+            schema: PUBLICATION_MAP_SCHEMA.into(),
+            structure_policy_version: STRUCTURE_POLICY_VERSION.into(),
+            source_markdown_sha256: source_sha256.clone(),
+            source_path: "source/source.md".into(),
+            sections: plan.publication_sections.clone(),
+            notes: preproduction_notes,
+            audit: preproduction_audit.clone(),
+        };
+        let publication_json = serde_json::to_string_pretty(&publication_document)
+            .map_err(|err| err.to_string())?
+            + "\n";
+        let publication_path = map_dir.join("publication_map.json");
+        let stale_source_map = map_dir.join("source_map.json");
+        if stale_source_map.is_file() {
+            fs::remove_file(stale_source_map).map_err(|err| err.to_string())?;
+        }
+        fs::write(&publication_path, &publication_json).map_err(|err| err.to_string())?;
+        let report_json = publication_structure_qa_json(&preproduction_audit)?;
+        let report_path = qa_dir.join("structure_recovery.json");
+        fs::write(&report_path, &report_json).map_err(|err| err.to_string())?;
+        let note_report_json = publication_note_qa_json(&preproduction_note_audit)?;
+        let note_report_path = qa_dir.join("notes.json");
+        fs::write(&note_report_path, &note_report_json).map_err(|err| err.to_string())?;
+        let mut artifacts = vec![
+            BookPipelineArtifact {
+                kind: "publication_map".into(),
+                path: display_path(&publication_path),
+                sha256: Some(sha256_str(&publication_json)),
+                zotero_key: None,
+                producer_stage: Some("split".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "structure_recovery_report".into(),
+                path: display_path(&report_path),
+                sha256: Some(sha256_str(&report_json)),
+                zotero_key: None,
+                producer_stage: Some("split".into()),
+                ..BookPipelineArtifact::default()
+            },
+            BookPipelineArtifact {
+                kind: "publication_note_report".into(),
+                path: display_path(&note_report_path),
+                sha256: Some(sha256_str(&note_report_json)),
+                zotero_key: None,
+                producer_stage: Some("split".into()),
+                ..BookPipelineArtifact::default()
+            },
+        ];
+        if let Some(artifact) = correction_artifact.clone() {
+            artifacts.push(artifact);
+        }
+        let mut input_hashes = BTreeMap::new();
+        input_hashes.insert("sourceMarkdownSha256".into(), source_sha256);
+        input_hashes.insert("splitPolicyVersion".into(), SPLIT_POLICY_VERSION.into());
+        input_hashes.insert(
+            "structurePolicyVersion".into(),
+            STRUCTURE_POLICY_VERSION.into(),
+        );
+        if extracted_evidence_path.is_file() {
+            input_hashes.insert(
+                "publicationEvidenceSha256".into(),
+                sha256_file(&extracted_evidence_path)?,
+            );
+            input_hashes.insert(
+                "publicationEvidenceDocumentsSha256".into(),
+                extracted_evidence_documents_sha256
+                    .clone()
+                    .ok_or_else(|| "Extractor source-document digest is missing.".to_string())?,
+            );
+        }
+        if correction_path.is_file() {
+            input_hashes.insert(
+                "structureCorrectionSha256".into(),
+                sha256_file(&correction_path)?,
+            );
+        }
+        return Ok(StageRunOutput {
+            artifacts,
+            artifact_kinds: vec![
+                "publication_map",
+                "structure_recovery_report",
+                "publication_note_report",
+                "source_map",
+                "chapter_source",
+                "structure_correction",
+            ],
+            input_hashes,
+            log_summary: vec![format!(
+                "Structure recovery blocked before translation-unit creation with {} anomaly/anomalies",
+                preproduction_audit.anomalies.len()
+            )],
+            unit_summary: None,
+            error: Some(format!(
+                "Structure recovery requires correction: {} anomaly/anomalies found. See qa/structure_recovery.json.",
+                preproduction_audit.anomalies.len()
+            )),
+        });
+    }
 
     let src_dir = project_root.join("chapters").join("src");
     fs::create_dir_all(&src_dir).map_err(|err| err.to_string())?;
     clear_generated_files(&src_dir, "chapter_", ".md")?;
 
     let mut artifacts = Vec::new();
-    let mut map_chapters = Vec::new();
+    if let Some(artifact) = correction_artifact {
+        artifacts.push(artifact);
+    }
+    let mut map_units = Vec::new();
+    let source_lines = source_text.lines().collect::<Vec<_>>();
+    let source_character_offsets = source_character_offsets(&original_source_text);
     for chapter in &plan.chapters {
         let file_name = format!("{}.md", chapter.id);
         let chapter_path = src_dir.join(&file_name);
@@ -11049,22 +12439,72 @@ fn run_split_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Strin
             producer_stage: Some("split".into()),
             ..BookPipelineArtifact::default()
         });
-        map_chapters.push(SourceMapChapter {
+        let publication_section_id = owning_publication_section_id(
+            &plan.publication_sections,
+            chapter.start_line,
+            chapter.end_line,
+        )
+        .ok_or_else(|| "Translation unit has no owning publication section.".to_string())?;
+        let publication_section = plan
+            .publication_sections
+            .iter()
+            .find(|section| section.id == publication_section_id)
+            .ok_or_else(|| "Translation unit has no owning publication section.".to_string())?;
+        let source_anchor = publication_section.source_href.clone();
+        let (source_start_character, source_end_character) = source_character_range(
+            &source_character_offsets,
+            chapter.start_line,
+            chapter.end_line,
+        );
+        let section_start_line = chapter
+            .start_line
+            .saturating_sub(publication_section.source_start_line)
+            + 1;
+        let section_end_line = chapter
+            .end_line
+            .saturating_sub(publication_section.source_start_line)
+            + 1;
+        let section_start_character =
+            source_start_character.saturating_sub(publication_section.source_start_character);
+        let section_end_character =
+            source_end_character.saturating_sub(publication_section.source_start_character);
+        map_units.push(SourceMapTranslationUnit {
             id: chapter.id.clone(),
             ordinal: chapter.ordinal,
-            title: chapter.title.clone(),
+            publication_section_id,
             source_start_line: chapter.start_line,
             source_end_line: chapter.end_line,
-            chapter_source_path: format!("chapters/src/{file_name}"),
-            chapter_source_sha256: chapter_sha256,
+            source_start_character,
+            source_end_character,
+            section_start_line,
+            section_end_line,
+            section_start_character,
+            section_end_character,
+            source_unit_path: format!("chapters/src/{file_name}"),
+            source_unit_sha256: chapter_sha256,
+            source_anchor,
+            source_pages: source_pages_for_range(
+                &source_lines,
+                chapter.start_line,
+                chapter.end_line,
+            ),
             blocks: chapter
                 .blocks
                 .iter()
-                .map(|block| SourceMapBlock {
-                    id: block.id.clone(),
-                    source_start_line: block.start_line,
-                    source_end_line: block.end_line,
-                    sha256: block.sha256.clone(),
+                .map(|block| {
+                    let (source_start_character, source_end_character) = source_character_range(
+                        &source_character_offsets,
+                        block.start_line,
+                        block.end_line,
+                    );
+                    SourceMapBlock {
+                        id: block.id.clone(),
+                        source_start_line: block.start_line,
+                        source_end_line: block.end_line,
+                        source_start_character,
+                        source_end_character,
+                        sha256: block.sha256.clone(),
+                    }
                 })
                 .collect(),
         });
@@ -11076,13 +12516,75 @@ fn run_split_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Strin
         source_markdown_sha256: source_sha256.clone(),
         source_path: "source/source.md".into(),
         primary_heading_level: plan.primary_heading_level,
-        chapters: map_chapters,
+        translation_units: map_units,
     };
     let map_json = serde_json::to_string_pretty(&document).map_err(|err| err.to_string())? + "\n";
     let map_dir = project_root.join("metadata");
     fs::create_dir_all(&map_dir).map_err(|err| err.to_string())?;
     let map_path = map_dir.join("source_map.json");
     fs::write(&map_path, &map_json).map_err(|err| err.to_string())?;
+
+    let mut publication_notes = recover_publication_notes(
+        &original_source_text,
+        &plan.publication_sections,
+        &plan.chapters,
+    );
+    if let Some(evidence) = extracted_evidence_contract.as_ref() {
+        validate_extracted_note_evidence(
+            &original_source_text,
+            evidence,
+            &plan.publication_sections,
+            &mut publication_notes,
+        )?;
+    }
+    let publication_note_audit = audit_publication_notes(&original_source_text, &publication_notes);
+    let publication_audit = audit_publication_structure(
+        &source_text,
+        &mut plan.publication_sections,
+        &structure_source,
+    );
+    let structure_passed = publication_audit.status == "passed";
+    let publication_document = PublicationMapDocument {
+        schema: PUBLICATION_MAP_SCHEMA.into(),
+        structure_policy_version: STRUCTURE_POLICY_VERSION.into(),
+        source_markdown_sha256: source_sha256.clone(),
+        source_path: "source/source.md".into(),
+        sections: plan.publication_sections.clone(),
+        notes: publication_notes,
+        audit: publication_audit.clone(),
+    };
+    let publication_json =
+        serde_json::to_string_pretty(&publication_document).map_err(|err| err.to_string())? + "\n";
+    let publication_path = map_dir.join("publication_map.json");
+    fs::write(&publication_path, &publication_json).map_err(|err| err.to_string())?;
+    let structure_report_json = publication_structure_qa_json(&publication_audit)?;
+    let structure_report_path = project_root.join("qa").join("structure_recovery.json");
+    fs::write(&structure_report_path, &structure_report_json).map_err(|err| err.to_string())?;
+    let note_report_json = publication_note_qa_json(&publication_note_audit)?;
+    let note_report_path = project_root.join("qa").join("notes.json");
+    fs::write(&note_report_path, &note_report_json).map_err(|err| err.to_string())?;
+    artifacts.insert(
+        0,
+        BookPipelineArtifact {
+            kind: "publication_note_report".into(),
+            path: display_path(&note_report_path),
+            sha256: Some(sha256_str(&note_report_json)),
+            zotero_key: None,
+            producer_stage: Some("split".into()),
+            ..BookPipelineArtifact::default()
+        },
+    );
+    artifacts.insert(
+        0,
+        BookPipelineArtifact {
+            kind: "structure_recovery_report".into(),
+            path: display_path(&structure_report_path),
+            sha256: Some(sha256_str(&structure_report_json)),
+            zotero_key: None,
+            producer_stage: Some("split".into()),
+            ..BookPipelineArtifact::default()
+        },
+    );
     artifacts.insert(
         0,
         BookPipelineArtifact {
@@ -11094,20 +12596,65 @@ fn run_split_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Strin
             ..BookPipelineArtifact::default()
         },
     );
+    artifacts.insert(
+        0,
+        BookPipelineArtifact {
+            kind: "publication_map".into(),
+            path: display_path(&publication_path),
+            sha256: Some(sha256_str(&publication_json)),
+            zotero_key: None,
+            producer_stage: Some("split".into()),
+            ..BookPipelineArtifact::default()
+        },
+    );
 
     let mut input_hashes = BTreeMap::new();
     input_hashes.insert("sourceMarkdownSha256".into(), source_sha256);
     input_hashes.insert("splitPolicyVersion".into(), SPLIT_POLICY_VERSION.into());
+    input_hashes.insert(
+        "structurePolicyVersion".into(),
+        STRUCTURE_POLICY_VERSION.into(),
+    );
+    if extracted_evidence_path.is_file() {
+        input_hashes.insert(
+            "publicationEvidenceSha256".into(),
+            sha256_file(&extracted_evidence_path)?,
+        );
+        input_hashes.insert(
+            "publicationEvidenceDocumentsSha256".into(),
+            extracted_evidence_documents_sha256
+                .ok_or_else(|| "Extractor source-document digest is missing.".to_string())?,
+        );
+    }
+    if correction_path.is_file() {
+        input_hashes.insert(
+            "structureCorrectionSha256".into(),
+            sha256_file(&correction_path)?,
+        );
+    }
     Ok(StageRunOutput {
         artifacts,
-        artifact_kinds: vec!["source_map", "chapter_source"],
+        artifact_kinds: vec![
+            "publication_map",
+            "structure_recovery_report",
+            "publication_note_report",
+            "source_map",
+            "chapter_source",
+            "structure_correction",
+        ],
         input_hashes,
         log_summary: vec![format!(
-            "Split source into {} chapter(s)",
-            plan.chapters.len()
+            "Recovered {} publication section(s) and split source into {} translation unit(s)",
+            plan.publication_sections.len(),
+            plan.chapters.len(),
         )],
         unit_summary: None,
-        error: None,
+        error: (!structure_passed).then(|| {
+            format!(
+                "Structure recovery requires correction: {} anomaly/anomalies found. See qa/structure_recovery.json.",
+                publication_document.audit.anomalies.len()
+            )
+        }),
     })
 }
 
@@ -11144,6 +12691,90 @@ fn rewrite_sidecar_asset_references_for_chapters(
     Ok(rewritten)
 }
 
+/// Load the one durable structure contract through the same tree validator used
+/// by extractor compilation and manual correction.
+fn load_validated_publication_map(
+    project_root: &Path,
+) -> Result<(PublicationMapDocument, String), String> {
+    let publication_map_path = project_root.join("metadata/publication_map.json");
+    let publication_map_json = fs::read_to_string(&publication_map_path)
+        .map_err(|_| "Publication map is missing; run the split stage first.".to_string())?;
+    let publication_map: PublicationMapDocument = serde_json::from_str(&publication_map_json)
+        .map_err(|error| format!("Publication map is invalid: {error}"))?;
+    if publication_map.schema != PUBLICATION_MAP_SCHEMA || publication_map.audit.status != "passed"
+    {
+        return Err("A passed current Publication Map is required.".into());
+    }
+    let source = fs::read_to_string(project_root.join("source/source.md"))
+        .map_err(|_| "Source Markdown is missing; rerun handoff.".to_string())?;
+    if publication_map.source_markdown_sha256 != sha256_str(&source) {
+        return Err("Publication Map no longer binds the current source Markdown.".into());
+    }
+    let findings = publication_tree_findings(&publication_map.sections, source.lines().count());
+    if !findings.is_empty() {
+        return Err(format!(
+            "Publication tree is invalid: {}",
+            findings
+                .iter()
+                .map(|(section_id, finding)| format!("{section_id}: {finding}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    Ok((publication_map, publication_map_json))
+}
+
+struct ValidatedStructureMaps {
+    source_map: SourceMapDocument,
+    publication_map: PublicationMapDocument,
+    source_map_sha256: String,
+    publication_map_sha256: String,
+}
+
+/// Load both durable structure contracts only through their registered stage
+/// artifacts. Shape validation alone is insufficient: a locally edited map can
+/// remain valid JSON while no longer being the map that split, approval, or
+/// promotion reviewed.
+fn validated_structure_maps(
+    child: &BookPipelineChildJob,
+    publication_producer_stage: &str,
+) -> Result<ValidatedStructureMaps, String> {
+    let project_root = project_root_from_child(child)?;
+    let (source_map_path, source_map_sha256) =
+        validated_stage_artifact(child, "source_map", "split")?;
+    let (publication_map_path, publication_map_sha256) =
+        validated_stage_artifact(child, "publication_map", publication_producer_stage)?;
+    let expected_source_map_path = project_root.join("metadata/source_map.json");
+    let expected_publication_map_path = project_root.join("metadata/publication_map.json");
+    if source_map_path != expected_source_map_path
+        || publication_map_path != expected_publication_map_path
+    {
+        return Err(
+            "Durable structure artifact path no longer matches the local project contract.".into(),
+        );
+    }
+    let source_map_json = fs::read_to_string(&source_map_path).map_err(|err| err.to_string())?;
+    let source_map: SourceMapDocument = serde_json::from_str(&source_map_json)
+        .map_err(|err| format!("Source map is invalid: {err}"))?;
+    let source_markdown = fs::read_to_string(project_root.join("source/source.md"))
+        .map_err(|_| "Source Markdown is missing; rerun handoff.".to_string())?;
+    if source_map.schema != SOURCE_MAP_SCHEMA
+        || source_map.source_markdown_sha256 != sha256_str(&source_markdown)
+    {
+        return Err("Source Map no longer binds the current source Markdown.".into());
+    }
+    let (publication_map, publication_map_json) = load_validated_publication_map(&project_root)?;
+    if sha256_str(&publication_map_json) != publication_map_sha256 {
+        return Err("Publication Map bytes differ from the registered stage artifact.".into());
+    }
+    Ok(ValidatedStructureMaps {
+        source_map,
+        publication_map,
+        source_map_sha256,
+        publication_map_sha256,
+    })
+}
+
 /// Prepare stage (order 5): seed glossary/style, per-chapter controls, and
 /// provider-independent task manifests, registering the `glossary`,
 /// `style_profile`, `chapter_control`, and `translation_task_manifest`
@@ -11151,12 +12782,10 @@ fn rewrite_sidecar_asset_references_for_chapters(
 /// plus the task policy version. No private source text enters these records.
 fn run_prepare_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, String> {
     let project_root = project_root_from_child(child)?;
-    let map_path = project_root.join("metadata").join("source_map.json");
-    let map_json = fs::read_to_string(&map_path)
-        .map_err(|_| "Source map is missing; run the split stage first.".to_string())?;
-    let source_map_sha256 = sha256_str(&map_json);
-    let document: SourceMapDocument =
-        serde_json::from_str(&map_json).map_err(|err| err.to_string())?;
+    let structure = validated_structure_maps(child, "split")?;
+    let source_map_sha256 = structure.source_map_sha256;
+    let publication_map_sha256 = structure.publication_map_sha256;
+    let document = structure.source_map;
 
     let glossary_path = project_root.join("glossary").join("terms.csv");
     if !glossary_path.is_file() {
@@ -11201,10 +12830,11 @@ fn run_prepare_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Str
             ..BookPipelineArtifact::default()
         },
     ];
-    for chapter in &document.chapters {
+    for chapter in &document.translation_units {
         let control = serde_json::json!({
-            "schema": CHAPTER_CONTROL_SCHEMA,
-            "chapterId": chapter.id,
+            "schema": TRANSLATION_UNIT_CONTROL_SCHEMA,
+            "unitId": chapter.id,
+            "publicationSectionId": chapter.publication_section_id,
             "targetLanguage": "zh-Hans",
             "status": "pending",
             "checks": {
@@ -11232,12 +12862,18 @@ fn run_prepare_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Str
         let task = serde_json::json!({
             "schema": TRANSLATION_TASK_SCHEMA,
             "taskPolicyVersion": TASK_POLICY_VERSION,
-            "chapterId": chapter.id,
+            "unitId": chapter.id,
             "targetLanguage": "zh-Hans",
-            "sourceChapterPath": chapter.chapter_source_path,
-            "sourceChapterSha256": chapter.chapter_source_sha256,
+            "sourceUnitPath": chapter.source_unit_path,
+            "sourceUnitSha256": chapter.source_unit_sha256,
             "sourceStartLine": chapter.source_start_line,
             "sourceEndLine": chapter.source_end_line,
+            "sourceStartCharacter": chapter.source_start_character,
+            "sourceEndCharacter": chapter.source_end_character,
+            "sectionStartLine": chapter.section_start_line,
+            "sectionEndLine": chapter.section_end_line,
+            "sectionStartCharacter": chapter.section_start_character,
+            "sectionEndCharacter": chapter.section_end_character,
             "glossaryPath": "glossary/terms.csv",
             "glossarySha256": glossary_sha256,
             "styleProfilePath": "metadata/style_profile.md",
@@ -11259,6 +12895,7 @@ fn run_prepare_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Str
 
     let mut input_hashes = BTreeMap::new();
     input_hashes.insert("sourceMapSha256".into(), source_map_sha256);
+    input_hashes.insert("publicationMapSha256".into(), publication_map_sha256);
     input_hashes.insert("glossarySha256".into(), glossary_sha256);
     input_hashes.insert("styleProfileSha256".into(), style_sha256);
     input_hashes.insert("taskPolicyVersion".into(), TASK_POLICY_VERSION.into());
@@ -11273,7 +12910,7 @@ fn run_prepare_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, Str
         input_hashes,
         log_summary: vec![format!(
             "Prepared {} translation task manifest(s)",
-            document.chapters.len()
+            document.translation_units.len()
         )],
         unit_summary: None,
         error: None,
@@ -11383,9 +13020,9 @@ fn translation_failure_summary(failures: &[BookPipelineUnitFailure]) -> String {
     )
 }
 
-pub(crate) fn translation_engine_repo_root() -> Result<PathBuf, String> {
-    let repo_root = local_reading_repo_root()?;
-    let package_manifest = repo_root
+pub(crate) fn translation_engine_resource_root() -> Result<PathBuf, String> {
+    let resource_root = bundled_resource_root()?;
+    let package_manifest = resource_root
         .join("packages")
         .join("translation-engine")
         .join("pyproject.toml");
@@ -11395,7 +13032,7 @@ pub(crate) fn translation_engine_repo_root() -> Result<PathBuf, String> {
             display_path(&package_manifest)
         ));
     }
-    Ok(repo_root)
+    Ok(resource_root)
 }
 
 /// Write the user's chosen model into the manifest when this run's slot is the
@@ -11420,24 +13057,24 @@ fn apply_active_model_to_manifest(
 
 /// Inject the slot's per-user runtime settings into the engine subprocess. API
 /// keys come from Keychain; Qwen's optional workspace URL and web-search choice
-/// come from Launcher config. Missing values preserve the engine registry and
-/// root .env defaults.
+/// come from Launcher config. Missing values preserve the engine registry
+/// defaults.
 fn inject_model_runtime_env(command: &mut RunnerCommand, profile_id: &str, config_id: &str) {
-    let Ok(repo_root) = translation_engine_repo_root() else {
+    let Ok(resource_root) = translation_engine_resource_root() else {
         return;
     };
     if let Some((key_env, value)) =
-        crate::model_settings::resolve_credential_env(&repo_root, profile_id, config_id)
+        crate::model_settings::resolve_credential_env(&resource_root, profile_id, config_id)
     {
         command.env.push((key_env, value));
     }
     if let Some((key_env, value)) =
-        crate::model_settings::resolve_base_url_env(&repo_root, profile_id, config_id)
+        crate::model_settings::resolve_base_url_env(&resource_root, profile_id, config_id)
     {
         command.env.push((key_env, value));
     }
     if let Some((key_env, value)) =
-        crate::model_settings::resolve_web_search_env(&repo_root, profile_id, config_id)
+        crate::model_settings::resolve_web_search_env(&resource_root, profile_id, config_id)
     {
         command.env.push((key_env, value));
     }
@@ -11447,7 +13084,7 @@ fn build_translation_engine_command(
     child: &BookPipelineChildJob,
     manifest_path: &Path,
 ) -> Result<RunnerCommand, String> {
-    let repo_root = translation_engine_repo_root()?;
+    let resource_root = translation_engine_resource_root()?;
     let project_root = project_root_from_child(child)?;
     let attempts = child
         .stages
@@ -11468,7 +13105,7 @@ fn build_translation_engine_command(
             display_path(manifest_path),
         ],
         env: vec![("BIBLIOSMITH_PROGRESS_SCOPE".into(), child.id.clone())],
-        cwd: Some(repo_root),
+        cwd: Some(resource_root),
         output_dir: project_root,
         attempts,
         accepted_exit_codes: vec![0, 1],
@@ -11479,7 +13116,7 @@ fn build_translation_sample_command(
     child: &BookPipelineChildJob,
     manifest_path: &Path,
 ) -> Result<RunnerCommand, String> {
-    let repo_root = translation_engine_repo_root()?;
+    let resource_root = translation_engine_resource_root()?;
     let project_root = project_root_from_child(child)?;
     let attempts = child
         .artifacts
@@ -11499,7 +13136,7 @@ fn build_translation_sample_command(
             display_path(manifest_path),
         ],
         env: Vec::new(),
-        cwd: Some(repo_root),
+        cwd: Some(resource_root),
         output_dir: project_root,
         attempts,
         accepted_exit_codes: vec![0],
@@ -11533,34 +13170,29 @@ fn translation_task_units(
         let task: serde_json::Value =
             serde_json::from_str(&task_json).map_err(|err| err.to_string())?;
         let unit_id = task
-            .get("chapterId")
+            .get("unitId")
             .and_then(serde_json::Value::as_str)
             .filter(|unit_id| !unit_id.is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "Translation task manifest {} has no chapterId",
-                    artifact.path
-                )
-            })?
+            .ok_or_else(|| format!("Translation task manifest {} has no unitId", artifact.path))?
             .to_string();
         let source_chapter_path = task
-            .get("sourceChapterPath")
+            .get("sourceUnitPath")
             .and_then(serde_json::Value::as_str)
             .filter(|path| !path.is_empty() && !Path::new(path).is_absolute())
             .ok_or_else(|| {
                 format!(
-                    "Translation task manifest {} has no relative sourceChapterPath",
+                    "Translation task manifest {} has no relative sourceUnitPath",
                     artifact.path
                 )
             })?
             .to_string();
         let source_chapter_sha256 = task
-            .get("sourceChapterSha256")
+            .get("sourceUnitSha256")
             .and_then(serde_json::Value::as_str)
             .filter(|sha256| !sha256.is_empty())
             .ok_or_else(|| {
                 format!(
-                    "Translation task manifest {} has no sourceChapterSha256",
+                    "Translation task manifest {} has no sourceUnitSha256",
                     artifact.path
                 )
             })?
@@ -11672,9 +13304,8 @@ fn run_translation_sample_with_executor(
 
     let project_root = project_root_from_child(child)?;
     let units = translation_task_units(child, &project_root)?;
-    // textCleanup and customInstructions are read from the same places the full
-    // run reads them, so the preview cannot show a translation the real run
-    // would not produce. See the run manifest assembly further down.
+    let prompt_pack = PromptPackStore::default()?
+        .resolve_revision(&child.prompt_pack_reference, "programmatic")?;
     let mut manifest = serde_json::json!({
         "schema": TRANSLATION_ENGINE_SAMPLE_SCHEMA,
         "projectRoot": display_path(&project_root),
@@ -11686,16 +13317,13 @@ fn run_translation_sample_with_executor(
         "sampleCount": TRANSLATION_SAMPLE_COUNT,
         "characterBudget": TRANSLATION_SAMPLE_CHARACTER_BUDGET,
         "textCleanup": job.text_cleanup,
+        "promptPack": prompt_pack,
         "placeholderRetries": TRANSLATION_ENGINE_PLACEHOLDER_RETRIES,
         "units": units
             .iter()
             .map(|unit| serde_json::json!({"taskManifestPath": unit.task_manifest_path.as_str()}))
             .collect::<Vec<_>>(),
     });
-    if let Some(custom_instructions) = &child.custom_instructions {
-        manifest["customInstructions"] = serde_json::to_value(custom_instructions)
-            .map_err(|err| format!("Could not serialize custom instructions: {err}"))?;
-    }
     apply_active_model_to_manifest(&mut manifest, provider_profile_id, provider_config_id);
     let sample_dir = project_root.join("qa").join("sample-compare");
     fs::create_dir_all(&sample_dir).map_err(|err| err.to_string())?;
@@ -12000,7 +13628,7 @@ fn build_ocr_sample_command(
     manifest_path: &Path,
     sample_dir: &Path,
 ) -> Result<RunnerCommand, String> {
-    let root = book_ocr_conversion_root();
+    let root = book_ocr_conversion_root()?;
     let script = root.join("sample_compare.py");
     if !script.is_file() {
         return Err(format!(
@@ -12277,7 +13905,8 @@ fn build_zotero_attach_command(
     artifact_path: &Path,
     parent_item_key: &str,
 ) -> Result<RunnerCommand, String> {
-    let repo_root = local_reading_repo_root()?;
+    let resource_root = bundled_resource_root()?;
+    let scratch_dir = default_output_root()?.join("zotero-commands");
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: ZOTERO_ATTACH_COMMAND_LABEL.into(),
@@ -12297,8 +13926,8 @@ fn build_zotero_attach_command(
         // launcher reads back is the machine envelope, and a machine-facing
         // caller should not depend on tty detection to get it.
         env: vec![("ZSEARCH_FORMAT".into(), "json".into())],
-        cwd: Some(repo_root.clone()),
-        output_dir: repo_root,
+        cwd: Some(resource_root),
+        output_dir: scratch_dir,
         attempts: 1,
         accepted_exit_codes: ZOTERO_ATTACH_ACCEPTED_EXIT_CODES.into(),
     })
@@ -12391,6 +14020,7 @@ fn attach_artifact_to_zotero_with_executor(
             ZOTERO_ATTACHABLE_ARTIFACT_KINDS.join(", ")
         ));
     }
+    ensure_structurally_validated_for_zotero(job, artifact)?;
     if let Some(existing) = non_empty(artifact.zotero_key.as_deref()) {
         if !replace_existing {
             return Err(format!(
@@ -12442,6 +14072,76 @@ fn attach_artifact_to_zotero_with_executor(
         &evidence.attachment_key,
         &command_result.log_summary,
     )
+}
+
+fn ensure_structurally_validated_for_zotero(
+    job: &BookPipelineJob,
+    artifact: &BookPipelineArtifact,
+) -> Result<(), String> {
+    let child = job
+        .children
+        .iter()
+        .find(|child| {
+            child
+                .artifacts
+                .iter()
+                .any(|candidate| candidate.artifact_id == artifact.artifact_id)
+        })
+        .ok_or_else(|| {
+            "Zotero import requires a child-book structural validation result.".to_string()
+        })?;
+    if child
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "validate_reading")
+        .is_none_or(|stage| stage.status != STATUS_COMPLETED)
+    {
+        return Err(
+            "Zotero import is blocked until package validity and structural readability pass."
+                .into(),
+        );
+    }
+    let report_kind = match artifact.kind.as_str() {
+        "reading_epub" => "structural_readability_report",
+        "reading_bilingual_epub" => "bilingual_structural_readability_report",
+        _ => return Err("This artifact has no structural-readability contract.".into()),
+    };
+    let report_artifact = child
+        .artifacts
+        .iter()
+        .find(|candidate| {
+            candidate.kind == report_kind
+                && candidate.producer_stage.as_deref() == Some("validate_reading")
+        })
+        .ok_or_else(|| {
+            "Zotero import is blocked: the structural-readability report is missing.".to_string()
+        })?;
+    let report_path = PathBuf::from(&report_artifact.path);
+    let expected_sha256 = report_artifact.sha256.as_deref().ok_or_else(|| {
+        "Zotero import is blocked: the structural-readability report has no digest.".to_string()
+    })?;
+    if sha256_file(&report_path)? != expected_sha256 {
+        return Err(
+            "Zotero import is blocked: the structural-readability report changed after validation."
+                .into(),
+        );
+    }
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).map_err(|err| err.to_string())?)
+            .map_err(|err| format!("Structural-readability report is invalid: {err}"))?;
+    let expected_epub_name = Path::new(&artifact.path)
+        .file_name()
+        .and_then(|name| name.to_str());
+    if report.get("schema").and_then(serde_json::Value::as_str)
+        != Some(STRUCTURAL_READABILITY_REPORT_SCHEMA)
+        || report.get("status").and_then(serde_json::Value::as_str) != Some("passed")
+        || report.get("epub").and_then(serde_json::Value::as_str) != expected_epub_name
+    {
+        return Err(
+            "Zotero import is blocked: structural readability did not pass for this EPUB.".into(),
+        );
+    }
+    Ok(())
 }
 
 /// How many times to re-read and re-apply the key when a concurrent write wins
@@ -12796,6 +14496,9 @@ fn run_translate_stage(
     }
     let project_root = project_root_from_child(child)?;
     let mut input_hashes = translation_approval_input_hashes(job, child)?;
+    let prompt_pack = PromptPackStore::default()?
+        .resolve_revision(&child.prompt_pack_reference, "programmatic")?;
+    let second_pass_enabled = prompt_pack_revision_uses_reflection(&prompt_pack);
     let all_units = translation_task_units(child, &project_root)?;
     let retry_unit_ids = failed_translation_unit_ids(child);
     let requested_units = if retry_unit_ids.is_empty() {
@@ -12820,8 +14523,9 @@ fn run_translate_stage(
         "targetLanguage": "zh-Hans",
         "providerProfileId": job.translation_profile_id.as_str(),
         "providerConfigId": job.translation_config_id.as_str(),
-        "secondPassEnabled": job.second_pass_enabled,
+        "secondPassEnabled": second_pass_enabled,
         "textCleanup": job.text_cleanup,
+        "promptPack": prompt_pack,
         "translationPolicyVersion": TRANSLATION_POLICY_VERSION,
         "maxTokens": TRANSLATION_ENGINE_MAX_TOKENS,
         "placeholderRetries": TRANSLATION_ENGINE_PLACEHOLDER_RETRIES,
@@ -12830,10 +14534,6 @@ fn run_translate_stage(
             .map(|unit| serde_json::json!({"taskManifestPath": unit.task_manifest_path.as_str()}))
             .collect::<Vec<_>>(),
     });
-    if let Some(custom_instructions) = &child.custom_instructions {
-        manifest["customInstructions"] = serde_json::to_value(custom_instructions)
-            .map_err(|err| format!("Could not serialize custom instructions: {err}"))?;
-    }
     apply_active_model_to_manifest(
         &mut manifest,
         &job.translation_profile_id,
@@ -12988,18 +14688,41 @@ fn run_expert_translate_stage(
     let project_root = project_root_from_child(child)?;
     let mut input_hashes = translation_approval_input_hashes(job, child)?;
     let units = translation_task_units(child, &project_root)?;
+    let prompt_store = PromptPackStore::default()?;
+    let (source_sample, glossary_entries) = expert_prompt_preview_inputs(child)?;
+    let compiled_handoff = prompt_store.compile_expert_handoff(
+        &child.prompt_pack_reference,
+        &source_sample,
+        &glossary_entries,
+    )?;
     let handoff = serde_json::json!({
         "schema": TRANSLATION_HANDOFF_SCHEMA,
         "agentProfileId": job.translation_profile_id.as_str(),
-        "skillIds": job.translation_skill_ids.as_slice(),
+        "skillIds": &compiled_handoff.required_skill_ids,
+        "promptPackReference": &compiled_handoff.prompt_pack_reference,
+        "sourceLanguage": compiled_handoff.source_language.as_str(),
+        "targetLanguage": compiled_handoff.target_language.as_str(),
+        "contextPolicy": compiled_handoff.context_policy.as_str(),
+        "requiredSkillIds": &compiled_handoff.required_skill_ids,
+        "skillDependencyVersions": &compiled_handoff.skill_dependency_versions,
+        "requiredEvidence": &compiled_handoff.required_evidence,
+        "excludedResponsibilities": &compiled_handoff.excluded_responsibilities,
+        "parameters": &compiled_handoff.parameters,
+        "promptPackProvenance": &compiled_handoff.prompt_pack_provenance,
+        "stageInstructions": &compiled_handoff.stage_instructions,
+        "evidencePolicy": &compiled_handoff.evidence_policy,
+        "executorSafety": {
+            "owner": "bibliosmith",
+            "locked": ["placeholders", "headings", "paragraph-boundaries", "glossary", "privacy"]
+        },
         "units": units
             .iter()
             .map(|unit| serde_json::json!({
                 "unitId": unit.unit_id.as_str(),
                 "taskManifestPath": unit.task_manifest_path.as_str(),
                 "taskManifestSha256": unit.sha256.as_str(),
-                "sourceChapterPath": unit.source_chapter_path.as_str(),
-                "sourceChapterSha256": unit.source_chapter_sha256.as_str(),
+                "sourceUnitPath": unit.source_chapter_path.as_str(),
+                "sourceUnitSha256": unit.source_chapter_sha256.as_str(),
                 "outputPath": format!("chapters/translated/{}.md", unit.unit_id),
             }))
             .collect::<Vec<_>>(),
@@ -13017,17 +14740,51 @@ fn run_expert_translate_stage(
             && artifact.sha256.as_deref() == Some(handoff_sha256.as_str())
     });
     input_hashes.insert("translationHandoffSha256".into(), handoff_sha256.clone());
+    input_hashes.insert(
+        "promptPackContentSha256".into(),
+        child.prompt_pack_reference.content_sha256.clone(),
+    );
 
     let mut artifacts = vec![BookPipelineArtifact {
         kind: "translation_handoff".into(),
         path: display_path(&handoff_path),
-        sha256: Some(handoff_sha256),
+        sha256: Some(handoff_sha256.clone()),
         zotero_key: None,
         producer_stage: Some("translate".into()),
         ..BookPipelineArtifact::default()
     }];
     let mut completed = 0_u32;
     let mut blocked = 0_u32;
+    let receipt_path = handoff_dir.join("translate-receipt.json");
+    let receipt = fs::read_to_string(&receipt_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(|receipt| {
+            prompt_store
+                .validate_expert_receipt(
+                    &child.prompt_pack_reference,
+                    receipt,
+                    &handoff_sha256,
+                    &project_root,
+                )
+                .is_ok()
+        });
+    if let Some(receipt) = &receipt {
+        let receipt_text = serde_json::to_string(receipt).map_err(|err| err.to_string())?;
+        let receipt_sha256 = sha256_str(&receipt_text);
+        input_hashes.insert(
+            "translationPromptPackReceiptSha256".into(),
+            receipt_sha256.clone(),
+        );
+        artifacts.push(BookPipelineArtifact {
+            kind: "translation_handoff_receipt".into(),
+            path: display_path(&receipt_path),
+            sha256: Some(sha256_file(&receipt_path)?),
+            zotero_key: None,
+            producer_stage: Some("translate".into()),
+            ..BookPipelineArtifact::default()
+        });
+    }
     for unit in &units {
         input_hashes.insert(
             format!("translationTaskManifest:{}", unit.unit_id),
@@ -13037,7 +14794,7 @@ fn run_expert_translate_stage(
             format!("sourceChapter:{}", unit.unit_id),
             unit.source_chapter_sha256.clone(),
         );
-        if !handoff_was_issued {
+        if !handoff_was_issued || receipt.is_none() {
             blocked = blocked.saturating_add(1);
             continue;
         }
@@ -13065,7 +14822,11 @@ fn run_expert_translate_stage(
     }
     let output = StageRunOutput {
         artifacts,
-        artifact_kinds: vec!["translation_handoff", "chapter_translation"],
+        artifact_kinds: vec![
+            "translation_handoff",
+            "translation_handoff_receipt",
+            "chapter_translation",
+        ],
         input_hashes,
         log_summary: vec![if blocked == 0 {
             format!("Accepted {completed} expert translation unit(s)")
@@ -13360,9 +15121,9 @@ fn read_chapter_control(unit: &ExpertQaUnit) -> Result<serde_json::Value, String
         )
     })?;
     let control: serde_json::Value = serde_json::from_str(&text).map_err(|err| err.to_string())?;
-    if control.get("schema").and_then(serde_json::Value::as_str) != Some(CHAPTER_CONTROL_SCHEMA)
-        || control.get("chapterId").and_then(serde_json::Value::as_str)
-            != Some(unit.unit_id.as_str())
+    if control.get("schema").and_then(serde_json::Value::as_str)
+        != Some(TRANSLATION_UNIT_CONTROL_SCHEMA)
+        || control.get("unitId").and_then(serde_json::Value::as_str) != Some(unit.unit_id.as_str())
     {
         return Err(format!(
             "Chapter control contract mismatch for {}.",
@@ -13999,6 +15760,15 @@ fn translation_approval_binding(
     job: &BookPipelineJob,
     child: &BookPipelineChildJob,
 ) -> Option<(BookPipelineApprovalRequest, BTreeMap<String, String>)> {
+    let executor = if job.translation_mode == TRANSLATION_MODE_EXPERT {
+        "expert-agent"
+    } else {
+        "programmatic"
+    };
+    let prompt_pack = PromptPackStore::default()
+        .ok()?
+        .resolve_revision(&child.prompt_pack_reference, executor)
+        .ok()?;
     if !["split", "prepare"].iter().all(|stage_id| {
         child
             .stages
@@ -14021,16 +15791,14 @@ fn translation_approval_binding(
         .stages
         .iter()
         .find(|stage| stage.stage_id == "split")?;
+    let structure = validated_structure_maps(child, "split").ok()?;
     let mut bound_artifact_hashes = BTreeMap::new();
     bound_artifact_hashes.insert(
         "source_markdown".into(),
         split.input_hashes.get("sourceMarkdownSha256")?.clone(),
     );
-    let source_map = child
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "source_map")?;
-    bound_artifact_hashes.insert("source_map".into(), source_map.sha256.clone()?);
+    bound_artifact_hashes.insert("source_map".into(), structure.source_map_sha256);
+    bound_artifact_hashes.insert("publication_map".into(), structure.publication_map_sha256);
 
     let mut task_count = 0;
     for artifact in child
@@ -14054,12 +15822,12 @@ fn translation_approval_binding(
     let agent_profile_id = (job.translation_mode == TRANSLATION_MODE_EXPERT)
         .then(|| job.translation_profile_id.clone());
     let skill_ids = if job.translation_mode == TRANSLATION_MODE_EXPERT {
-        job.translation_skill_ids.clone()
+        prompt_pack.required_skill_ids.clone()
     } else {
         Vec::new()
     };
-    let second_pass_enabled =
-        job.translation_mode == TRANSLATION_MODE_FAST && job.second_pass_enabled;
+    let second_pass_enabled = job.translation_mode == TRANSLATION_MODE_FAST
+        && prompt_pack_revision_uses_reflection(&prompt_pack);
     let mut sample_evidence = BTreeMap::new();
     if let Some(report_sha256) = child
         .artifacts
@@ -14070,12 +15838,7 @@ fn translation_approval_binding(
         sample_evidence.insert("translation_sample_report".into(), report_sha256);
     }
     let text_cleanup = job.translation_mode == TRANSLATION_MODE_FAST && job.text_cleanup;
-    let custom_instructions_sha256 = child
-        .custom_instructions
-        .as_ref()
-        .and_then(|value| serde_json::to_string(value).ok())
-        .map(|value| sha256_str(&value));
-    let mut binding = serde_json::json!({
+    let binding = serde_json::json!({
         "translationMode": job.translation_mode.as_str(),
         "secondPassEnabled": second_pass_enabled,
         "textCleanup": text_cleanup,
@@ -14085,21 +15848,16 @@ fn translation_approval_binding(
         "agentProfileId": agent_profile_id.as_deref(),
         "configId": job.translation_config_id.as_str(),
         "skillIds": skill_ids.as_slice(),
+        "promptPackReference": &child.prompt_pack_reference,
         "sampleEvidence": &sample_evidence,
         "boundArtifactHashes": &bound_artifact_hashes,
     });
-    if let Some(custom_instructions_sha256) = &custom_instructions_sha256 {
-        binding["customInstructionsSha256"] =
-            serde_json::Value::String(custom_instructions_sha256.clone());
-    }
     let binding_json = serde_json::to_string(&binding).ok()?;
     let mut input_hashes = bound_artifact_hashes.clone();
-    if let Some(custom_instructions_sha256) = custom_instructions_sha256 {
-        input_hashes.insert(
-            "customInstructionsSha256".into(),
-            custom_instructions_sha256,
-        );
-    }
+    input_hashes.insert(
+        "promptPackContentSha256".into(),
+        child.prompt_pack_reference.content_sha256.clone(),
+    );
     input_hashes.insert("approvalBindingSha256".into(), sha256_str(&binding_json));
     Some((
         BookPipelineApprovalRequest {
@@ -14113,6 +15871,7 @@ fn translation_approval_binding(
             agent_profile_id,
             config_id: job.translation_config_id.clone(),
             skill_ids,
+            prompt_pack_reference: child.prompt_pack_reference.clone(),
             qa_policy: None,
             sample_evidence,
             bound_artifact_hashes,
@@ -14349,9 +16108,9 @@ fn chapter_control_is_promotion_ready(
     let fix_attempt = control
         .get("fixAttempt")
         .and_then(serde_json::Value::as_u64);
-    control.get("schema").and_then(serde_json::Value::as_str) == Some(CHAPTER_CONTROL_SCHEMA)
-        && control.get("chapterId").and_then(serde_json::Value::as_str)
-            == Some(unit.unit_id.as_str())
+    control.get("schema").and_then(serde_json::Value::as_str)
+        == Some(TRANSLATION_UNIT_CONTROL_SCHEMA)
+        && control.get("unitId").and_then(serde_json::Value::as_str) == Some(unit.unit_id.as_str())
         && control.get("qaPolicy").and_then(serde_json::Value::as_str) == Some(policy)
         && control.get("status").and_then(serde_json::Value::as_str) == Some("pass")
         && control
@@ -14439,6 +16198,7 @@ fn promotion_approval_binding(
     }
     let policy = qa_policy(job).ok()?;
     let project_root = project_root_from_child(child).ok()?;
+    let structure = validated_structure_maps(child, "split").ok()?;
     let units = expert_qa_units(child, &project_root).ok()?;
     let handoff_artifact = child
         .artifacts
@@ -14459,6 +16219,8 @@ fn promotion_approval_binding(
     let mut sample_evidence = BTreeMap::new();
     bound_artifact_hashes.insert("qa_policy".into(), sha256_str(policy));
     bound_artifact_hashes.insert("expert_qa_handoff".into(), handoff_sha256.clone());
+    bound_artifact_hashes.insert("source_map".into(), structure.source_map_sha256);
+    bound_artifact_hashes.insert("publication_map".into(), structure.publication_map_sha256);
     sample_evidence.insert("expert_qa_handoff".into(), handoff_sha256);
     for unit in &units {
         let translation_artifact = child.artifacts.iter().find(|artifact| {
@@ -14500,6 +16262,7 @@ fn promotion_approval_binding(
         "agentProfileId": agent_profile_id.as_str(),
         "configId": job.translation_config_id.as_str(),
         "skillIds": skill_ids.as_slice(),
+        "promptPackReference": &child.prompt_pack_reference,
         "sampleEvidence": &sample_evidence,
         "boundArtifactHashes": &bound_artifact_hashes,
     }))
@@ -14518,6 +16281,7 @@ fn promotion_approval_binding(
             agent_profile_id: Some(agent_profile_id),
             config_id: job.translation_config_id.clone(),
             skill_ids,
+            prompt_pack_reference: child.prompt_pack_reference.clone(),
             qa_policy: Some(policy.into()),
             sample_evidence,
             bound_artifact_hashes,
@@ -14708,12 +16472,25 @@ fn promotion_approval_input_hashes(
     ))
 }
 
+fn markdown_reader_headings(text: &str) -> Vec<(usize, String)> {
+    let mut fence = None;
+    text.lines()
+        .filter_map(|line| {
+            if update_markdown_fence(line, &mut fence) || fence.is_some() {
+                return None;
+            }
+            atx_heading_level(line).map(|level| (level, heading_title(line)))
+        })
+        .collect()
+}
+
 fn run_promote_stage(
     job: &BookPipelineJob,
     child: &BookPipelineChildJob,
 ) -> Result<StageRunOutput, String> {
     let project_root = project_root_from_child(child)?;
     let (approval_id, request, mut input_hashes) = promotion_approval_input_hashes(job, child)?;
+    let structure = validated_structure_maps(child, "split")?;
     let units = expert_qa_units(child, &project_root)?;
     let approved_unit_ids = request
         .bound_artifact_hashes
@@ -14767,6 +16544,16 @@ fn run_promote_stage(
         }
     }
 
+    let publication_map_path = project_root.join("metadata/publication_map.json");
+    let mut publication_map = structure.publication_map;
+    let source_map = structure.source_map;
+    input_hashes.insert(
+        "sourcePublicationMapSha256".into(),
+        structure.publication_map_sha256,
+    );
+    input_hashes.insert("sourceMapSha256".into(), structure.source_map_sha256);
+
+    let mut reader_titles = BTreeMap::new();
     let mut artifacts = Vec::new();
     let mut manifest_units = Vec::new();
     for (unit, control_sha256) in approved_units {
@@ -14778,6 +16565,43 @@ fn run_promote_stage(
                 "Promoted chapter hash does not match approved translation: {}",
                 unit.unit_id
             ));
+        }
+        let source_unit = source_map
+            .translation_units
+            .iter()
+            .find(|candidate| candidate.id == unit.unit_id)
+            .ok_or_else(|| format!("Promoted unit is missing from source_map: {}", unit.unit_id))?;
+        let translated_text = fs::read_to_string(&final_path).map_err(|err| err.to_string())?;
+        let translated_headings = markdown_reader_headings(&translated_text);
+        let sections_in_unit = publication_map
+            .sections
+            .iter()
+            .filter(|section| {
+                source_unit.source_start_line <= section.source_start_line
+                    && section.source_start_line <= source_unit.source_end_line
+            })
+            .collect::<Vec<_>>();
+        if translated_headings.len() != sections_in_unit.len() {
+            return Err(format!(
+                "Promoted unit {} changed the Publication Map heading count: expected {}, got {}.",
+                unit.unit_id,
+                sections_in_unit.len(),
+                translated_headings.len()
+            ));
+        }
+        for (section, (level, title)) in sections_in_unit.iter().zip(translated_headings) {
+            if level != section.heading_level || is_internal_publication_title(&title) {
+                return Err(format!(
+                    "Promoted unit {} changed publication heading semantics for {}.",
+                    unit.unit_id, section.id
+                ));
+            }
+            if reader_titles.insert(section.id.clone(), title).is_some() {
+                return Err(format!(
+                    "Publication section was translated twice: {}",
+                    section.id
+                ));
+            }
         }
         artifacts.push(BookPipelineArtifact {
             kind: "chapter_final".into(),
@@ -14795,6 +16619,46 @@ fn run_promote_stage(
             "finalSha256": final_sha256,
         }));
     }
+
+    for section in &mut publication_map.sections {
+        let reader_title = reader_titles.remove(&section.id).or_else(|| {
+            (section.kind == "frontmatter" && section.title == "Front Matter")
+                .then(|| section.title.clone())
+        });
+        let reader_title = reader_title.ok_or_else(|| {
+            format!(
+                "Publication section has no approved reader title after promotion: {}",
+                section.id
+            )
+        })?;
+        section.reader_short_title = Some(reader_title.clone());
+        section.reader_title = Some(reader_title);
+    }
+    for note in &mut publication_map.notes {
+        if note
+            .translation_unit_ids
+            .iter()
+            .all(|unit_id| approved_unit_ids.contains(unit_id))
+        {
+            note.target_content_status = TargetContentStatus::Translated;
+        }
+    }
+    let publication_map_text =
+        serde_json::to_string_pretty(&publication_map).map_err(|err| err.to_string())? + "\n";
+    fs::write(&publication_map_path, &publication_map_text).map_err(|err| err.to_string())?;
+    let localized_publication_map_sha256 = sha256_str(&publication_map_text);
+    input_hashes.insert(
+        "localizedPublicationMapSha256".into(),
+        localized_publication_map_sha256.clone(),
+    );
+    artifacts.push(BookPipelineArtifact {
+        kind: "publication_map".into(),
+        path: display_path(&publication_map_path),
+        sha256: Some(localized_publication_map_sha256),
+        zotero_key: None,
+        producer_stage: Some("promote".into()),
+        ..BookPipelineArtifact::default()
+    });
 
     let approval_binding_sha256 = input_hashes
         .get("approvalBindingSha256")
@@ -14822,7 +16686,7 @@ fn run_promote_stage(
 
     Ok(StageRunOutput {
         artifacts,
-        artifact_kinds: vec!["chapter_final", "promotion_manifest"],
+        artifact_kinds: vec!["chapter_final", "promotion_manifest", "publication_map"],
         input_hashes,
         log_summary: vec![format!(
             "Promoted {} approved chapter unit(s)",
@@ -14833,25 +16697,24 @@ fn run_promote_stage(
     })
 }
 
-fn prepare_reading_builder(project_root: &Path) -> Result<PathBuf, String> {
-    let source_dir = local_reading_repo_root()?
+fn reading_builder_path_for_root(resource_root: &Path) -> Result<PathBuf, String> {
+    let source = resource_root
         .join("tools")
         .join("bibliosmith-launcher")
         .join("source")
-        .join("scripts");
-    let target_dir = project_root.join("scripts");
-    fs::create_dir_all(&target_dir).map_err(|err| err.to_string())?;
-    for file_name in ["build_epub.js", "run_python.js"] {
-        let source = source_dir.join(file_name);
-        if !source.is_file() {
-            return Err(format!(
-                "Reading builder dependency is missing at {}",
-                display_path(&source)
-            ));
-        }
-        fs::copy(&source, target_dir.join(file_name)).map_err(|err| err.to_string())?;
+        .join("scripts")
+        .join("build_epub.cjs");
+    if !source.is_file() {
+        return Err(format!(
+            "Reading builder dependency is missing at {}",
+            display_path(&source)
+        ));
     }
-    Ok(target_dir.join("build_epub.js"))
+    Ok(source)
+}
+
+fn prepare_reading_builder(_project_root: &Path) -> Result<PathBuf, String> {
+    reading_builder_path_for_root(&bundled_resource_root()?)
 }
 
 fn build_reading_command(
@@ -14869,7 +16732,10 @@ fn build_reading_command(
         kind: RunnerCommandKind::Process,
         label: READING_BUILD_COMMAND_LABEL.into(),
         program: PathBuf::from("node"),
-        args: vec![display_path(script_path)],
+        // Tauri re-signs sidecars with Hardened Runtime. This builder does not
+        // need a JIT, so keep the App, uv, and Node free of executable-memory
+        // entitlements instead of widening the whole bundle's permissions.
+        args: vec!["--jitless".into(), display_path(script_path)],
         env: Vec::new(),
         cwd: Some(project_root.clone()),
         output_dir: project_root,
@@ -14878,8 +16744,8 @@ fn build_reading_command(
     })
 }
 
-fn prepare_bilingual_builder(project_root: &Path) -> Result<PathBuf, String> {
-    let source = local_reading_repo_root()?
+fn prepare_bilingual_builder(_project_root: &Path) -> Result<PathBuf, String> {
+    let source = bundled_resource_root()?
         .join("tools")
         .join("bibliosmith-launcher")
         .join("source")
@@ -14891,11 +16757,7 @@ fn prepare_bilingual_builder(project_root: &Path) -> Result<PathBuf, String> {
             display_path(&source)
         ));
     }
-    let target_dir = project_root.join("scripts");
-    fs::create_dir_all(&target_dir).map_err(|err| err.to_string())?;
-    let target = target_dir.join("build_bilingual_epub.py");
-    fs::copy(&source, &target).map_err(|err| err.to_string())?;
-    Ok(target)
+    Ok(source)
 }
 
 fn build_bilingual_command(
@@ -14909,16 +16771,78 @@ fn build_bilingual_command(
         .find(|stage| stage.stage_id == "build_reading")
         .map(|stage| stage.attempt)
         .unwrap_or(0);
+    let resource_root = bundled_resource_root()?;
     Ok(RunnerCommand {
         kind: RunnerCommandKind::Process,
         label: BILINGUAL_BUILD_COMMAND_LABEL.into(),
-        program: PathBuf::from("python3"),
+        program: PathBuf::from("uv"),
         args: vec![
+            "run".into(),
+            "--project".into(),
+            display_path(&resource_root),
+            "python".into(),
             display_path(script_path),
             "--book-root".into(),
             display_path(&project_root),
         ],
         env: Vec::new(),
+        cwd: Some(project_root.clone()),
+        output_dir: project_root,
+        attempts,
+        accepted_exit_codes: vec![0],
+    })
+}
+
+fn structural_readability_auditor_path() -> Result<PathBuf, String> {
+    let source = bundled_resource_root()?
+        .join("tools")
+        .join("bibliosmith-launcher")
+        .join("source")
+        .join("scripts")
+        .join("audit_epub.py");
+    if !source.is_file() {
+        return Err(format!(
+            "Structural readability auditor is missing at {}",
+            display_path(&source)
+        ));
+    }
+    Ok(source)
+}
+
+fn build_structural_readability_command(
+    child: &BookPipelineChildJob,
+    script_path: &Path,
+    epub_path: &Path,
+    publication_map_path: &Path,
+    report_path: &Path,
+    browser_binary: &Path,
+) -> Result<RunnerCommand, String> {
+    let project_root = project_root_from_child(child)?;
+    let attempts = child
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "validate_reading")
+        .map(|stage| stage.attempt)
+        .unwrap_or(0);
+    let resource_root = bundled_resource_root()?;
+    Ok(RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: STRUCTURAL_READABILITY_COMMAND_LABEL.into(),
+        program: PathBuf::from("uv"),
+        args: vec![
+            "run".into(),
+            "--project".into(),
+            display_path(&resource_root),
+            "python".into(),
+            display_path(script_path),
+            "--epub".into(),
+            display_path(epub_path),
+            "--publication-map".into(),
+            display_path(publication_map_path),
+            "--output".into(),
+            display_path(report_path),
+        ],
+        env: vec![("BIBLIOSMITH_CHROME".into(), display_path(browser_binary))],
         cwd: Some(project_root.clone()),
         output_dir: project_root,
         attempts,
@@ -14959,7 +16883,19 @@ fn run_build_reading_stage(
     executor: &dyn RunnerCommandExecutor,
 ) -> Result<StageRunOutput, String> {
     let project_root = project_root_from_child(child)?;
-    let (_, _, mut input_hashes) = promotion_approval_input_hashes(job, child)?;
+    let structure = validated_structure_maps(child, "promote")?;
+    let (_, promotion_manifest_sha256) =
+        validated_stage_artifact(child, "promotion_manifest", "promote")?;
+    let mut input_hashes = BTreeMap::new();
+    input_hashes.insert(
+        "publicationMapSha256".into(),
+        structure.publication_map_sha256.clone(),
+    );
+    input_hashes.insert(
+        "sourceMapSha256".into(),
+        structure.source_map_sha256.clone(),
+    );
+    input_hashes.insert("promotionManifestSha256".into(), promotion_manifest_sha256);
     input_hashes.insert(
         "outputFormatsSha256".into(),
         sha256_str(&serde_json::to_string(&job.output_formats).map_err(|err| err.to_string())?),
@@ -15103,17 +17039,10 @@ fn run_build_reading_stage(
 
     let bilingual_epub_path = reading_dir.join("book_bilingual.epub");
     if wants_bilingual {
-        let source_map = child
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.kind == "source_map")
-            .ok_or_else(|| "Bilingual build requires the source_map artifact.".to_string())?;
-        let source_map_path = PathBuf::from(&source_map.path);
-        let source_map_sha256 = sha256_file(&source_map_path)?;
-        if source_map.sha256.as_ref() != Some(&source_map_sha256) {
-            return Err("Source map changed before bilingual build.".into());
-        }
-        input_hashes.insert("bilingualSourceMapSha256".into(), source_map_sha256);
+        input_hashes.insert(
+            "bilingualSourceMapSha256".into(),
+            structure.source_map_sha256,
+        );
         let mut source_chapters = child
             .artifacts
             .iter()
@@ -15205,6 +17134,16 @@ fn run_build_reading_stage(
 #[derive(Deserialize, Default)]
 struct EpubCheckReport {
     checker: EpubCheckSummary,
+    #[serde(default)]
+    messages: Vec<EpubCheckMessage>,
+}
+
+#[derive(Deserialize, Default)]
+struct EpubCheckMessage {
+    #[serde(default, rename = "ID", alias = "id")]
+    id: String,
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -15223,37 +17162,114 @@ struct EpubCheckStageResult {
     summary: EpubCheckSummary,
     log_summary: Vec<String>,
     error: Option<String>,
+    version: String,
+    messages: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructuralReadabilityReport {
+    schema: String,
+    status: String,
+    #[serde(default)]
+    generated_at: String,
+    #[serde(default)]
+    auditor: StructuralAuditorIdentity,
+    #[serde(default)]
+    metrics: StructuralReadabilityMetrics,
+    #[serde(default)]
+    findings: Vec<StructuralReadabilityFinding>,
+}
+
+#[derive(Deserialize, Default)]
+struct StructuralAuditorIdentity {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    version: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct StructuralReadabilityMetrics {
+    #[serde(default)]
+    viewport_smoke: Vec<ViewportSmokeEvidence>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ViewportSmokeEvidence {
+    #[serde(default)]
+    renderer: String,
+    #[serde(default)]
+    renderer_version: String,
+}
+
+#[derive(Deserialize)]
+struct StructuralReadabilityFinding {
+    code: String,
+    #[serde(default)]
+    message: String,
+}
+
+struct StructuralReadabilityStageResult {
+    report_artifact: BookPipelineArtifact,
+    passed: bool,
+    finding_count: usize,
+    log_summary: Vec<String>,
+    generated_at: String,
+    auditor: String,
+    renderer_versions: Vec<String>,
+    findings: Vec<String>,
 }
 
 fn book_pipeline_epubcheck_jar_path() -> Result<PathBuf, String> {
-    let books_dir = local_reading_repo_root()?.join("books");
-    let epubchecker_dir = books_dir.join("node_modules").join("epubchecker");
-    let installed_package = epubchecker_dir.join("package.json");
-    let version = if installed_package.is_file() {
-        let json: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(&installed_package).map_err(|err| err.to_string())?,
-        )
-        .map_err(|err| err.to_string())?;
-        json.get("epubcheckVersion")
-            .and_then(serde_json::Value::as_str)
-            .filter(|version| !version.trim().is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| "epubchecker package.json has no epubcheckVersion.".to_string())?
+    let resource_root = bundled_resource_root()?;
+    let epubchecker_dir = if cfg!(debug_assertions) {
+        resource_root
+            .join("books")
+            .join("node_modules")
+            .join("epubchecker")
     } else {
-        let lock_path = books_dir.join("package-lock.json");
-        let json: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&lock_path).map_err(|err| err.to_string())?)
-                .map_err(|err| err.to_string())?;
-        json.pointer("/packages/node_modules~1epubchecker/version")
-            .and_then(serde_json::Value::as_str)
-            .filter(|version| !version.trim().is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| "books/package-lock.json has no epubchecker version.".to_string())?
+        resource_root.join("vendor").join("epubchecker")
     };
+    let installed_package = epubchecker_dir.join("package.json");
+    let json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&installed_package).map_err(|err| err.to_string())?,
+    )
+    .map_err(|err| err.to_string())?;
+    let version = json
+        .get("epubcheckVersion")
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| !version.trim().is_empty())
+        .ok_or_else(|| "epubchecker package.json has no epubcheckVersion.".to_string())?;
     Ok(epubchecker_dir
         .join("vendors")
         .join(format!("epubcheck-{version}"))
         .join("epubcheck.jar"))
+}
+
+fn epubcheck_version_from_command(command: &RunnerCommand) -> String {
+    let from_path = command
+        .args
+        .get(1)
+        .and_then(|path| Path::new(path).parent())
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .and_then(|name| name.strip_prefix("epubcheck-"))
+        .filter(|version| !version.is_empty())
+        .map(str::to_string);
+    from_path
+        .or_else(|| {
+            book_pipeline_epubcheck_jar_path().ok().and_then(|path| {
+                path.parent()
+                    .and_then(Path::file_name)
+                    .and_then(OsStr::to_str)
+                    .and_then(|name| name.strip_prefix("epubcheck-"))
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn build_epubcheck_command(
@@ -15264,8 +17280,16 @@ fn build_epubcheck_command(
     stage_id: &str,
 ) -> Result<RunnerCommand, String> {
     let project_root = project_root_from_child(child)?;
-    let jar_path = book_pipeline_epubcheck_jar_path()?;
     let fake_fixture = job.kind != "collection" && job.source.kind == "fake";
+    let jar_path = if fake_fixture {
+        bundled_resource_root()?
+            .join("vendor")
+            .join("epubchecker")
+            .join("fixtures")
+            .join("epubcheck.jar")
+    } else {
+        book_pipeline_epubcheck_jar_path()?
+    };
     if !fake_fixture && !jar_path.is_file() {
         return Err(format!(
             "EPUBCheck vendor jar is missing at {}",
@@ -15317,6 +17341,19 @@ fn run_epubcheck(
         serde_json::from_str(&fs::read_to_string(report_path).map_err(|err| err.to_string())?)
             .map_err(|err| format!("EPUBCheck returned an invalid JSON report: {err}"))?;
     let passed = report.checker.n_fatal == 0 && report.checker.n_error == 0;
+    let version = epubcheck_version_from_command(&command);
+    let messages = report
+        .messages
+        .iter()
+        .map(
+            |message| match (message.id.trim(), message.message.trim()) {
+                ("", "") => "unspecified EPUBCheck finding".to_string(),
+                ("", text) => text.to_string(),
+                (id, "") => id.to_string(),
+                (id, text) => format!("{id}: {text}"),
+            },
+        )
+        .collect::<Vec<_>>();
     let mut log_summary = vec![format!(
         "EPUBCheck reported fatal={}, error={}, warning={}",
         report.checker.n_fatal, report.checker.n_error, report.checker.n_warning
@@ -15337,6 +17374,119 @@ fn run_epubcheck(
         summary: report.checker,
         log_summary,
         error,
+        version,
+        messages,
+    })
+}
+
+fn run_structural_readability_audit(
+    child: &BookPipelineChildJob,
+    executor: &dyn RunnerCommandExecutor,
+    epub_path: &Path,
+    publication_map_path: &Path,
+    report_path: &Path,
+    artifact_kind: &str,
+    browser_runtime: &ManagedChromiumRuntime,
+) -> Result<StructuralReadabilityStageResult, String> {
+    if report_path.is_file() {
+        fs::remove_file(report_path).map_err(|err| err.to_string())?;
+    }
+    let script_path = structural_readability_auditor_path()?;
+    let command = build_structural_readability_command(
+        child,
+        &script_path,
+        epub_path,
+        publication_map_path,
+        report_path,
+        &browser_runtime.binary,
+    )?;
+    let command_result = executor.execute(&command)?;
+    let report_artifact = required_stage_artifact(artifact_kind, report_path, "validate_reading")?;
+    let report: StructuralReadabilityReport =
+        serde_json::from_str(&fs::read_to_string(report_path).map_err(|err| err.to_string())?)
+            .map_err(|err| format!("Structural readability audit returned invalid JSON: {err}"))?;
+    if report.schema != STRUCTURAL_READABILITY_REPORT_SCHEMA {
+        return Err("Structural readability audit returned an unsupported schema.".into());
+    }
+    if !matches!(report.status.as_str(), "passed" | "failed") {
+        return Err("Structural readability audit returned an invalid status.".into());
+    }
+    let passed = report.status == "passed" && report.findings.is_empty();
+    let finding_count = report.findings.len();
+    let mut log_summary = vec![format!(
+        "Structural readability audit {} with {finding_count} finding(s)",
+        if passed { "passed" } else { "failed" }
+    )];
+    if !passed {
+        let codes = report
+            .findings
+            .iter()
+            .take(5)
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !codes.is_empty() {
+            log_summary.push(format!("Structural findings: {codes}"));
+        }
+    }
+    log_summary.extend(redact_log_lines(&command_result.log_summary));
+    log_summary.extend(parse_allowlisted_worker_markers(
+        &command_result.stderr,
+        &[command.output_dir.as_path()],
+    ));
+    if report.metrics.viewport_smoke.is_empty()
+        || report
+            .metrics
+            .viewport_smoke
+            .iter()
+            .any(|viewport| viewport.renderer_version.trim() != browser_runtime.version.as_str())
+    {
+        return Err(format!(
+            "Structural readability audit did not report the pinned Chromium version {}.",
+            browser_runtime.version
+        ));
+    }
+    let renderer_versions = report
+        .metrics
+        .viewport_smoke
+        .iter()
+        .map(|viewport| {
+            if viewport.renderer.trim().is_empty() {
+                viewport.renderer_version.clone()
+            } else {
+                format!("{} {}", viewport.renderer, viewport.renderer_version)
+            }
+        })
+        .filter(|value| !value.trim().is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let findings = report
+        .findings
+        .iter()
+        .map(|finding| {
+            if finding.message.trim().is_empty() {
+                finding.code.clone()
+            } else {
+                format!("{}: {}", finding.code, finding.message.trim())
+            }
+        })
+        .collect();
+    let auditor = match (report.auditor.name.trim(), report.auditor.version.trim()) {
+        ("", "") => "unknown".to_string(),
+        (name, "") => name.to_string(),
+        ("", version) => version.to_string(),
+        (name, version) => format!("{name} {version}"),
+    };
+    Ok(StructuralReadabilityStageResult {
+        report_artifact,
+        passed,
+        finding_count,
+        log_summary,
+        generated_at: report.generated_at,
+        auditor,
+        renderer_versions,
+        findings,
     })
 }
 
@@ -15373,6 +17523,146 @@ fn validated_reading_artifacts(
     Ok(artifacts)
 }
 
+fn find_managed_chromium(root: &Path) -> Option<PathBuf> {
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let entries = fs::read_dir(directory).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+                continue;
+            }
+            let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
+            if matches!(
+                name,
+                "chrome-headless-shell"
+                    | "chrome-headless-shell.exe"
+                    | "headless_shell"
+                    | "headless_shell.exe"
+            ) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+struct ManagedChromiumRuntime {
+    binary: PathBuf,
+    sha256: String,
+    version: String,
+    manifest: Option<PathBuf>,
+}
+
+fn chromium_version(binary: &Path) -> Result<String, String> {
+    let output = Command::new(binary)
+        .arg("--version")
+        .output()
+        .map_err(|error| {
+            format!(
+                "Managed Chromium failed its version probe at {}: {error}",
+                display_path(binary)
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "Managed Chromium version probe failed at {} with status {}.",
+            display_path(binary),
+            output.status
+        ));
+    }
+    let reported_version = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    reported_version
+        .split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .find(|token| {
+            token.starts_with(|character: char| character.is_ascii_digit())
+                && token.matches('.').count() >= 2
+        })
+        .map(str::to_string)
+        .ok_or_else(|| "Managed Chromium version probe returned no usable version.".into())
+}
+
+fn managed_chromium_runtime(
+    resource_root: &Path,
+    playwright_manifest: &Path,
+) -> Result<ManagedChromiumRuntime, String> {
+    let browser_manifest = playwright_manifest
+        .parent()
+        .ok_or_else(|| "Playwright package manifest has no parent directory.".to_string())?
+        .join("browser-manifest.json");
+    if browser_manifest.is_file() {
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&browser_manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("Managed Chromium manifest is invalid: {error}"))?;
+        if manifest.get("schema").and_then(serde_json::Value::as_str)
+            != Some("bibliosmith-browser-runtime-v1")
+        {
+            return Err("Managed Chromium manifest has an unsupported schema.".into());
+        }
+        let relative_path = manifest
+            .get("relativePath")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Managed Chromium manifest has no relativePath.".to_string())?;
+        let relative_path = Path::new(relative_path);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            return Err("Managed Chromium manifest relativePath escapes the runtime root.".into());
+        }
+        let binary = resource_root.join(relative_path);
+        if !binary.is_file() {
+            return Err(format!(
+                "Managed Chromium executable is missing at {}.",
+                display_path(&binary)
+            ));
+        }
+        let actual_sha256 = sha256_file(&binary)?;
+        let expected_sha256 = manifest
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Managed Chromium manifest has no SHA-256.".to_string())?;
+        if actual_sha256 != expected_sha256 {
+            return Err("Managed Chromium executable failed its SHA-256 check.".into());
+        }
+        let version = chromium_version(&binary)?;
+        let expected_version = manifest
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Managed Chromium manifest has no version.".to_string())?;
+        if version != expected_version {
+            return Err("Managed Chromium executable failed its version check.".into());
+        }
+        return Ok(ManagedChromiumRuntime {
+            binary,
+            sha256: actual_sha256,
+            version,
+            manifest: Some(browser_manifest),
+        });
+    }
+
+    let local_browsers = playwright_manifest
+        .parent()
+        .ok_or_else(|| "Playwright package manifest has no parent directory.".to_string())?
+        .join(".local-browsers");
+    let binary = find_managed_chromium(&local_browsers).ok_or_else(|| {
+        "Managed Chromium is missing; prepare the pinned App runtime resources.".to_string()
+    })?;
+    Ok(ManagedChromiumRuntime {
+        sha256: sha256_file(&binary)?,
+        version: chromium_version(&binary)?,
+        binary,
+        manifest: None,
+    })
+}
+
 /// One line per recorded reader, inside the generated section so the report tells
 /// the same story the job state does. A stale record is shown as stale rather
 /// than hidden: knowing someone checked an older build is worth more than a
@@ -15390,26 +17680,77 @@ fn reading_validation_reader_lines(evidence: &[BookPipelineReaderEvidence]) -> V
                 ""
             };
             format!(
-                "- reader verification: {} {} on {} — {} [sha256 {}]{staleness}",
+                "- reader verification: {} {} on {} — {} at {} [sha256 {}]{staleness}",
                 record.reader,
                 record.reader_version,
                 record.artifact_kind,
                 record.conclusion,
+                record.recorded_at,
                 record.artifact_sha256,
             )
         })
         .collect()
 }
 
+#[derive(Default)]
+struct ReadingValidationToolEvidence {
+    epubcheck_versions: BTreeSet<String>,
+    epubcheck_messages: Vec<String>,
+    structural_auditors: BTreeSet<String>,
+    renderer_versions: BTreeSet<String>,
+    structural_findings: Vec<String>,
+    structural_evidence_times: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ReadingValidationOutcome {
+    Passed,
+    Failed,
+    NotRun,
+}
+
+impl ReadingValidationOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::NotRun => "not run",
+        }
+    }
+}
+
 fn write_reading_validation_status(
     project_root: &Path,
     summary: &EpubCheckSummary,
-    passed: bool,
+    package_outcome: ReadingValidationOutcome,
+    structural_outcome: ReadingValidationOutcome,
+    structural_finding_count: usize,
+    tools: &ReadingValidationToolEvidence,
     reader_evidence: &[BookPipelineReaderEvidence],
 ) -> Result<PathBuf, String> {
     let path = project_root.join("qa").join("status.md");
     let existing = fs::read_to_string(&path).unwrap_or_else(|_| "# QA Status\n".into());
-    let reading_status = if passed { "passed" } else { "failed" };
+    let reading_status = match (package_outcome, structural_outcome) {
+        (ReadingValidationOutcome::Passed, ReadingValidationOutcome::Passed) => "passed",
+        (ReadingValidationOutcome::NotRun, ReadingValidationOutcome::NotRun) => "not applicable",
+        _ => "failed",
+    };
+    let package_status = package_outcome.label();
+    let structural_status = structural_outcome.label();
+    let fresh_reader_evidence = reader_evidence
+        .iter()
+        .filter(|evidence| !evidence.stale)
+        .collect::<Vec<_>>();
+    let reader_acceptance = if fresh_reader_evidence.is_empty() {
+        "not recorded"
+    } else if fresh_reader_evidence
+        .iter()
+        .all(|evidence| evidence.conclusion == "passed")
+    {
+        "passed"
+    } else {
+        "failed"
+    };
     let status_updates = [
         ("- split:", "- split: passed".to_string()),
         ("- translation:", "- translation: passed".to_string()),
@@ -15418,7 +17759,19 @@ fn write_reading_validation_status(
             "- reading output:",
             format!("- reading output: {reading_status}"),
         ),
-        ("- EPUBCheck:", format!("- EPUBCheck: {reading_status}")),
+        ("- EPUBCheck:", format!("- EPUBCheck: {package_status}")),
+        (
+            "- Package validity:",
+            format!("- Package validity: {package_status}"),
+        ),
+        (
+            "- Structural readability:",
+            format!("- Structural readability: {structural_status}"),
+        ),
+        (
+            "- Reader acceptance:",
+            format!("- Reader acceptance: {reader_acceptance}"),
+        ),
     ];
     let mut replaced_statuses = vec![false; status_updates.len()];
     let mut lines = Vec::new();
@@ -15453,8 +17806,22 @@ fn write_reading_validation_status(
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
     }
-    let residual_risk = if !passed {
-        "none accepted; EPUBCheck fatal/error findings remain blocking".to_string()
+    let residual_risk = if package_outcome == ReadingValidationOutcome::Failed {
+        "none accepted; package-validity findings remain blocking".to_string()
+    } else if structural_outcome == ReadingValidationOutcome::Failed {
+        "none accepted; structural-readability findings remain blocking".to_string()
+    } else if package_outcome == ReadingValidationOutcome::NotRun
+        && structural_outcome == ReadingValidationOutcome::NotRun
+    {
+        "EPUB validation not applicable to selected output formats".to_string()
+    } else if package_outcome == ReadingValidationOutcome::NotRun
+        || structural_outcome == ReadingValidationOutcome::NotRun
+    {
+        "none accepted; automated EPUB validation was incomplete".to_string()
+    } else if reader_acceptance == "not recorded" {
+        "reader acceptance not recorded".to_string()
+    } else if reader_acceptance == "failed" {
+        "none accepted; fresh reader acceptance failed".to_string()
     } else if summary.n_warning == 0 {
         "none".to_string()
     } else {
@@ -15463,14 +17830,106 @@ fn write_reading_validation_status(
             summary.n_warning
         )
     };
-    lines.extend([
-        String::new(),
-        READING_VALIDATION_STATUS_START.into(),
+    let epubcheck_detail = if package_outcome == ReadingValidationOutcome::NotRun {
+        "- EPUBCheck: not run".to_string()
+    } else {
         format!(
             "- EPUBCheck: fatal={}, error={}, warning={}",
             summary.n_fatal, summary.n_error, summary.n_warning
+        )
+    };
+    let structural_findings = if structural_outcome == ReadingValidationOutcome::NotRun {
+        "not run".to_string()
+    } else {
+        structural_finding_count.to_string()
+    };
+    let unavailable_tool_label = if package_outcome == ReadingValidationOutcome::NotRun {
+        "not run"
+    } else {
+        "unknown"
+    };
+    let unavailable_structural_tool_label =
+        if structural_outcome == ReadingValidationOutcome::NotRun {
+            "not run"
+        } else {
+            "unknown"
+        };
+    lines.extend([
+        String::new(),
+        READING_VALIDATION_STATUS_START.into(),
+        epubcheck_detail,
+        format!("- structural readability: {structural_status}"),
+        format!("- structural findings: {structural_findings}"),
+        format!("- validation evidence time: {}", now_label()),
+        format!(
+            "- EPUBCheck version: {}",
+            if tools.epubcheck_versions.is_empty() {
+                unavailable_tool_label.into()
+            } else {
+                tools
+                    .epubcheck_versions
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ),
+        format!(
+            "- structural auditor: {}",
+            if tools.structural_auditors.is_empty() {
+                unavailable_structural_tool_label.into()
+            } else {
+                tools
+                    .structural_auditors
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ),
+        format!(
+            "- renderer version: {}",
+            if tools.renderer_versions.is_empty() {
+                unavailable_structural_tool_label.into()
+            } else {
+                tools
+                    .renderer_versions
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ),
+        format!(
+            "- structural evidence time: {}",
+            if tools.structural_evidence_times.is_empty() {
+                if structural_outcome == ReadingValidationOutcome::NotRun {
+                    "not run".into()
+                } else {
+                    "not reported".into()
+                }
+            } else {
+                tools
+                    .structural_evidence_times
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
         ),
     ]);
+    lines.extend(
+        tools
+            .epubcheck_messages
+            .iter()
+            .map(|message| format!("- EPUBCheck finding: {message}")),
+    );
+    lines.extend(
+        tools
+            .structural_findings
+            .iter()
+            .map(|finding| format!("- structural finding: {finding}")),
+    );
     lines.extend(reading_validation_reader_lines(reader_evidence));
     lines.extend([
         format!("- accepted residual risks: {residual_risk}"),
@@ -15505,13 +17964,74 @@ fn run_validate_reading_stage(
     let mut aggregate = EpubCheckSummary::default();
     let mut log_summary = Vec::new();
     let mut checked_epubs = 0;
-    for (format, artifact_kind, input_key, report_name, report_kind) in [
+    let mut structural_readability = true;
+    let mut structural_finding_count = 0usize;
+    let mut tool_evidence = ReadingValidationToolEvidence::default();
+    let validates_epub = output_format_enabled(job, OUTPUT_FORMAT_EPUB)
+        || output_format_enabled(job, OUTPUT_FORMAT_BILINGUAL);
+    let (publication_map_path, browser_runtime) = if validates_epub {
+        let structure = validated_structure_maps(child, "promote")?;
+        let publication_map_path = project_root.join("metadata/publication_map.json");
+        input_hashes.insert(
+            "publicationMapSha256".into(),
+            structure.publication_map_sha256,
+        );
+        input_hashes.insert("sourceMapSha256".into(), structure.source_map_sha256);
+        let structural_script = structural_readability_auditor_path()?;
+        input_hashes.insert(
+            "structuralReadabilityScriptSha256".into(),
+            sha256_file(&structural_script)?,
+        );
+        let render_script = structural_script.with_file_name("render_epub_smoke.cjs");
+        input_hashes.insert(
+            "structuralRenderScriptSha256".into(),
+            sha256_file(&render_script)?,
+        );
+        let resource_root = bundled_resource_root()?;
+        let bundled_playwright_manifest = resource_root.join("vendor/playwright-core/package.json");
+        let playwright_manifest = if bundled_playwright_manifest.is_file() {
+            bundled_playwright_manifest
+        } else {
+            resource_root.join("books/node_modules/playwright-core/package.json")
+        };
+        input_hashes.insert(
+            "playwrightCoreManifestSha256".into(),
+            sha256_file(&playwright_manifest)?,
+        );
+        let chromium = managed_chromium_runtime(&resource_root, &playwright_manifest)?;
+        if let Some(browser_manifest) = chromium.manifest.as_ref() {
+            input_hashes.insert(
+                "chromiumManifestSha256".into(),
+                sha256_file(browser_manifest)?,
+            );
+        }
+        input_hashes.insert("chromiumBinarySha256".into(), chromium.sha256.clone());
+        input_hashes.insert(
+            "chromiumVersionSha256".into(),
+            sha256_str(&chromium.version),
+        );
+        log_summary.push(format!("Managed Chromium renderer: {}", chromium.version));
+        (Some(publication_map_path), Some(chromium))
+    } else {
+        (None, None)
+    };
+    for (
+        format,
+        artifact_kind,
+        input_key,
+        report_name,
+        report_kind,
+        structural_report_name,
+        structural_report_kind,
+    ) in [
         (
             OUTPUT_FORMAT_EPUB,
             "reading_epub",
             "readingEpubSha256",
             "epubcheck.json",
             "epubcheck_report",
+            "structural_readability.json",
+            "structural_readability_report",
         ),
         (
             OUTPUT_FORMAT_BILINGUAL,
@@ -15519,11 +18039,19 @@ fn run_validate_reading_stage(
             "readingBilingualEpubSha256",
             "epubcheck_bilingual.json",
             "bilingual_epubcheck_report",
+            "structural_readability_bilingual.json",
+            "bilingual_structural_readability_report",
         ),
     ] {
         if !output_format_enabled(job, format) {
             continue;
         }
+        let publication_map_path = publication_map_path.as_deref().ok_or_else(|| {
+            "EPUB validation was selected without a publication map runtime.".to_string()
+        })?;
+        let browser_runtime = browser_runtime.as_ref().ok_or_else(|| {
+            "EPUB validation was selected without a managed Chromium runtime.".to_string()
+        })?;
         let epub = validated_reading_artifacts(child, artifact_kind)?;
         if epub.len() != 1 {
             return Err(format!(
@@ -15541,6 +18069,12 @@ fn run_validate_reading_stage(
             "validate_reading",
             report_kind,
         )?;
+        tool_evidence
+            .epubcheck_versions
+            .insert(epubcheck.version.clone());
+        tool_evidence
+            .epubcheck_messages
+            .extend(epubcheck.messages.clone());
         aggregate.n_fatal = aggregate.n_fatal.saturating_add(epubcheck.summary.n_fatal);
         aggregate.n_error = aggregate.n_error.saturating_add(epubcheck.summary.n_error);
         aggregate.n_warning = aggregate
@@ -15548,28 +18082,89 @@ fn run_validate_reading_stage(
             .saturating_add(epubcheck.summary.n_warning);
         artifacts.push(epubcheck.report_artifact);
         log_summary.extend(epubcheck.log_summary);
+        let structural_report_path = project_root.join("output").join(structural_report_name);
+        let structural = run_structural_readability_audit(
+            child,
+            executor,
+            &epub[0].0,
+            publication_map_path,
+            &structural_report_path,
+            structural_report_kind,
+            browser_runtime,
+        )?;
+        tool_evidence
+            .structural_auditors
+            .insert(structural.auditor.clone());
+        tool_evidence
+            .renderer_versions
+            .extend(structural.renderer_versions.iter().cloned());
+        tool_evidence
+            .structural_findings
+            .extend(structural.findings.clone());
+        if !structural.generated_at.trim().is_empty() {
+            tool_evidence
+                .structural_evidence_times
+                .insert(structural.generated_at.clone());
+        }
+        structural_readability &= structural.passed;
+        structural_finding_count =
+            structural_finding_count.saturating_add(structural.finding_count);
+        artifacts.push(structural.report_artifact);
+        log_summary.extend(structural.log_summary);
         checked_epubs += 1;
     }
     if checked_epubs == 0 {
         log_summary
             .push("No EPUB format selected; Markdown/HTML artifact validation passed".into());
     }
-    let passed = aggregate.n_fatal == 0 && aggregate.n_error == 0;
-    let status_path =
-        write_reading_validation_status(&project_root, &aggregate, passed, &child.reader_evidence)?;
+    let package_valid = aggregate.n_fatal == 0 && aggregate.n_error == 0;
+    let package_outcome = if checked_epubs == 0 {
+        ReadingValidationOutcome::NotRun
+    } else if package_valid {
+        ReadingValidationOutcome::Passed
+    } else {
+        ReadingValidationOutcome::Failed
+    };
+    let structural_outcome = if checked_epubs == 0 {
+        ReadingValidationOutcome::NotRun
+    } else if structural_readability {
+        ReadingValidationOutcome::Passed
+    } else {
+        ReadingValidationOutcome::Failed
+    };
+    let passed = checked_epubs == 0 || (package_valid && structural_readability);
+    let status_path = write_reading_validation_status(
+        &project_root,
+        &aggregate,
+        package_outcome,
+        structural_outcome,
+        structural_finding_count,
+        &tool_evidence,
+        &child.reader_evidence,
+    )?;
     let status_artifact = required_stage_artifact("qa_status", &status_path, "validate_reading")?;
     artifacts.push(status_artifact);
-    let error = (!passed).then(|| {
-        format!(
-            "EPUBCheck reported {} fatal finding(s) and {} error(s).",
+    let error = (!passed).then(|| match (package_valid, structural_readability) {
+        (false, false) => format!(
+            "Package validity failed with {} EPUBCheck fatal finding(s) and {} error(s); structural readability failed with {structural_finding_count} finding(s).",
             aggregate.n_fatal, aggregate.n_error
-        )
+        ),
+        (false, true) => format!(
+            "Package validity failed: EPUBCheck reported {} fatal finding(s) and {} error(s).",
+            aggregate.n_fatal, aggregate.n_error
+        ),
+        (true, false) => format!(
+            "Structural readability failed with {structural_finding_count} finding(s); EPUBCheck package validity passed."
+        ),
+        (true, true) => unreachable!(),
     });
     Ok(StageRunOutput {
         artifacts,
         artifact_kinds: vec![
             "epubcheck_report",
             "bilingual_epubcheck_report",
+            "structural_readability_report",
+            "bilingual_structural_readability_report",
             "qa_status",
         ],
         input_hashes,
@@ -15601,7 +18196,7 @@ fn validated_stage_artifact(
     let actual_sha256 = sha256_file(&path)?;
     if &actual_sha256 != expected_sha256 {
         return Err(format!(
-            "{kind} artifact changed before Digest build: {}",
+            "{kind} artifact changed after {producer_stage} registration: {}",
             artifact.path
         ));
     }
@@ -15686,7 +18281,7 @@ fn build_digest_command(child: &BookPipelineChildJob) -> Result<RunnerCommand, S
             display_path(&project_root),
         ],
         env: Vec::new(),
-        cwd: Some(local_reading_repo_root()?),
+        cwd: Some(bundled_resource_root()?),
         output_dir: project_root,
         attempts,
         accepted_exit_codes: vec![0],
@@ -15990,8 +18585,49 @@ enum SplitFreshnessAction {
 struct SplitFreshnessChange {
     action: SplitFreshnessAction,
     new_source_hash: String,
+    new_publication_evidence_hash: Option<String>,
+    new_publication_evidence_documents_hash: Option<String>,
+    new_structure_correction_hash: Option<String>,
     policy_changed: bool,
     stop_after: bool,
+}
+
+#[derive(Debug)]
+struct CurrentSplitEvidenceHashes {
+    evidence: Option<String>,
+    evidence_documents: Option<String>,
+    correction: Option<String>,
+}
+
+fn current_split_evidence_hashes(
+    project_root: &Path,
+) -> Result<CurrentSplitEvidenceHashes, String> {
+    let evidence_path = project_root.join("metadata/extracted_publication_evidence.json");
+    let (evidence_hash, evidence_documents_hash) = if evidence_path.is_file() {
+        let evidence: ExtractedPublicationEvidence = serde_json::from_str(
+            &fs::read_to_string(&evidence_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("Extracted publication evidence is invalid: {error}"))?;
+        (
+            Some(sha256_file(&evidence_path)?),
+            Some(validate_extracted_source_documents(
+                project_root,
+                &evidence,
+            )?),
+        )
+    } else {
+        (None, None)
+    };
+    let correction_path = project_root.join("metadata/publication_map.correction.json");
+    let correction_hash = correction_path
+        .is_file()
+        .then(|| sha256_file(&correction_path))
+        .transpose()?;
+    Ok(CurrentSplitEvidenceHashes {
+        evidence: evidence_hash,
+        evidence_documents: evidence_documents_hash,
+        correction: correction_hash,
+    })
 }
 
 /// Detect whether a completed (or already blocked) split still matches the
@@ -16009,19 +18645,27 @@ fn evaluate_split_freshness(
     if !matches!(split.status.as_str(), STATUS_COMPLETED | STATUS_BLOCKED) {
         return Ok(None);
     }
-    let source_md = project_root_from_child(child)?
-        .join("source")
-        .join("source.md");
+    let project_root = project_root_from_child(child)?;
+    let source_md = project_root.join("source").join("source.md");
     if !source_md.is_file() {
         return Ok(None);
     }
     let current = sha256_file(&source_md)?;
+    let current_evidence_hashes = current_split_evidence_hashes(&project_root)?;
+    let current_evidence = current_evidence_hashes.evidence;
+    let current_evidence_documents = current_evidence_hashes.evidence_documents;
+    let current_correction = current_evidence_hashes.correction;
     let policy_changed = split
         .input_hashes
         .get("splitPolicyVersion")
         .map(String::as_str)
         != Some(SPLIT_POLICY_VERSION);
     let source_changed = split.input_hashes.get("sourceMarkdownSha256") != Some(&current);
+    let evidence_changed = split.input_hashes.get("publicationEvidenceSha256")
+        != current_evidence.as_ref()
+        || split.input_hashes.get("publicationEvidenceDocumentsSha256")
+            != current_evidence_documents.as_ref()
+        || split.input_hashes.get("structureCorrectionSha256") != current_correction.as_ref();
 
     let split_order = ordered_stage_index("split").unwrap_or(0);
     let downstream = || {
@@ -16034,7 +18678,7 @@ fn evaluate_split_freshness(
     if policy_changed && downstream_running {
         return Ok(None);
     }
-    if source_changed && downstream_running {
+    if (source_changed || evidence_changed) && downstream_running {
         return Ok(None);
     }
     let downstream_committed = downstream().any(|stage| stage.status == STATUS_COMPLETED);
@@ -16043,14 +18687,17 @@ fn evaluate_split_freshness(
         return Ok(invalidate_downstream.then_some(SplitFreshnessChange {
             action: SplitFreshnessAction::InvalidateDownstreamAndRerun,
             new_source_hash: current,
+            new_publication_evidence_hash: current_evidence,
+            new_publication_evidence_documents_hash: current_evidence_documents,
+            new_structure_correction_hash: current_correction,
             policy_changed,
             stop_after: false,
         }));
     }
-    if !policy_changed && !source_changed {
+    if !policy_changed && !source_changed && !evidence_changed {
         return Ok(None);
     }
-    let policy_upgrade_only = policy_changed && !source_changed;
+    let policy_upgrade_only = policy_changed && !source_changed && !evidence_changed;
     let action = if policy_upgrade_only || invalidate_downstream {
         SplitFreshnessAction::InvalidateDownstreamAndRerun
     } else if downstream_committed {
@@ -16062,6 +18709,9 @@ fn evaluate_split_freshness(
     Ok(Some(SplitFreshnessChange {
         action,
         new_source_hash: current,
+        new_publication_evidence_hash: current_evidence,
+        new_publication_evidence_documents_hash: current_evidence_documents,
+        new_structure_correction_hash: current_correction,
         policy_changed,
         stop_after,
     }))
@@ -16125,6 +18775,63 @@ fn invalidate_all_downstream(child: &mut BookPipelineChildJob, after_stage: &str
             stage.next_retry_at = None;
         }
     }
+}
+
+fn invalidate_drifted_structure_maps(
+    job: &mut BookPipelineJob,
+    child_index: usize,
+    allow_rerun: bool,
+) -> bool {
+    let child = &job.children[child_index];
+    let split_completed =
+        stage_ref(child, "split").is_some_and(|stage| stage.status == STATUS_COMPLETED);
+    let promotion_completed =
+        stage_ref(child, "promote").is_some_and(|stage| stage.status == STATUS_COMPLETED);
+    let publication_producer_stage = if promotion_completed {
+        "promote"
+    } else {
+        "split"
+    };
+    if !split_completed || validated_structure_maps(child, publication_producer_stage).is_ok() {
+        return false;
+    }
+
+    let child_id = child.id.clone();
+    let drift_evidence = child
+        .artifacts
+        .iter()
+        .filter(|artifact| matches!(artifact.kind.as_str(), "publication_map" | "source_map"))
+        .map(|artifact| {
+            let actual =
+                sha256_file(Path::new(&artifact.path)).unwrap_or_else(|_| "missing".into());
+            format!(
+                "{}:{}:{}",
+                artifact.kind,
+                artifact.sha256.as_deref().unwrap_or("missing"),
+                actual
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    invalidate_all_downstream(&mut job.children[child_index], "split");
+    job.approval_references
+        .retain(|approval| approval.child_job_id != child_id);
+    let child = &mut job.children[child_index];
+    if let Some(split) = stage_mut(child, "split") {
+        split.input_hashes.insert(
+            "structureMapDriftSha256".into(),
+            sha256_str(&drift_evidence),
+        );
+    }
+    if allow_rerun {
+        set_stage_status(child, "split", STATUS_READY, None);
+        child.last_error = None;
+    } else {
+        const ERROR: &str = "structure_map_changed_downstream_exists";
+        set_stage_status(child, "split", STATUS_BLOCKED, Some(ERROR.into()));
+        child.last_error = Some(ERROR.into());
+    }
+    true
 }
 
 /// Repair state written before downstream invalidation cleared unit-scoped
@@ -16245,6 +18952,26 @@ fn apply_split_freshness(child: &mut BookPipelineChildJob, change: &SplitFreshne
             "sourceMarkdownSha256".into(),
             change.new_source_hash.clone(),
         );
+        for (key, value) in [
+            (
+                "publicationEvidenceSha256",
+                change.new_publication_evidence_hash.as_ref(),
+            ),
+            (
+                "publicationEvidenceDocumentsSha256",
+                change.new_publication_evidence_documents_hash.as_ref(),
+            ),
+            (
+                "structureCorrectionSha256",
+                change.new_structure_correction_hash.as_ref(),
+            ),
+        ] {
+            if let Some(value) = value {
+                split.input_hashes.insert(key.into(), value.clone());
+            } else {
+                split.input_hashes.remove(key);
+            }
+        }
         if change.policy_changed
             && matches!(
                 change.action,
@@ -16369,6 +19096,39 @@ fn advance_job_stage(
             let job = state.jobs[job_index].clone();
             store.save(&state)?;
             if stop_after {
+                return Ok(job);
+            }
+        }
+    }
+
+    // Phase 0.0625: Source Map and Publication Map are durable split outputs,
+    // not editable scratch JSON. Any byte drift rolls the pipeline back to the
+    // split boundary and removes approvals; only an explicit invalidating
+    // advance may regenerate them.
+    if !retrying_stage {
+        let mut state = store.load()?;
+        let job_index = find_job_index(&state, job_id)?;
+        let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
+        if invalidate_drifted_structure_maps(
+            &mut state.jobs[job_index],
+            child_index,
+            invalidate_downstream,
+        ) {
+            state.jobs[job_index].current_step = if invalidate_downstream {
+                "Regenerating drifted structure maps".into()
+            } else {
+                "Structure map binding invalidated".into()
+            };
+            state.jobs[job_index]
+                .log_summary
+                .push("Structure map binding invalidated by artifact hash change".into());
+            state.jobs[job_index].log_summary =
+                trim_log_summary(&state.jobs[job_index].log_summary);
+            state.jobs[job_index].updated_at = now_label();
+            derive_job(&mut state.jobs[job_index]);
+            let job = state.jobs[job_index].clone();
+            store.save(&state)?;
+            if !invalidate_downstream {
                 return Ok(job);
             }
         }

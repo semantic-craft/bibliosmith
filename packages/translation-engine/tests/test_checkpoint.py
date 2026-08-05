@@ -18,7 +18,11 @@ from translation_engine.providers import (
     ProviderUnavailableError,
     TranslationRequest,
 )
-from tests.fixtures import build_multi_unit_run_fixture, build_run_fixture
+from tests.fixtures import (
+    STRUCTURE_FIDELITY_PROMPT_PACK,
+    build_multi_unit_run_fixture,
+    build_run_fixture,
+)
 
 
 class FailAfterOneChunkProvider:
@@ -256,7 +260,10 @@ class CheckpointStoreTests(unittest.TestCase):
                 provider_profile_id="fake-provider-profile",
                 provider_config_id="fake-config-no-secrets",
                 translation_policy_version="translation-policy-v1",
-                pass_id="translation-v1+chunking-policy-v5",
+                pass_id=(
+                    "translation-v1+chunking-policy-v5-prompt-pack-"
+                    f"{str(STRUCTURE_FIDELITY_PROMPT_PACK['contentSha256'])[:16]}"
+                ),
             )
             CheckpointStore(
                 project_root / "chapters" / "translated" / ".partial"
@@ -306,10 +313,12 @@ class CheckpointStoreTests(unittest.TestCase):
             expected_tail = provider.first_translation[-25:]
             self.assertEqual(report["units"][0]["status"], "completed")
             self.assertEqual(len(provider.requests), 2)
-            self.assertEqual(provider.requests[0].system_instruction, "translate")
+            first_instruction = provider.requests[0].system_instruction
+            self.assertIn("Translate the current block faithfully", first_instruction)
+            self.assertIn("# ENGINE EXECUTION CONSTRAINTS\ntranslate", first_instruction)
             self.assertEqual(
                 provider.requests[1].system_instruction,
-                "translate\n\n"
+                f"{first_instruction}\n\n"
                 "# PREVIOUS TRANSLATION CONTEXT — REFERENCE ONLY\n"
                 "This text is not part of the current source segment. Use it only "
                 "for terminology and continuity. Do not reproduce or continue it "

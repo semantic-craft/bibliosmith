@@ -80,6 +80,45 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
         root = Path(raw)
         bin_dir = root / "bin"
         bin_dir.mkdir()
+        fake_runtime = root / "runtime"
+        required_runtime_files = (
+            "pyproject.toml",
+            "uv.lock",
+            "bundle-input.json",
+            "sidecar-manifest.json",
+            "tools/bibliosmith-launcher/source/scripts/build_bilingual_epub.py",
+            "tools/bibliosmith-launcher/source/scripts/build_epub.cjs",
+            "tools/bibliosmith-launcher/source/scripts/run_python.cjs",
+            "packages/translation-engine/src/translation_engine/__main__.py",
+            "packages/layout-pdf/src/layout_pdf/__main__.py",
+            "packages/ocr/mineru.py",
+            "packages/zotero-cli/src/zotero_cli/cli.py",
+            "packages/digest/bibliosmith_digest/core.py",
+            "licenses/node/LICENSE",
+            "licenses/uv/LICENSE-MIT",
+            "licenses/uv/LICENSE-APACHE",
+            "vendor/epubchecker/vendors/test/epubcheck.jar",
+        )
+        for relative_path in required_runtime_files:
+            fixture = fake_runtime / relative_path
+            fixture.parent.mkdir(parents=True, exist_ok=True)
+            fixture.write_text("test fixture\n", encoding="utf-8")
+
+        fake_node = root / "node"
+        _write_command(
+            fake_node,
+            'if [ "$1" = "--version" ]; then\n'
+            '  printf \'v22.23.2\\n\'\n'
+            'elif [ "$1" = "--jitless" ] && [ "$#" -eq 3 ]; then\n'
+            '  printf \'node-js-ok\'\n'
+            'elif [ "$1" = "--jitless" ] && [ "$#" -eq 4 ]; then\n'
+            '  printf \'uv 0.11.8 (test)\'\n'
+            'else\n'
+            '  exit 1\n'
+            'fi',
+        )
+        fake_uv = root / "uv"
+        _write_command(fake_uv, "printf 'uv 0.11.8 (test)\\n'")
         dmg = root / "BiblioSmith Launcher.dmg"
         dmg.write_bytes(b"test-dmg")
         command_log = root / "commands.log"
@@ -102,7 +141,11 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
             'printf \'hdiutil %s\\n\' "$*" >> "$COMMAND_LOG"\n'
             'if [ "$1" = "attach" ]; then\n'
             '  for argument in "$@"; do mount_point="$argument"; done\n'
-            '  mkdir -p "$mount_point/BiblioSmith Launcher.app"\n'
+            '  app="$mount_point/BiblioSmith Launcher.app"\n'
+            '  mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/bibliosmith-runtime"\n'
+            '  cp "$FAKE_NODE" "$app/Contents/MacOS/node"\n'
+            '  cp "$FAKE_UV" "$app/Contents/MacOS/uv"\n'
+            '  cp -R "$FAKE_RUNTIME/." "$app/Contents/Resources/bibliosmith-runtime/"\n'
             'elif [ "$1" = "detach" ]; then\n'
             '  find "$2" -depth -delete\n'
             'fi',
@@ -113,6 +156,9 @@ def _run_verifier(spctl_output: str) -> tuple[subprocess.CompletedProcess[str], 
             {
                 "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
                 "COMMAND_LOG": str(command_log),
+                "FAKE_NODE": str(fake_node),
+                "FAKE_RUNTIME": str(fake_runtime),
+                "FAKE_UV": str(fake_uv),
                 "SPCTL_OUTPUT": spctl_output,
             }
         )
@@ -136,6 +182,9 @@ def test_release_verifier_accepts_a_notarized_developer_id_app() -> None:
         "xcrun",
         "hdiutil",
         "codesign",
+        "codesign",
+        "codesign",
+        "codesign",
         "spctl",
         "xcrun",
         "hdiutil",
@@ -144,9 +193,10 @@ def test_release_verifier_accepts_a_notarized_developer_id_app() -> None:
     assert commands[1].startswith("xcrun stapler validate ")
     assert commands[2].startswith("hdiutil attach ")
     assert "--verify --deep --strict --verbose=2" in commands[3]
-    assert "-a -vvv -t install" in commands[4]
-    assert commands[5].startswith("xcrun stapler validate ")
-    assert commands[6].startswith("hdiutil detach ")
+    assert all("-d --entitlements -" in command for command in commands[4:7])
+    assert "-a -vvv -t install" in commands[7]
+    assert commands[8].startswith("xcrun stapler validate ")
+    assert commands[9].startswith("hdiutil detach ")
 
 
 def test_release_verifier_rejects_a_non_notarized_gatekeeper_source() -> None:
@@ -158,6 +208,9 @@ def test_release_verifier_rejects_a_non_notarized_gatekeeper_source() -> None:
         "hdiutil",
         "xcrun",
         "hdiutil",
+        "codesign",
+        "codesign",
+        "codesign",
         "codesign",
         "spctl",
         "hdiutil",

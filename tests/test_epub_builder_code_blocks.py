@@ -1,6 +1,6 @@
 """Fenced code blocks in the EPUB builder (issue #121).
 
-`build_epub.js` converts `chapters/final/*.md` with a line-based state machine.
+`build_epub.cjs` converts `chapters/final/*.md` with a line-based state machine.
 Before this suite it had no fence branch, so a fenced block was not merely
 flattened into a paragraph: its lines were fed to the heading, list and raw-HTML
 rules, and `# comment` became a real `<h1>` in the finished book. These tests
@@ -18,6 +18,8 @@ import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
+from test_support.epub_builder_contract import write_publication_contract
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_SCRIPTS = REPO_ROOT / "tools" / "bibliosmith-launcher" / "source" / "scripts"
@@ -33,16 +35,22 @@ def build_book(chapter_markdown: str) -> tuple[str, str]:
         scripts.mkdir(parents=True)
         final.mkdir(parents=True)
         metadata.mkdir(parents=True)
-        shutil.copy(SOURCE_SCRIPTS / "build_epub.js", scripts / "build_epub.js")
-        shutil.copy(SOURCE_SCRIPTS / "run_python.js", scripts / "run_python.js")
+        shutil.copy(SOURCE_SCRIPTS / "build_epub.cjs", scripts / "build_epub.cjs")
+        shutil.copy(
+            SOURCE_SCRIPTS / "compile_publication_structure.cjs",
+            scripts / "compile_publication_structure.cjs",
+        )
+        shutil.copy(SOURCE_SCRIPTS / "run_python.cjs", scripts / "run_python.cjs")
         (final / "chapter_001.md").write_text(chapter_markdown, encoding="utf-8")
         metadata.joinpath("source_manifest.json").write_text(
             json.dumps({"source_file_name": "Code Fixture.epub", "target_language": "zh-Hans"}),
             encoding="utf-8",
         )
+        write_publication_contract(book_root, title="Code Fixture")
 
         completed = subprocess.run(
-            ["node", str(scripts / "build_epub.js")],
+            ["node", str(scripts / "build_epub.cjs")],
+            cwd=book_root,
             check=False,
             capture_output=True,
             text=True,
@@ -51,7 +59,7 @@ def build_book(chapter_markdown: str) -> tuple[str, str]:
 
         with ZipFile(book_root / "output" / "reading" / "book.epub") as archive:
             return (
-                archive.read("EPUB/chapter_001.xhtml").decode("utf-8"),
+                archive.read("EPUB/section_001.xhtml").decode("utf-8"),
                 archive.read("EPUB/styles/book.css").decode("utf-8"),
             )
 
@@ -74,7 +82,7 @@ class EpubBuilderCodeBlockTests(unittest.TestCase):
 
         self.assertIn("# 这是注释", chapter)
         self.assertNotIn("<h1># 这是注释</h1>", chapter)
-        self.assertEqual(chapter.count("<h1>"), 1)
+        self.assertEqual(chapter.count("<h1"), 1)
 
     def test_list_and_raw_html_lines_inside_a_block_stay_literal(self) -> None:
         chapter, _ = build_book(
@@ -155,8 +163,12 @@ class EpubBuilderCodeBlockReviewTests(unittest.TestCase):
             scripts.mkdir(parents=True)
             final.mkdir(parents=True)
             metadata.mkdir(parents=True)
-            shutil.copy(SOURCE_SCRIPTS / "build_epub.js", scripts / "build_epub.js")
-            shutil.copy(SOURCE_SCRIPTS / "run_python.js", scripts / "run_python.js")
+            shutil.copy(SOURCE_SCRIPTS / "build_epub.cjs", scripts / "build_epub.cjs")
+            shutil.copy(
+                SOURCE_SCRIPTS / "compile_publication_structure.cjs",
+                scripts / "compile_publication_structure.cjs",
+            )
+            shutil.copy(SOURCE_SCRIPTS / "run_python.cjs", scripts / "run_python.cjs")
             (final / "chapter_001.md").write_text(
                 "```\n# code heading\n```\n\n# 真正的标题\n\n正文。\n", encoding="utf-8"
             )
@@ -164,8 +176,10 @@ class EpubBuilderCodeBlockReviewTests(unittest.TestCase):
                 json.dumps({"source_file_name": "N.epub", "target_language": "zh-Hans"}),
                 encoding="utf-8",
             )
+            write_publication_contract(book_root, title="Navigation Fixture")
             completed = subprocess.run(
-                ["node", str(scripts / "build_epub.js")],
+                ["node", str(scripts / "build_epub.cjs")],
+                cwd=book_root,
                 check=False,
                 capture_output=True,
                 text=True,

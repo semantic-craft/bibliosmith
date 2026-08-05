@@ -39,10 +39,9 @@ assert(
   "Launcher main window must allow Tauri event listen/unlisten for progress subscriptions.",
 );
 
-// The island redesign removed the blocking bootstrap screen entirely: runtime
-// and project preparation are background-only, and only failures surface (as
-// toasts). These checks keep that startup contract from regressing back to a
-// blocking first screen.
+// Runtime preparation stays background-only, while the user-owned workspace
+// is an explicit startup gate. The App must not mount the main launcher until
+// that workspace has a valid marker and durable project container.
 const appSource = readText("src/App.tsx");
 assert(
   !appSource.includes("RuntimeBootstrapScreen"),
@@ -53,8 +52,8 @@ assert(
   "Launcher should keep optional runtime preparation in the background after initial UI startup.",
 );
 assert(
-  appSource.includes("void prepareBiblioSmithProject(locale)"),
-  "Launcher should keep automatic BiblioSmith project preparation in the background after initial UI startup.",
+  appSource.includes("<WorkspaceSetupGate") && appSource.includes("<LauncherApp />"),
+  "Launcher must gate the main UI on explicit user-workspace setup.",
 );
 
 const tauriSource = readText("src-tauri/src/lib.rs");
@@ -68,10 +67,11 @@ assert(
   runtimePrepare.includes("catch_unwind"),
   "Runtime preparation worker must convert panics into logged failure events.",
 );
-const nodeModulesInstall = extractFunction(tauriSource, "fn start_node_modules_install");
 assert(
-  nodeModulesInstall.includes("catch_unwind"),
-  "Node modules installation worker must convert panics into logged failure events.",
+  tauriSource.includes("create_recommended_workspace")
+    && tauriSource.includes("choose_and_create_workspace")
+    && !tauriSource.includes("start_node_modules_install"),
+  "Startup must create a user workspace without installing repository dependencies.",
 );
 
 console.log("startup contract ok");

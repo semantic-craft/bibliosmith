@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { readBookPipelineArtifactExcerpt } from "../api";
+import { inspectBookPipelineProjectMigration, readBookPipelineArtifactExcerpt } from "../api";
 import { BookDrawer, type BookDrawerProps } from "./BookDrawer";
 import { pipelineCopy } from "./copy";
 import type { BookUnit } from "./model";
 import { MODEL_BRANDS } from "../pages/settings/modelCatalog";
 import { approvalRef, artifact, bookUnit, stage, unitSummary } from "../test/fixtures";
+import promptPackCatalogJson from "../../src-tauri/resources/translation-prompt-packs.json";
+import type { TranslationPromptPackCatalog } from "../types";
+
+const promptPackCatalog = promptPackCatalogJson as TranslationPromptPackCatalog;
 
 // The drawer reads an artifact excerpt and a sample report on mount. Both are
 // desktop-only calls that reject in a browser, and api.ts answers a lot of other
@@ -16,6 +20,7 @@ vi.mock("../api", () => ({
   readBookPipelineArtifactExcerpt: vi.fn(() => Promise.reject(new Error("desktop only"))),
   readBookPipelineTranslationSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
   readBookPipelineOcrSample: vi.fn(() => Promise.reject(new Error("desktop only"))),
+  inspectBookPipelineProjectMigration: vi.fn(() => Promise.resolve({ required: false, sourceRoot: "", destinationRoot: "" })),
 }));
 
 const copy = pipelineCopy("en");
@@ -29,11 +34,17 @@ function drawerProps(unit: BookUnit, over: Partial<BookDrawerProps> = {}): BookD
     onSelect: vi.fn(),
     onClose: vi.fn(),
     onRetry: vi.fn(),
-    onDelete: vi.fn(),
+    onRemoveBooks: vi.fn(async () => true),
+    onMigrateProject: vi.fn(async () => true),
     onAdvance: vi.fn(),
     onSampleTranslation: vi.fn(),
     onApplySampleProvider: vi.fn(),
-    onSaveCustomInstructions: vi.fn(),
+    promptPackCatalog: null,
+    onSelectPromptPack: vi.fn(),
+    onPreviewPrompt: vi.fn(async () => ({
+      promptPackReference: unit.child!.promptPackReference,
+      stages: [],
+    })),
     onApproveGate: vi.fn(),
     onRouteOverride: vi.fn(),
     onSampleOcr: vi.fn(),
@@ -356,7 +367,22 @@ describe("BookDrawer gate card", () => {
     await user.click(within(container).getByRole("button", { name: copy.deleteBook }));
     await user.click(screen.getByRole("button", { name: copy.deleteBookConfirm }));
 
-    expect(props.onDelete).toHaveBeenCalledWith("job-1", "child-1");
+    expect(props.onRemoveBooks).toHaveBeenCalledWith([{ jobId: "job-1", childId: "child-1" }]);
+  });
+
+  it("offers an explicit copy-and-verify migration for an old-library project", async () => {
+    vi.mocked(inspectBookPipelineProjectMigration).mockResolvedValueOnce({
+      required: true,
+      sourceRoot: "/old/books/local/zh-Hans/001_Book",
+      destinationRoot: "/current/books/local/zh-Hans/001_Book",
+    });
+    const user = userEvent.setup();
+    const { props } = renderDrawer(bookUnit({ status: "completed" }));
+
+    await user.click(await screen.findByRole("button", { name: copy.migrateProject }));
+
+    expect(props.onMigrateProject).toHaveBeenCalledWith("job-1", "child-1");
+    expect(screen.queryByText(copy.projectMigrationTitle)).toBeNull();
   });
 
   // A single-book job keeps the original wording, which was already accurate.
@@ -448,3 +474,141 @@ describe("BookDrawer gate sample preview", () => {
   });
 });
 
+describe("BookDrawer translation prompt pack", () => {
+  it("shows the bound template, labels its source, and generates the actual prompt only on demand", async () => {
+    const user = userEvent.setup();
+    const unit = bookUnit({
+      childOver: { promptPackSelectionSource: "default" },
+      jobOver: { promptPackSelectionSource: "default" },
+    });
+    const onPreviewPrompt = vi.fn(async () => ({
+      promptPackReference: unit.child!.promptPackReference,
+      stages: [{
+        stageId: "translate",
+        actualPrompt: { systemInstruction: "系统提示", currentSource: "私人原文样本" },
+        injections: ["template", "current-source", "neighbor-context:none-for-first-segment", "glossary", "executor-safety"],
+      }],
+    }));
+    renderDrawer(unit, { promptPackCatalog, onPreviewPrompt });
+
+    expect(screen.getByText(/创建时默认 · 程序执行/)).toBeTruthy();
+    expect(screen.getByText(/你是一名专业图书译者/)).toBeTruthy();
+    expect(onPreviewPrompt).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+    expect(await screen.findByText(/私人原文样本/)).toBeTruthy();
+    expect(screen.getByText(/template · current-source/)).toBeTruthy();
+    expect(onPreviewPrompt).toHaveBeenCalledOnce();
+  });
+
+  it("only offers compatible revisions and sends an exact immutable reference when overridden", async () => {
+    const user = userEvent.setup();
+    const unit = bookUnit();
+    const onSelectPromptPack = vi.fn();
+    renderDrawer(unit, { promptPackCatalog, onSelectPromptPack });
+
+    const picker = screen.getByRole("combobox", { name: "本书使用" });
+    expect(within(picker).queryByText("语境回溯精译")).toBeNull();
+    await user.selectOptions(picker, "builtin.four-dimension-refinement:2026.08.05-2");
+
+    expect(onSelectPromptPack).toHaveBeenCalledWith(
+      "job-1",
+      "child-1",
+      {
+        packId: "builtin.four-dimension-refinement",
+        revisionId: "2026.08.05-2",
+        contentSha256: "e86141d65f8bfb4a674c597f157a86c6da80d49ac02d081d21f2ca325c8ea2e8",
+      },
+    );
+  });
+
+  it("discards a prompt preview when its pack or input evidence is no longer current", async () => {
+    const user = userEvent.setup();
+    let resolveStalePreview!: (value: Awaited<ReturnType<BookDrawerProps["onPreviewPrompt"]>>) => void;
+    const stalePreview = new Promise<Awaited<ReturnType<BookDrawerProps["onPreviewPrompt"]>>>((resolve) => {
+      resolveStalePreview = resolve;
+    });
+    const first = bookUnit({
+      stages: [stage("prepare", "completed", {
+        inputHashes: { sourceMapSha256: "source-map-a", publicationMapSha256: "publication-map-a" },
+      })],
+    });
+    const nextReference = {
+      packId: "builtin.four-dimension-refinement",
+      revisionId: "2026.08.05-2",
+      contentSha256: "e86141d65f8bfb4a674c597f157a86c6da80d49ac02d081d21f2ca325c8ea2e8",
+    };
+    const second = bookUnit({
+      stages: [stage("prepare", "completed", {
+        inputHashes: { sourceMapSha256: "source-map-b", publicationMapSha256: "publication-map-b" },
+      })],
+      childOver: { promptPackReference: nextReference },
+      jobOver: { promptPackReference: nextReference },
+    });
+    const onPreviewPrompt = vi.fn()
+      .mockReturnValueOnce(stalePreview)
+      .mockResolvedValueOnce({
+        promptPackReference: nextReference,
+        stages: [{ stageId: "translate", actualPrompt: "CURRENT B PROMPT" }],
+      });
+    const firstProps = drawerProps(first, { promptPackCatalog, onPreviewPrompt });
+    const { rerender } = render(<BookDrawer {...firstProps} />);
+
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+    expect(onPreviewPrompt).toHaveBeenCalledWith("job-1", "child-1");
+
+    rerender(<BookDrawer {...drawerProps(second, { promptPackCatalog, onPreviewPrompt })} />);
+    await act(async () => {
+      resolveStalePreview({
+        promptPackReference: first.child!.promptPackReference,
+        stages: [{ stageId: "translate", actualPrompt: "STALE A PROMPT" }],
+      });
+      await stalePreview;
+    });
+
+    expect(screen.queryByText("STALE A PROMPT")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+    expect(await screen.findByText("CURRENT B PROMPT")).toBeTruthy();
+  });
+
+  it("does not reuse an actual prompt after the same pack's input hashes change", async () => {
+    const user = userEvent.setup();
+    let resolveOldInput!: (value: Awaited<ReturnType<BookDrawerProps["onPreviewPrompt"]>>) => void;
+    const oldInputPreview = new Promise<Awaited<ReturnType<BookDrawerProps["onPreviewPrompt"]>>>((resolve) => {
+      resolveOldInput = resolve;
+    });
+    const first = bookUnit({
+      stages: [stage("prepare", "completed", {
+        inputHashes: { sourceMapSha256: "source-map-a", publicationMapSha256: "publication-map-a" },
+      })],
+    });
+    const second = bookUnit({
+      stages: [stage("prepare", "completed", {
+        inputHashes: { sourceMapSha256: "source-map-b", publicationMapSha256: "publication-map-b" },
+      })],
+    });
+    const onPreviewPrompt = vi.fn()
+      .mockReturnValueOnce(oldInputPreview)
+      .mockResolvedValueOnce({
+        promptPackReference: second.child!.promptPackReference,
+        stages: [{ stageId: "translate", actualPrompt: "CURRENT INPUT PROMPT" }],
+      });
+    const { rerender } = render(
+      <BookDrawer {...drawerProps(first, { promptPackCatalog, onPreviewPrompt })} />,
+    );
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+
+    rerender(<BookDrawer {...drawerProps(second, { promptPackCatalog, onPreviewPrompt })} />);
+    await act(async () => {
+      resolveOldInput({
+        promptPackReference: first.child!.promptPackReference,
+        stages: [{ stageId: "translate", actualPrompt: "STALE INPUT PROMPT" }],
+      });
+      await oldInputPreview;
+    });
+
+    expect(screen.queryByText("STALE INPUT PROMPT")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "本次实际提示词" }));
+    expect(await screen.findByText("CURRENT INPUT PROMPT")).toBeTruthy();
+  });
+});

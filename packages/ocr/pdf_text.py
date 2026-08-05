@@ -135,7 +135,7 @@ def extract_markdown(
     # running head is dropped. Measuring the trimmed document instead would let
     # a book with a head on all 629 pages look like it lost text and send a
     # perfectly good extraction back to the flat PyMuPDF dump.
-    parsed_markdown = _join_pages(parsed)
+    parsed_markdown = _join_page_text(parsed)
     chars = _nonspace(parsed_markdown)
     if chars == 0:
         return fallback.into_result(_join(reason, "empty_markdown"))
@@ -723,6 +723,15 @@ def _covers_the_document(pages: list[int] | None, page_count: int) -> bool:
 
 
 def _join_pages(pages: list[tuple[int, str]]) -> str:
+    return "\n\n".join(
+        f"<!-- page: {page_no} -->\n\n{markdown}"
+        for page_no, markdown in pages
+        if markdown.strip()
+    ).strip()
+
+
+def _join_page_text(pages: list[tuple[int, str]]) -> str:
+    """Join pages for quality measurement without counting provenance anchors."""
     return "\n\n".join(markdown for _, markdown in pages if markdown.strip()).strip()
 
 

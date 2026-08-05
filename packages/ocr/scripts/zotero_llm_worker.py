@@ -48,6 +48,13 @@ if str(APP_ROOT) not in sys.path:
 # mojibake thresholds, so resolving the entry point at call time is what keeps
 # the pair importable in either order.
 import pdf_text  # noqa: E402
+from publication_evidence import (  # noqa: E402
+    SourceDocument,
+    normalize_extracted_markdown_notes,
+    persist_source_document,
+    source_documents_for_page_groups,
+    write_markdown_evidence,
+)
 
 DEFAULT_OUTPUT_ROOT = Path.home() / "Zotero" / "OCR_OUTPUT"
 DEFAULT_ZOTERO_STORAGE = Path.home() / "Zotero" / "storage"
@@ -142,6 +149,8 @@ def load_dotenv(path: Path) -> None:
 
 
 def load_root_dotenv(start: Path = APP_ROOT) -> None:
+    if os.environ.get("BIBLIOSMITH_DISABLE_DOTENV") == "1":
+        return
     for candidate in (start.resolve(), *start.resolve().parents):
         if (candidate / "pyproject.toml").is_file() and (candidate / "packages").is_dir():
             load_dotenv(candidate / ".env")
@@ -393,15 +402,14 @@ def markdown_frontmatter(metadata: dict[str, Any]) -> str:
 
 
 def render_extracted_markdown(*, title: str, metadata: dict[str, Any], body: str) -> str:
-    """Front matter, the book's title, then the document as extracted.
+    """Machine provenance front matter, then the document as extracted.
 
-    No per-page heading. `## Page N` is not a heading any book has, and the
-    split stage cuts a new chapter at every heading of the shallowest level it
-    finds, so a 629-page PDF came out as 629 chapters named "Page 1" through
-    "Page 629" — the entire table of contents of the finished EPUB, with no
-    real chapter name in it.
+    ``title`` is intentionally not emitted as a heading: on attachment routes
+    it is often a Zotero label or PDF file stem, not an observed publication
+    node.  The project-owned metadata keeps the bibliographic title.
     """
-    return "\n".join([markdown_frontmatter(metadata), "", f"# {title}", "", body]).rstrip() + "\n"
+    del title
+    return "\n".join([markdown_frontmatter(metadata), "", body]).rstrip() + "\n"
 
 
 class StateDB:
@@ -1529,7 +1537,7 @@ def read_layout_markdown(jsonl_paths: list[tuple[int, Path]]) -> tuple[str, list
                             text = text.replace(str(image_path), str(image_url))
                 page_no = absolute_start + relative_page
                 if text:
-                    sections.append(text)
+                    sections.append(f"<!-- page: {page_no} -->\n\n{text}")
                 combined_lines.append(json.dumps({"page": page_no, "raw": res}, ensure_ascii=False))
                 relative_page += 1
                 page_count += 1
@@ -1615,9 +1623,35 @@ def process_text_route(
     )
     markdown_path.write_text(
         render_extracted_markdown(
-            title=attachment.title, metadata=metadata, body=extracted.markdown
+            title=attachment.title,
+            metadata=metadata,
+            body=normalize_extracted_markdown_notes(extracted.markdown),
         ),
         encoding="utf-8",
+    )
+    assembled_source = persist_source_document(
+        markdown_path,
+        markdown_path,
+        "assembled.md",
+        start_line=1,
+        end_line=max(1, len(markdown_path.read_text(encoding="utf-8").splitlines())),
+        pages=pages,
+        kind="assembled_markdown",
+    )
+    write_markdown_evidence(
+        markdown_path,
+        source_format="pdf",
+        extraction_engine=extracted.engine,
+        source_documents=[assembled_source],
+        title=attachment.title,
+        removed_furniture=extracted.running_heads,
+        extraction_facts={
+            "route": "pdf-text",
+            "pageCount": page_count,
+            "selectedPages": pages,
+            "pageCharacterCounts": [list(item) for item in extracted.page_chars],
+            "fallbackReason": extracted.fallback_reason,
+        },
     )
     sidecar_path.write_text(
         json.dumps(
@@ -1850,11 +1884,58 @@ def process_ocr_route(
             render_extracted_markdown(
                 title=attachment.title,
                 metadata=metadata,
-                body="\n\n".join(text for _page, text in ocr_pages if text),
+                body=normalize_extracted_markdown_notes(
+                    "\n\n".join(
+                        f"<!-- page: {page} -->\n\n{text}"
+                        for page, text in ocr_pages
+                        if text
+                    )
+                ),
             ),
             encoding="utf-8",
         )
         sidecar_path.write_text("\n".join(combined_lines) + "\n", encoding="utf-8")
+    markdown_text = markdown_path.read_text(encoding="utf-8")
+    pages_by_start = {group[0]: group for group in page_groups}
+    source_documents = source_documents_for_page_groups(
+        markdown_text,
+        [
+            (
+                f"paddleocr/{path.name}",
+                pages_by_start.get(start_page, (start_page,)),
+                "paddleocr_jsonl",
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+            for start_page, path in completed_jsonl
+        ],
+    )
+    jsonl_sources = {f"paddleocr/{path.name}": path for _, path in completed_jsonl}
+    source_documents = [
+        persist_source_document(
+            markdown_path,
+            jsonl_sources[document.path],
+            document.path,
+            start_line=document.start_line,
+            end_line=document.end_line,
+            pages=document.pages,
+            kind=document.kind,
+            anomalies=document.anomalies,
+        )
+        for document in source_documents
+    ]
+    write_markdown_evidence(
+        markdown_path,
+        source_format="ocr",
+        extraction_engine=config.baidu_model,
+        source_documents=source_documents,
+        title=attachment.title,
+        extraction_facts={
+            "route": "paddle-ocr",
+            "pageCount": page_count,
+            "selectedPages": pages,
+            "layoutModel": is_layout_model(config),
+        },
+    )
     if no_upload:
         state.upsert_document(
             attachment=attachment,
@@ -1936,6 +2017,38 @@ def rewrite_mineru_references(markdown: str, prefix: str) -> str:
         return f"{attribute}={quote}{prefix}/{reference}{quote}"
 
     return re.sub(r"\b(src|href)=(['\"])([^'\"]+)\2", html_replacement, rewritten)
+
+
+def strict_mineru_source_coordinates(
+    document: dict[str, object], source_line_count: int
+) -> tuple[int, int, tuple[int, ...]]:
+    def strict_integer(value: object, label: str) -> int:
+        if type(value) is not int:
+            raise ValueError(f"MinerU {label} must be an integer")
+        return value
+
+    start_line = strict_integer(document.get("startLine"), "startLine")
+    end_line = strict_integer(document.get("endLine"), "endLine")
+    anomalies = document.get("anomalies", [])
+    explicitly_unmapped = (
+        start_line == 0
+        and end_line == 0
+        and isinstance(anomalies, list)
+        and bool(anomalies)
+    )
+    if not explicitly_unmapped and (
+        start_line < 1 or end_line < start_line or end_line > source_line_count
+    ):
+        raise ValueError("MinerU source-document line range is invalid")
+    raw_pages = document.get("pages", [])
+    if not isinstance(raw_pages, list):
+        raise ValueError("MinerU pages must be an array")
+    pages = tuple(strict_integer(page, "page") for page in raw_pages)
+    if any(page < 1 for page in pages) or any(
+        current >= following for current, following in zip(pages, pages[1:])
+    ):
+        raise ValueError("MinerU pages must be positive and strictly increasing")
+    return start_line, end_line, pages
 
 
 def process_mineru_route(
@@ -2032,7 +2145,72 @@ def process_mineru_route(
         route_reason=route_reason,
         source_path=attachment.path,
     )
-    markdown_path.write_text(f"{markdown_frontmatter(metadata)}\n\n{content}\n", encoding="utf-8")
+    final_markdown = (
+        f"{markdown_frontmatter(metadata)}\n\n"
+        f"{normalize_extracted_markdown_notes(content)}\n"
+    )
+    markdown_path.write_text(final_markdown, encoding="utf-8")
+    source_documents: list[SourceDocument] = []
+    extracted_evidence_path = artifact_dir / markdown_candidates[0].with_suffix(
+        ".publication.json"
+    ).name
+    if not extracted_evidence_path.is_file():
+        raise WorkerError("MinerU adapter produced no publication evidence")
+    if extracted_evidence_path.is_file():
+        try:
+            extracted_evidence = json.loads(
+                extracted_evidence_path.read_text(encoding="utf-8")
+            )
+            if extracted_evidence.get("schema") != "publication-extraction-evidence-v2":
+                raise ValueError("unsupported publication-evidence schema")
+            # One blank line separates the front matter from the first source
+            # line, so one-based source ranges shift by N + 1, not N + 2.
+            frontmatter_lines = len(markdown_frontmatter(metadata).splitlines()) + 1
+            for document in extracted_evidence.get("sourceDocuments", []):
+                if not isinstance(document, dict):
+                    raise ValueError("MinerU source document must be an object")
+                relative = Path(str(document["path"]))
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError("unsafe MinerU source-document path")
+                persisted = artifact_dir / relative
+                expected_sha256 = str(document.get("sha256") or "")
+                if not persisted.is_file() or hashlib.sha256(
+                    persisted.read_bytes()
+                ).hexdigest() != expected_sha256:
+                    raise ValueError("MinerU source-document digest mismatch")
+                start_line, end_line, source_pages = strict_mineru_source_coordinates(
+                    document, len(content.splitlines())
+                )
+                if start_line != 0:
+                    start_line += frontmatter_lines
+                    end_line += frontmatter_lines
+                source_documents.append(
+                    SourceDocument(
+                        path=f"{artifact_dir.name}/{relative.as_posix()}",
+                        start_line=start_line,
+                        end_line=end_line,
+                        pages=source_pages,
+                        kind=str(document.get("kind") or "mineru_part_markdown"),
+                        sha256=expected_sha256,
+                        anomalies=tuple(
+                            str(item) for item in document.get("anomalies", [])
+                        ),
+                    )
+                )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise WorkerError(f"MinerU publication evidence is invalid: {exc}") from exc
+    write_markdown_evidence(
+        markdown_path,
+        source_format="mineru",
+        extraction_engine="MinerU Precision v4",
+        source_documents=source_documents,
+        title=attachment.title,
+        extraction_facts={
+            "route": ROUTE_MINERU,
+            "pageCount": page_count,
+            "selectedPages": pages,
+        },
+    )
     sidecar_path.write_text(
         json.dumps(
             {

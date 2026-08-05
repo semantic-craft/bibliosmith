@@ -180,7 +180,7 @@ class HybridChainTests(unittest.TestCase):
             )
 
         self.assertEqual(result.engine, pdf_text.ENGINE_INSPECTOR)
-        self.assertEqual(result.markdown, mojibake)
+        self.assertEqual(result.markdown, f"<!-- page: 1 -->\n\n{mojibake}")
 
     def test_markdown_holding_less_text_than_pymupdf_falls_back(self) -> None:
         pdf = write_pdf(
@@ -217,7 +217,10 @@ class HybridChainTests(unittest.TestCase):
         self.assertEqual(calls, ["extract_pages_markdown", "extract_pages_markdown_bytes"])
         self.assertEqual(result.engine, pdf_text.ENGINE_INSPECTOR_REPAIRED)
         self.assertIn("invalid file trailer", result.fallback_reason)
-        self.assertEqual(result.markdown, "# Recovered after the repair save")
+        self.assertEqual(
+            result.markdown,
+            "<!-- page: 1 -->\n\n# Recovered after the repair save",
+        )
 
     def test_parse_failure_the_repair_cannot_fix_falls_back_to_pymupdf(self) -> None:
         pdf = write_pdf(self.tmp / "trailer.pdf", ["Still readable by PyMuPDF"])

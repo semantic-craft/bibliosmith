@@ -214,7 +214,10 @@ def run_main(tmp_path: Path, *, workers: int = 1, extra_argv: list[str] | None =
             paddle,
             "load_config",
             return_value=SimpleNamespace(
-                workers=workers, max_upload_bytes=1 << 30, baidu_token="token"
+                workers=workers,
+                max_upload_bytes=1 << 30,
+                baidu_token="token",
+                baidu_model="PaddleOCR-VL-1.6",
             ),
         ),
         mock.patch.object(paddle, "pdf_page_count", return_value=2),
@@ -316,8 +319,11 @@ def test_a_book_never_resumes_from_another_book_s_state(tmp_path: Path) -> None:
             paddle,
             "load_config",
             return_value=SimpleNamespace(
-                    workers=1, max_upload_bytes=1 << 30, baidu_token="token"
-                ),
+                workers=1,
+                max_upload_bytes=1 << 30,
+                baidu_token="token",
+                baidu_model="PaddleOCR-VL-1.6",
+            ),
         ),
         mock.patch.object(paddle, "pdf_page_count", return_value=2),
         mock.patch.object(paddle, "make_chunk_specs", side_effect=fake_chunk_specs),
@@ -373,8 +379,11 @@ def test_state_written_before_this_field_existed_still_resumes(tmp_path: Path) -
             paddle,
             "load_config",
             return_value=SimpleNamespace(
-                    workers=1, max_upload_bytes=1 << 30, baidu_token="token"
-                ),
+                workers=1,
+                max_upload_bytes=1 << 30,
+                baidu_token="token",
+                baidu_model="PaddleOCR-VL-1.6",
+            ),
         ),
         mock.patch.object(paddle, "pdf_page_count", return_value=2),
         mock.patch.object(paddle, "make_chunk_specs", side_effect=fake_chunk_specs),

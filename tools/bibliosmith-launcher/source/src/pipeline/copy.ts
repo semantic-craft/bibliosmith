@@ -70,19 +70,20 @@ export function pipelineCopy(locale: PipelineLocale) {
     drawerNext: zh ? "下一本" : "Next book",
     drawerClose: zh ? "关闭" : "Close",
     resizeDrawer: zh ? "调整书架与详情栏宽度" : "Resize bookshelf and details pane",
-    customInstructionsTitle: zh ? "本书自定义翻译指令" : "Custom instructions for this book",
-    customInstructionsHelp: zh
-      ? "两相互相隔离；占位符、标题和段落结构保护始终优先。"
-      : "The two phases stay isolated; placeholder, heading, and paragraph protection always wins.",
-    customTranslationLabel: zh ? "翻译遍" : "Translation pass",
-    customTranslationPlaceholder: zh ? "例如：保持克制、简洁的文学中文。" : "For example: Use restrained, concise literary prose.",
-    customReflectionLabel: zh ? "Reflection 二遍" : "Reflection pass",
-    customReflectionPlaceholder: zh ? "例如：重点检查时代错置的措辞。" : "For example: Critique anachronistic wording.",
-    customInstructionsCount: (count: number) => `${count} / 2000`,
-    customInstructionsTooLong: zh ? "每项最多 2000 个字符。" : "Each field is limited to 2000 characters.",
-    saveCustomInstructions: zh ? "保存指令" : "Save instructions",
-    savingCustomInstructions: zh ? "保存中…" : "Saving…",
-    customInstructionsSaved: zh ? "本书自定义指令已保存" : "Custom instructions saved for this book",
+    structureCorrectionTitle: zh ? "审查并校正出版结构" : "Review and correct publication structure",
+    structureCorrectionHelp: zh
+      ? "结构门禁已阻止分章。你可以修改标题、层级、角色和类型；来源顺序、行号、页码、文件与锚点由系统锁定。保存后会按校正结果重新分章。"
+      : "The structure gate stopped splitting. You may edit titles, hierarchy, roles, and kinds; source order, lines, pages, files, and anchors stay locked. Saving retries the split with the correction.",
+    structureCorrectionOpen: zh ? "打开结构校正" : "Open structure correction",
+    structureCorrectionReason: zh ? "校正理由" : "Correction reason",
+    structureCorrectionReasonPlaceholder: zh
+      ? "说明为什么提取器判断错误，以及你修改了什么。"
+      : "Explain why the extractor was wrong and what you changed.",
+    structureCorrectionSections: zh ? "出版章节（JSON）" : "Publication sections (JSON)",
+    structureCorrectionSave: zh ? "保存并重新分章" : "Save and retry split",
+    structureCorrectionSaving: zh ? "保存中…" : "Saving…",
+    structureCorrectionInvalidJson: zh ? "章节 JSON 无法解析。" : "The sections JSON is invalid.",
+    structureCorrectionLoadError: zh ? "无法读取失败的出版结构。" : "Could not load the failed publication structure.",
     abNoAction: zh ? "不需要操作，好了会提醒你" : "Nothing to do — you'll be notified",
     abAdvanceRequired: zh ? "需要操作：继续到下一阶段" : "Action needed: continue to the next stage",
     abGatePrefix: zh ? "下一步需要你：" : "Next step needs you: ",
@@ -243,6 +244,12 @@ export function pipelineCopy(locale: PipelineLocale) {
     artifactZoteroAttachment: zh ? "Zotero 子附件" : "Zotero child attachment",
     artifactSourceMap: zh ? "source_map" : "source_map",
     artifactReading: zh ? "阅读成品" : "Reading outputs",
+    artifactPackageValidity: zh ? "包规范有效性" : "Package validity",
+    artifactStructuralReadability: zh ? "结构可读性" : "Structural readability",
+    artifactReaderAcceptance: zh ? "阅读器验收" : "Reader acceptance",
+    validationPassed: zh ? "通过" : "Passed",
+    validationFailedLabel: zh ? "失败" : "Failed",
+    validationNotRecorded: zh ? "未验证" : "Not recorded",
     artifactPresent: zh ? "✓" : "✓",
     artifactAttached: zh ? "已挂 ✓" : "attached ✓",
     artifactGenerating: zh ? "生成中" : "In progress",
@@ -250,11 +257,11 @@ export function pipelineCopy(locale: PipelineLocale) {
     goApprovalTab: zh ? "去审批页签" : "Open approval tab",
     failedHintRetryable: zh ? "已保留已完成部分，重试只补失败边界。" : "Completed work is preserved; retry only re-runs the failed boundary.",
     retryJob: zh ? "重试该书" : "Retry this book",
-    deleteBook: zh ? "删除该书" : "Delete this book",
+    deleteBook: zh ? "从书架移除" : "Remove from shelf",
     deleteBookConfirmHint: zh
       ? "从书架移除这本书？磁盘上的已转换文件与 Zotero 附件都会保留，之后重新添加可复用。"
       : "Remove this book from the shelf? Converted files on disk and Zotero attachments are kept and can be reused if you re-add it.",
-    deleteBookConfirm: zh ? "确认删除" : "Confirm delete",
+    deleteBookConfirm: zh ? "确认移除" : "Confirm removal",
     deleteBookCancel: zh ? "取消" : "Cancel",
     deleteBookDone: zh ? "已从书架删除" : "Removed from the shelf",
     blockedKeepMineru: zh ? "保留 MinerU 结果" : "Keep MinerU result",
@@ -404,6 +411,27 @@ export function pipelineCopy(locale: PipelineLocale) {
       ? "保版式轨只对文字版 PDF 开放：扫描件没有文字层，一次多本也没有单一版式可保。"
       : "The layout-preserving track needs a single text PDF: a scan has no text layer, and a batch has no one layout to preserve.",
     shelfCount: (n: number) => (zh ? `书架 · ${n} 本` : `Bookshelf · ${n} book(s)`),
+    manageShelf: zh ? "管理" : "Manage",
+    finishManagingShelf: zh ? "完成" : "Done",
+    selectAllRemovable: zh ? "全选可移除书籍" : "Select all removable books",
+    clearShelfSelection: zh ? "取消全选" : "Clear selection",
+    selectedBooks: (n: number) => (zh ? `已选 ${n} 本` : `${n} selected`),
+    removeSelected: (n: number) => (zh ? `从书架移除（${n}）` : `Remove from shelf (${n})`),
+    confirmRemoveSelected: (n: number) => (zh ? `移除 ${n} 本` : `Remove ${n} book(s)`),
+    removeSelectedHint: zh
+      ? "只移除书架和任务记录；磁盘上的项目、阅读成品与 Zotero 附件都会保留。"
+      : "Only shelf and task records are removed. Local projects, reading outputs, and Zotero attachments are kept.",
+    removeSelectedConfirmHint: (n: number) =>
+      zh
+        ? `确认从书架移除选中的 ${n} 本书？磁盘文件和 Zotero 附件不会删除。`
+        : `Remove the selected ${n} book(s) from the shelf? Files on disk and Zotero attachments will not be deleted.`,
+    runningBookCannotRemove: zh ? "处理中，暂不可移除" : "In progress; cannot be removed yet",
+    projectMigrationTitle: zh ? "旧书库项目需要迁移" : "Project migration required",
+    projectMigrationHint: zh
+      ? "这本书仍位于旧书库，App 的安全边界会阻止打开阅读成品。迁移会把项目复制并逐文件校验到当前书库，原项目不会删除。"
+      : "This book is still in an old library, so the App safety boundary blocks its reading output. Migration copies and verifies every file in the current library; the original is kept.",
+    migrateProject: zh ? "复制到当前书库" : "Copy to current library",
+    projectMigrationDone: zh ? "项目已复制并校验到当前书库" : "Project copied and verified in the current library",
 
     // Route preflight (shown inline in the input island)
     preflightReady: zh ? "可发车" : "Ready",

@@ -158,14 +158,15 @@ class OcrRouteMarkdownTests(unittest.TestCase):
         self.assertNotIn("## Page ", text)
         self.assertNotIn("[no extractable text]", text)
 
-    def test_the_book_title_is_the_only_heading_the_route_adds(self) -> None:
-        """One shallowest-level heading is one chapter out of the split stage."""
+    def test_the_route_does_not_invent_a_heading_from_the_attachment_name(self) -> None:
+        """Attachment names are metadata hints, not observed publication structure."""
         _, markdown_path, _, _ = self.run_route()
 
         text = markdown_path.read_text(encoding="utf-8")
         headings = [line for line in text.splitlines() if line.startswith("#")]
 
-        self.assertEqual(["# Example.pdf"], headings)
+        self.assertEqual([], headings)
+        self.assertNotIn("Example.pdf", text.split("\n---\n\n", 1)[1])
 
     def test_the_body_is_the_recognised_text_and_nothing_else(self) -> None:
         """Reading order intact, and page 3 — which OCR read nothing on —
@@ -174,13 +175,13 @@ class OcrRouteMarkdownTests(unittest.TestCase):
         _, markdown_path, _, _ = self.run_route()
 
         text = markdown_path.read_text(encoding="utf-8")
-        body = text.split("# Example.pdf\n", 1)[1]
+        body = text.split("\n---\n\n", 1)[1]
 
         self.assertTrue(text.startswith("---"))
         self.assertEqual(
-            "Chapter One\nThe first page of the body.\n\n"
-            "It carries on across the page break.\n\n"
-            "And ends here.",
+            "<!-- page: 1 -->\n\nChapter One\nThe first page of the body.\n\n"
+            "<!-- page: 2 -->\n\nIt carries on across the page break.\n\n"
+            "<!-- page: 4 -->\n\nAnd ends here.",
             body.strip(),
         )
 
@@ -200,11 +201,10 @@ class OcrRouteMarkdownTests(unittest.TestCase):
     def assert_upload_test_records_a_whole_book(self, markdown_path: Path) -> None:
         """The upload seam persists a completed row for a full OCR artifact.
 
-        An OCR route writes no page marker into Markdown, so upload_test must
-        recover the complete page set from the sidecar. Otherwise the public
-        completed lookup stays empty and a later run can pay to OCR it again.
+        Page anchors are structural evidence, while the raw sidecar remains the
+        authoritative record of attempted pages (including blank page 3).
         """
-        self.assertEqual([], markdown_page_numbers(markdown_path))
+        self.assertEqual([1, 2, 4], markdown_page_numbers(markdown_path))
         config = dataclasses.replace(get_config(), output_root=self.root / "out")
         state = StateDB(self.root / "state.sqlite3")
         local = mock.Mock()

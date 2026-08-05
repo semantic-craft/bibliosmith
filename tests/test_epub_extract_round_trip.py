@@ -3,7 +3,7 @@
 The `epub_source` route claims two things that only hold end to end: a genuine
 EPUB extracts back into chapter Markdown, and the chapters it produces are the
 boundaries `split-policy-v3` will split on. Both are checked here against an
-archive built by the project's own `build_epub.js` rather than a hand-written
+archive built by the project's own `build_epub.cjs` rather than a hand-written
 zip, so the extractor is exercised on the same package/nav/XHTML shapes a
 shipped book has.
 
@@ -24,6 +24,8 @@ import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
+from test_support.epub_builder_contract import write_publication_contract
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "packages" / "ocr" / "scripts"))
 
@@ -37,7 +39,7 @@ CHAPTERS = {
         "## An Inner Section\n\n"
         "A deeper heading that must not become a chapter of its own.\n"
     ),
-    # Inline code only: `build_epub.js` renders single backticks and nothing
+    # Inline code only: `build_epub.cjs` renders single backticks and nothing
     # else, so a fenced block here would be testing the builder's Markdown
     # support rather than the extractor. Fences are covered where the input is
     # the `<pre><code>` a real EPUB actually carries, in
@@ -57,17 +59,23 @@ def build_real_epub(book_root: Path) -> Path:
     metadata.mkdir(parents=True)
 
     source_scripts = REPO_ROOT / "tools" / "bibliosmith-launcher" / "source" / "scripts"
-    shutil.copy(source_scripts / "build_epub.js", scripts / "build_epub.js")
-    shutil.copy(source_scripts / "run_python.js", scripts / "run_python.js")
+    shutil.copy(source_scripts / "build_epub.cjs", scripts / "build_epub.cjs")
+    shutil.copy(
+        source_scripts / "compile_publication_structure.cjs",
+        scripts / "compile_publication_structure.cjs",
+    )
+    shutil.copy(source_scripts / "run_python.cjs", scripts / "run_python.cjs")
     for name, text in CHAPTERS.items():
         (final / name).write_text(text, encoding="utf-8")
     metadata.joinpath("source_manifest.json").write_text(
         json.dumps({"source_file_name": "Round Trip.epub", "target_language": "zh-Hans"}),
         encoding="utf-8",
     )
+    write_publication_contract(book_root, title="Round Trip Fixture")
 
     completed = subprocess.run(
-        ["node", str(scripts / "build_epub.js")],
+        ["node", str(scripts / "build_epub.cjs")],
+        cwd=book_root,
         check=False,
         capture_output=True,
         text=True,

@@ -1,10 +1,14 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { ChevronLeft, ChevronRight, FolderOpen, Trash2, X } from "lucide-react";
-import { readBookPipelineArtifactExcerpt, readBookPipelineTranslationSample } from "../api";
+import { inspectBookPipelineProjectMigration, readBookPipelineArtifactExcerpt, readBookPipelineTranslationSample } from "../api";
 import type {
   BookPipelineArtifact,
-  BookPipelineCustomInstructions,
+  BookPipelineShelfSelection,
+  BookPipelineProjectMigration,
   BookPipelineTranslationSampleReport,
+  TranslationPromptPackCatalog,
+  TranslationPromptPackReference,
+  TranslationPromptPreview,
 } from "../types";
 import type { PipelineCopy } from "./copy";
 import {
@@ -44,13 +48,8 @@ import { OperationProgressBar } from "./OperationProgress";
 type ProviderChoice = { basis: string; profileId: string; configId: string };
 type SampleReportState = { version: string; report: BookPipelineTranslationSampleReport };
 type SampleState = { id: string; text: string; truncated: boolean };
-
-// A saved instruction pair identifies one editor instance; NUL cannot appear in
-// either field, so it separates them unambiguously.
-function customInstructionsKey(unit: BookUnit) {
-  const saved = unit.child?.customInstructions;
-  return `${saved?.translation ?? ""}\u0000${saved?.reflection ?? ""}`;
-}
+type PromptPreviewState = { basis: string; preview: TranslationPromptPreview };
+type PromptPreviewErrorState = { basis: string; message: string };
 
 export type BookDrawerProps = {
   copy: PipelineCopy;
@@ -60,17 +59,16 @@ export type BookDrawerProps = {
   onSelect: (key: string) => void;
   onClose: () => void;
   onRetry: (jobId: string) => void;
-  onDelete: (jobId: string, childId?: string | null) => void;
+  onRemoveBooks: (selections: BookPipelineShelfSelection[]) => Promise<boolean>;
+  onMigrateProject: (jobId: string, childId?: string | null) => Promise<boolean>;
   onAdvance: (jobId: string, childId: string, invalidateDownstream?: boolean) => void;
   onSampleTranslation: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
   // Adopting a sampled slot as the book's own. Separate from sampling, because
   // sampling is "try one out" and this decides what the full run uses.
   onApplySampleProvider: (jobId: string, childId: string, providerProfileId: string, providerConfigId: string) => void;
-  onSaveCustomInstructions: (
-    jobId: string,
-    childId: string,
-    customInstructions: BookPipelineCustomInstructions,
-  ) => void;
+  promptPackCatalog: TranslationPromptPackCatalog | null;
+  onSelectPromptPack: (jobId: string, childId: string, value: TranslationPromptPackReference) => void;
+  onPreviewPrompt: (jobId: string, childId: string) => Promise<TranslationPromptPreview>;
   onApproveGate: (jobId: string, childId: string, stageId: "approve_translation" | "approve_promotion") => void;
   onRouteOverride: (jobId: string, childId: string, routeItemId: string, routeOverride: string) => void;
   onSampleOcr: (jobId: string, childId: string, samplePages: number) => void;
@@ -78,66 +76,141 @@ export type BookDrawerProps = {
   onHandoff: (jobId: string, artifactPath?: string | null) => void;
 };
 
-// The draft starts from what is saved and diverges as the user types, so a new
-// saved value means a new editor: the caller keys this component on the saved
-// pair instead of an effect copying it back into local state.
-function CustomInstructionsEditor({ unit, copy, busy, onSaveCustomInstructions }: BookDrawerProps) {
-  const savedTranslation = unit.child?.customInstructions?.translation ?? "";
-  const savedReflection = unit.child?.customInstructions?.reflection ?? "";
-  const [translation, setTranslation] = useState(savedTranslation);
-  const [reflection, setReflection] = useState(savedReflection);
+function PromptPackCard({ unit, busy, promptPackCatalog, onSelectPromptPack, onPreviewPrompt }: BookDrawerProps) {
+  const child = unit.child;
+  const selectedReference = child?.promptPackReference ?? unit.job.promptPackReference;
+  const executor = unit.job.translationMode === "expert" ? "expert-agent" : "programmatic";
+  const packs = (promptPackCatalog?.packs ?? []).filter((pack) => pack.revisions.at(-1)?.executor === executor);
+  const selectedPack = packs.find((pack) => pack.packId === selectedReference?.packId);
+  const selectedRevision = selectedPack?.revisions.find((revision) => revision.revisionId === selectedReference?.revisionId)
+    ?? selectedPack?.revisions.at(-1);
+  const inputEvidence = child ? JSON.stringify({
+    stages: child.stages
+      .map((stage) => [stage.stageId, Object.entries(stage.inputHashes).sort()] as const)
+      .sort(([left], [right]) => left.localeCompare(right)),
+    artifacts: child.artifacts
+      .filter((artifact) => artifact.sha256)
+      .map((artifact) => [artifact.artifactId ?? artifact.path, artifact.kind, artifact.sha256, artifact.supersededBy ?? null] as const)
+      .sort(([left], [right]) => left.localeCompare(right)),
+  }) : "";
+  const previewBasis = child && selectedReference
+    ? JSON.stringify([
+      unit.job.id,
+      child.id,
+      selectedReference.packId,
+      selectedReference.revisionId,
+      selectedReference.contentSha256,
+      inputEvidence,
+    ])
+    : "";
+  const [tab, setTab] = useState<"template" | "actual">("template");
+  const [previewState, setPreviewState] = useState<PromptPreviewState | null>(null);
+  const [previewErrorState, setPreviewErrorState] = useState<PromptPreviewErrorState | null>(null);
+  const [previewingBasis, setPreviewingBasis] = useState<string | null>(null);
+  const previewRequest = useRef(0);
+  const preview = previewState?.basis === previewBasis ? previewState.preview : null;
+  const previewError = previewErrorState?.basis === previewBasis ? previewErrorState.message : null;
+  const previewing = previewingBasis === previewBasis;
 
-  const translationLength = Array.from(translation).length;
-  const reflectionLength = Array.from(reflection).length;
-  const tooLong = translationLength > 2000 || reflectionLength > 2000;
-  const dirty = translation !== savedTranslation || reflection !== savedReflection;
-  const saving = busy === "customInstructions";
-  const disabled = Boolean(busy) || !unit.child || !dirty || tooLong;
+  const loadPreview = async () => {
+    if (!child || !selectedReference || !previewBasis || previewing) return;
+    const requestId = ++previewRequest.current;
+    const requestBasis = previewBasis;
+    const requestReference = selectedReference;
+    setPreviewingBasis(requestBasis);
+    setPreviewErrorState(null);
+    try {
+      const result = await onPreviewPrompt(unit.job.id, child.id);
+      const referenceMatches = result.promptPackReference.packId === requestReference.packId
+        && result.promptPackReference.revisionId === requestReference.revisionId
+        && result.promptPackReference.contentSha256 === requestReference.contentSha256;
+      if (previewRequest.current === requestId && referenceMatches) {
+        setPreviewState({ basis: requestBasis, preview: result });
+      }
+    } catch (error) {
+      if (previewRequest.current === requestId) {
+        setPreviewErrorState({ basis: requestBasis, message: String(error) });
+      }
+    } finally {
+      setPreviewingBasis((current) => current === requestBasis ? null : current);
+    }
+  };
 
   return (
-    <section className="pl-custom-instructions">
-      <div className="pl-ci-head">
+    <section className="pl-prompt-pack">
+      <div className="pl-pp-head">
         <div>
-          <h3>{copy.customInstructionsTitle}</h3>
-          <p>{copy.customInstructionsHelp}</p>
+          <h3>翻译提示词方案</h3>
+          <p>方案版本会绑定本书任务和审批；切换方案会使旧审批失效。</p>
         </div>
+        {selectedRevision && <span className="pl-chip">{child?.promptPackSelectionSource === "book-override" ? "本书覆盖" : "创建时默认"} · {selectedRevision.executor === "programmatic" ? "程序执行" : "专家代理"}</span>}
       </div>
-      <label className="pl-ci-field">
-        <span>{copy.customTranslationLabel}</span>
-        <textarea
-          value={translation}
-          placeholder={copy.customTranslationPlaceholder}
-          onChange={(event) => setTranslation(event.currentTarget.value)}
-        />
-        <small className={translationLength > 2000 ? "over" : ""}>
-          {copy.customInstructionsCount(translationLength)}
-        </small>
-      </label>
-      <label className="pl-ci-field">
-        <span>{copy.customReflectionLabel}</span>
-        <textarea
-          value={reflection}
-          placeholder={copy.customReflectionPlaceholder}
-          onChange={(event) => setReflection(event.currentTarget.value)}
-        />
-        <small className={reflectionLength > 2000 ? "over" : ""}>
-          {copy.customInstructionsCount(reflectionLength)}
-        </small>
-      </label>
-      {tooLong && <p className="pl-ci-error">{copy.customInstructionsTooLong}</p>}
-      <div className="pl-ci-actions">
-        <button
-          className="pl-btn sm"
-          type="button"
-          disabled={disabled}
-          onClick={() => {
-            if (!unit.child) return;
-            onSaveCustomInstructions(unit.job.id, unit.child.id, { translation, reflection });
+      <label className="pl-pp-select">
+        <span>本书使用</span>
+        <select
+          value={selectedReference ? `${selectedReference.packId}:${selectedReference.revisionId}` : ""}
+          disabled={Boolean(busy) || !child}
+          onChange={(event) => {
+            if (!child) return;
+            const [packId, revisionId] = event.currentTarget.value.split(":");
+            const revision = packs.find((pack) => pack.packId === packId)?.revisions.find((item) => item.revisionId === revisionId);
+            if (!revision) return;
+            previewRequest.current += 1;
+            setPreviewState(null);
+            setPreviewErrorState(null);
+            setPreviewingBasis(null);
+            setTab("template");
+            onSelectPromptPack(unit.job.id, child.id, {
+              packId: revision.packId,
+              revisionId: revision.revisionId,
+              contentSha256: revision.contentSha256,
+            });
           }}
         >
-          {saving ? copy.savingCustomInstructions : copy.saveCustomInstructions}
-        </button>
+          {packs.flatMap((pack) => pack.revisions.map((revision) => (
+            <option key={`${pack.packId}:${revision.revisionId}`} value={`${pack.packId}:${revision.revisionId}`}>
+              {revision.displayName} · {revision.revisionId}{revision === pack.revisions.at(-1) ? "" : "（历史版本）"}
+            </option>
+          )))}
+        </select>
+      </label>
+      {selectedReference && (
+        <code className="pl-pp-binding">{selectedReference.revisionId} · {selectedReference.contentSha256}</code>
+      )}
+      <div className="pl-pp-tabs" role="tablist" aria-label="提示词视图">
+        <button type="button" className={tab === "template" ? "active" : ""} onClick={() => setTab("template")}>模板</button>
+        <button
+          type="button"
+          className={tab === "actual" ? "active" : ""}
+          onClick={() => {
+            setTab("actual");
+            if (!preview) void loadPreview();
+          }}
+        >本次实际提示词</button>
       </div>
+      {tab === "template" ? (
+        <div className="pl-pp-templates">
+          {selectedRevision?.stages.map((stage) => (
+            <div key={stage.stageId}>
+              <strong>{stage.label}</strong>
+              <pre>{stage.template}</pre>
+            </div>
+          )) ?? <p>方案目录尚未加载。</p>}
+        </div>
+      ) : (
+        <div className="pl-pp-actual">
+          <p>仅在内存中生成，包含本书当前样本与执行器注入；不会写入方案库或任务状态。</p>
+          {previewing && <span>正在生成预览…</span>}
+          {previewError && <span className="pl-pp-error">{previewError}</span>}
+          {preview?.stages.map((stage, index) => (
+            <div key={stage.stageId ?? index}>
+              <strong>{stage.label ?? stage.stageId ?? `阶段 ${index + 1}`}</strong>
+              {stage.injections && <small className="pl-pp-injections">注入来源：{stage.injections.join(" · ")}</small>}
+              <pre>{typeof stage.actualPrompt === "string" ? stage.actualPrompt : `${stage.actualPrompt.systemInstruction}\n\n# CURRENT SOURCE\n${stage.actualPrompt.currentSource}`}</pre>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -666,7 +739,7 @@ function actionBar(props: BookDrawerProps): { hint: string; button: ReactElement
 }
 
 export function BookDrawer(props: BookDrawerProps) {
-  const { copy, units, unit, busy, onSelect, onClose, onDelete } = props;
+  const { copy, units, unit, busy, onSelect, onClose, onRemoveBooks } = props;
   // Delete now drops just this book; only the last one left takes the job with
   // it, so the batch wording is gone and the confirmation is true again.
   const index = units.findIndex((candidate) => candidate.key === unit.key);
@@ -678,6 +751,19 @@ export function BookDrawer(props: BookDrawerProps) {
   // `confirmingDelete` resets with the drawer: PipelineWorkbench keys this
   // component on the selected book, so switching books remounts it.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [projectMigration, setProjectMigration] = useState<BookPipelineProjectMigration | null>(null);
+  useEffect(() => {
+    if (unit.status === "running" || unit.job.status === "running" || unit.job.status === "handoff_running") return undefined;
+    let current = true;
+    void inspectBookPipelineProjectMigration(unit.job.id, unit.child?.id ?? null)
+      .then((migration) => {
+        if (current && migration.required) setProjectMigration(migration);
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [unit.child?.id, unit.job.id, unit.job.status, unit.status]);
   const gates = pendingGates(unit, copy);
   const bar = actionBar(props);
   return (
@@ -702,6 +788,23 @@ export function BookDrawer(props: BookDrawerProps) {
           </div>
         </div>
         <div className="pl-dbody">
+          {projectMigration && (
+            <div className="pl-hintcard warnc">
+              <strong>{copy.projectMigrationTitle}</strong>
+              <span>{copy.projectMigrationHint}</span>
+              <span className="pl-spacer" />
+              <button
+                className="pl-btn sm"
+                type="button"
+                disabled={busy === "migrate"}
+                onClick={async () => {
+                  if (await props.onMigrateProject(unit.job.id, unit.child?.id ?? null)) setProjectMigration(null);
+                }}
+              >
+                {copy.migrateProject}
+              </button>
+            </div>
+          )}
           {confirmingDelete && (
             <div className="pl-hintcard errc">
               <span>{copy.deleteBookConfirmHint}</span>
@@ -710,7 +813,9 @@ export function BookDrawer(props: BookDrawerProps) {
                 className="pl-btn sm danger-ghost"
                 type="button"
                 disabled={busy === "delete"}
-                onClick={() => onDelete(unit.job.id, unit.child?.id ?? null)}
+                onClick={async () => {
+                  if (await onRemoveBooks([{ jobId: unit.job.id, childId: unit.child?.id ?? null }])) onClose();
+                }}
               >
                 {copy.deleteBookConfirm}
               </button>
@@ -732,9 +837,7 @@ export function BookDrawer(props: BookDrawerProps) {
             </div>
           </div>
           <PhaseStrip unit={unit} copy={copy} />
-          {unit.job.mode !== "conversion_only" && unit.job.translationMode === "fast" && (
-            <CustomInstructionsEditor key={customInstructionsKey(unit)} {...props} />
-          )}
+          {unit.job.mode !== "conversion_only" && <PromptPackCard {...props} />}
           {gates.length > 0 ? (
             gates.map((gate) => (
               <GateCard

@@ -1,6 +1,13 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
-import type { LauncherSettings, NetworkProxySettings, ProxyTestResult } from "../../types";
+import type {
+  LauncherSettings,
+  NetworkProxySettings,
+  ProxyTestResult,
+  TranslationPromptPackCatalog,
+  TranslationPromptPackReference,
+  TranslationPromptPackRevisionDraft,
+} from "../../types";
 import type { Copy, LanguageSetting } from "../../i18n";
 import { SettingToggle } from "../../components";
 import { ProxySettingsPanel } from "./ProxySettingsPanel";
@@ -8,6 +15,7 @@ import { ModelsSettingsPanel } from "./ModelsSettingsPanel";
 import { modelsCopy } from "./modelsCopy";
 import { OcrSettingsPanel } from "./OcrSettingsPanel";
 import { ocrCopy } from "./ocrCopy";
+import { PromptPackSettingsPanel } from "./PromptPackSettingsPanel";
 import "./settings.css";
 
 /**
@@ -28,6 +36,13 @@ export function SettingsOverlay({
   onProxyChange,
   onProxyTest,
   onProxyAutoDetect,
+  promptPackCatalog,
+  promptPackDefaults,
+  promptPackBusy,
+  onCopyPromptPack,
+  onSavePromptPackRevision,
+  onDeletePromptPack,
+  onSetPromptPackDefault,
   onClose,
 }: {
   copy: Copy;
@@ -42,6 +57,13 @@ export function SettingsOverlay({
   onProxyChange: (value: NetworkProxySettings) => void;
   onProxyTest: () => void;
   onProxyAutoDetect: () => void;
+  promptPackCatalog: TranslationPromptPackCatalog | null;
+  promptPackDefaults: Record<"programmatic" | "expert-agent", TranslationPromptPackReference | null>;
+  promptPackBusy: boolean;
+  onCopyPromptPack: (source: TranslationPromptPackReference, displayName: string) => Promise<void>;
+  onSavePromptPackRevision: (draft: TranslationPromptPackRevisionDraft) => Promise<void>;
+  onDeletePromptPack: (packId: string) => Promise<void>;
+  onSetPromptPackDefault: (executor: "programmatic" | "expert-agent", value: TranslationPromptPackReference) => Promise<void>;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -93,6 +115,21 @@ export function SettingsOverlay({
                 onChange={onProxyChange}
                 onTest={onProxyTest}
                 onAutoDetect={onProxyAutoDetect}
+              />
+            </div>
+          </div>
+
+          <div className="st-group">
+            <div className="st-group-card">
+              <PromptPackSettingsPanel
+                locale={locale}
+                catalog={promptPackCatalog}
+                defaults={promptPackDefaults}
+                busy={promptPackBusy}
+                onCopy={onCopyPromptPack}
+                onSaveRevision={onSavePromptPackRevision}
+                onDelete={onDeletePromptPack}
+                onSetDefault={onSetPromptPackDefault}
               />
             </div>
           </div>

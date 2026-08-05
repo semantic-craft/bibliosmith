@@ -2,6 +2,56 @@ import hashlib
 import json
 from pathlib import Path
 
+from translation_engine.prompt_packs import revision_content_sha256
+
+
+def _prompt_pack_revision(
+    *,
+    pack_id: str,
+    display_name: str,
+    stages: list[dict[str, str]],
+) -> dict[str, object]:
+    revision: dict[str, object] = {
+        "schema": "translation-prompt-pack-revision-v1",
+        "packId": pack_id,
+        "revisionId": "test-1",
+        "displayName": display_name,
+        "executor": "programmatic",
+        "sourceLanguage": "auto",
+        "targetLanguage": "zh-Hans",
+        "stages": stages,
+    }
+    revision["contentSha256"] = revision_content_sha256(revision)
+    return revision
+
+
+STRUCTURE_FIDELITY_PROMPT_PACK = _prompt_pack_revision(
+    pack_id="builtin.structure-fidelity",
+    display_name="结构保真翻译",
+    stages=[
+        {
+            "stageId": "translate",
+            "template": "Translate the current block faithfully into Simplified Chinese.",
+        }
+    ],
+)
+
+FOUR_DIMENSION_PROMPT_PACK = _prompt_pack_revision(
+    pack_id="builtin.four-dimension-refinement",
+    display_name="四维反思精修",
+    stages=[
+        {"stageId": "translate", "template": "Create a faithful first translation."},
+        {
+            "stageId": "reflect",
+            "template": "Reflect on accuracy, fluency, style, and terminology.",
+        },
+        {
+            "stageId": "improve",
+            "template": "Improve the draft using the four-dimension reflection.",
+        },
+    ],
+)
+
 
 def build_run_fixture(
     project_root: Path,
@@ -11,7 +61,7 @@ def build_run_fixture(
     glossary_text: str = "source,translation,category,note\n",
     second_pass_enabled: bool | None = None,
     text_cleanup: bool | None = None,
-    custom_instructions: object | None = None,
+    prompt_pack: object | None = None,
 ) -> Path:
     source_sha256 = hashlib.sha256(source_text.encode()).hexdigest()
     source_path = project_root / "chapters" / "src" / "chapter_001.md"
@@ -23,12 +73,12 @@ def build_run_fixture(
     _write_json(
         source_map_path,
         {
-            "schema": "local-reading-source-map-v1",
-            "chapters": [
+            "schema": "local-reading-source-map-v2",
+            "translationUnits": [
                 {
                     "id": "chapter_001",
-                    "chapterSourcePath": "chapters/src/chapter_001.md",
-                    "chapterSourceSha256": source_sha256,
+                    "sourceUnitPath": "chapters/src/chapter_001.md",
+                    "sourceUnitSha256": source_sha256,
                 }
             ],
         },
@@ -44,12 +94,12 @@ def build_run_fixture(
     _write_json(
         task_path,
         {
-            "schema": "local-reading-translation-task-v1",
+            "schema": "local-reading-translation-task-v2",
             "taskPolicyVersion": "task-policy-v1",
-            "chapterId": "chapter_001",
+            "unitId": "chapter_001",
             "targetLanguage": "zh-Hans",
-            "sourceChapterPath": "chapters/src/chapter_001.md",
-            "sourceChapterSha256": source_sha256,
+            "sourceUnitPath": "chapters/src/chapter_001.md",
+            "sourceUnitSha256": source_sha256,
             "glossaryPath": "glossary/terms.csv",
             "glossarySha256": glossary_sha256,
         },
@@ -72,8 +122,11 @@ def build_run_fixture(
         manifest["secondPassEnabled"] = second_pass_enabled
     if text_cleanup is not None:
         manifest["textCleanup"] = text_cleanup
-    if custom_instructions is not None:
-        manifest["customInstructions"] = custom_instructions
+    manifest["promptPack"] = prompt_pack or (
+        FOUR_DIMENSION_PROMPT_PACK
+        if second_pass_enabled is True
+        else STRUCTURE_FIDELITY_PROMPT_PACK
+    )
     _write_json(manifest_path, manifest)
     return manifest_path
 
@@ -103,6 +156,7 @@ def build_multi_unit_run_fixture(
             "providerConfigId": "fake-config-no-secrets",
             "translationPolicyVersion": "translation-policy-v1",
             "maxTokens": max_tokens,
+            "promptPack": STRUCTURE_FIDELITY_PROMPT_PACK,
             "units": units,
         },
     )
@@ -116,7 +170,7 @@ def build_sample_fixture(
     sample_count: int,
     character_budget: int,
     text_cleanup: bool | None = None,
-    custom_instructions: object | None = None,
+    prompt_pack: object | None = None,
 ) -> Path:
     units = _write_units(project_root, source_texts)
 
@@ -132,12 +186,11 @@ def build_sample_fixture(
         "sampleCount": sample_count,
         "characterBudget": character_budget,
         "placeholderRetries": 1,
+        "promptPack": prompt_pack or STRUCTURE_FIDELITY_PROMPT_PACK,
         "units": units,
     }
     if text_cleanup is not None:
         manifest["textCleanup"] = text_cleanup
-    if custom_instructions is not None:
-        manifest["customInstructions"] = custom_instructions
     _write_json(manifest_path, manifest)
     return manifest_path
 
@@ -162,8 +215,8 @@ def _write_units(project_root: Path, source_texts: list[str]) -> list[dict[str, 
         chapters.append(
             {
                 "id": chapter_id,
-                "chapterSourcePath": source_relative,
-                "chapterSourceSha256": source_sha256,
+                "sourceUnitPath": source_relative,
+                "sourceUnitSha256": source_sha256,
             }
         )
 
@@ -173,12 +226,12 @@ def _write_units(project_root: Path, source_texts: list[str]) -> list[dict[str, 
         _write_json(
             task_path,
             {
-                "schema": "local-reading-translation-task-v1",
+                "schema": "local-reading-translation-task-v2",
                 "taskPolicyVersion": "task-policy-v1",
-                "chapterId": chapter_id,
+                "unitId": chapter_id,
                 "targetLanguage": "zh-Hans",
-                "sourceChapterPath": source_relative,
-                "sourceChapterSha256": source_sha256,
+                "sourceUnitPath": source_relative,
+                "sourceUnitSha256": source_sha256,
                 "glossaryPath": "glossary/terms.csv",
                 "glossarySha256": glossary_sha256,
             },
@@ -189,7 +242,7 @@ def _write_units(project_root: Path, source_texts: list[str]) -> list[dict[str, 
     source_map_path.parent.mkdir(parents=True, exist_ok=True)
     _write_json(
         source_map_path,
-        {"schema": "local-reading-source-map-v1", "chapters": chapters},
+        {"schema": "local-reading-source-map-v2", "translationUnits": chapters},
     )
     return units
 

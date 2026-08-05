@@ -1,11 +1,709 @@
 use super::*;
 
+fn write_translation_stage_evidence(
+    project_root: &Path,
+    evidence_type: &str,
+    reference: &PromptPackReference,
+    handoff_sha256: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut document = serde_json::json!({
+        "schema": "translation-stage-evidence-v1",
+        "evidenceType": evidence_type,
+        "promptPackReference": reference,
+        "translationHandoffSha256": handoff_sha256,
+        "status": "passed",
+    });
+    if let (Some(document), Some(extra)) = (document.as_object_mut(), extra.as_object()) {
+        document.extend(extra.clone());
+    }
+    let relative = format!("qa/evidence/{evidence_type}.json");
+    let path = project_root.join(&relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
+    serde_json::json!({
+        "path": relative,
+        "sha256": sha256_file(&path).unwrap(),
+    })
+}
+
 #[test]
 fn stderr_tail_surfaces_the_last_lines_of_a_python_traceback() {
     let stderr = "Traceback (most recent call last):\n  File \"x.py\", line 1\nRuntimeError: GOOGLE_API_KEY or GEMINI_API_KEY not set.\n";
     assert_eq!(
         stderr_tail(stderr),
         "Traceback (most recent call last): | File \"x.py\", line 1 | RuntimeError: GOOGLE_API_KEY or GEMINI_API_KEY not set."
+    );
+}
+
+#[test]
+fn prompt_pack_catalog_exposes_four_functional_packs_with_valid_revisions() {
+    let catalog = builtin_prompt_pack_catalog().unwrap();
+    let names = catalog
+        .packs
+        .iter()
+        .map(|pack| pack.latest_revision().unwrap().display_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "结构保真翻译",
+            "四维反思精修",
+            "语境回溯精译",
+            "全流程审校闭环"
+        ]
+    );
+    assert_eq!(
+        catalog.packs[0].latest_revision().unwrap().executor,
+        "programmatic"
+    );
+    assert_eq!(
+        catalog.packs[2].latest_revision().unwrap().executor,
+        "expert-agent"
+    );
+    for pack in &catalog.packs {
+        for revision in &pack.revisions {
+            validate_prompt_pack_revision(revision).unwrap();
+        }
+    }
+    let full_loop = catalog
+        .packs
+        .iter()
+        .find(|pack| pack.pack_id == "builtin.full-quality-loop")
+        .unwrap();
+    assert_eq!(full_loop.revisions.len(), 2);
+    assert_eq!(
+        full_loop.revisions[0].content_sha256,
+        "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74"
+    );
+    assert!(!full_loop.revisions[0].source["license"]
+        .as_str()
+        .unwrap()
+        .contains("CC BY-NC-SA"));
+    assert!(full_loop.revisions[1].source["license"]
+        .as_str()
+        .unwrap()
+        .contains("CC BY-NC-SA"));
+}
+
+#[test]
+fn prompt_pack_revision_rejects_non_string_skill_dependency_versions() {
+    let mut revision = builtin_prompt_pack_catalog().unwrap().packs[2]
+        .latest_revision()
+        .unwrap()
+        .clone();
+    revision.source["skillVersions"]["expert-translation-quality"] = serde_json::json!(42);
+
+    assert_eq!(
+        validate_prompt_pack_revision(&revision).unwrap_err(),
+        "invalid_prompt_pack_skill_versions"
+    );
+}
+
+#[test]
+fn custom_prompt_pack_revisions_are_append_only_and_deletion_keeps_history() {
+    let root = temp_root("prompt-pack-custom-revisions");
+    let store = PromptPackStore::for_test(&root);
+    let copied = store
+        .copy_builtin(
+            &PromptPackReference::new(
+                "builtin.structure-fidelity",
+                "2026.08.05-1",
+                "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+            ),
+            "我的克制译法",
+        )
+        .unwrap();
+    let first = copied.latest_revision().unwrap().clone();
+    let edited = store
+        .save_custom_revision(PromptPackRevisionDraft {
+            pack_id: copied.pack_id.clone(),
+            display_name: "我的克制译法（二版）".into(),
+            parameters: BTreeMap::from([
+                ("styleGuidance".into(), "克制的现代汉语".into()),
+                ("qualityFocus".into(), "术语一致性".into()),
+            ]),
+            stages: vec![PromptStageTemplate {
+                stage_id: "translate".into(),
+                label: "结构保真初译".into(),
+                template: "使用克制、准确的现代汉语完整翻译当前块。".into(),
+            }],
+        })
+        .unwrap();
+
+    assert_ne!(edited.revision_id, first.revision_id);
+    assert_ne!(edited.content_sha256, first.content_sha256);
+    assert_eq!(edited.parameters["styleGuidance"], "克制的现代汉语");
+    assert_eq!(
+        store
+            .resolve_revision(&PromptPackReference::from_revision(&first), "programmatic")
+            .unwrap()
+            .display_name,
+        "我的克制译法"
+    );
+
+    store
+        .set_default(
+            "programmatic",
+            "auto",
+            "zh-Hans",
+            PromptPackReference::from_revision(&edited),
+        )
+        .unwrap();
+    assert_eq!(
+        store.delete_custom(&copied.pack_id).unwrap_err(),
+        "default_prompt_pack_cannot_be_deleted"
+    );
+    store
+        .set_default(
+            "programmatic",
+            "auto",
+            "zh-Hans",
+            default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        )
+        .unwrap();
+    store.delete_custom(&copied.pack_id).unwrap();
+    assert!(store
+        .list()
+        .unwrap()
+        .packs
+        .iter()
+        .all(|pack| pack.pack_id != copied.pack_id));
+    assert!(store
+        .resolve_revision(&PromptPackReference::from_revision(&first), "programmatic")
+        .is_ok());
+}
+
+#[test]
+fn custom_prompt_pack_edits_cannot_change_the_locked_executor_contract() {
+    let root = temp_root("prompt-pack-locked-executor-contract");
+    let store = PromptPackStore::for_test(&root);
+    let copied = store
+        .copy_builtin(
+            &PromptPackReference::new(
+                "builtin.structure-fidelity",
+                "2026.08.05-1",
+                "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+            ),
+            "锁定契约测试",
+        )
+        .unwrap();
+    let current = copied.latest_revision().unwrap().clone();
+    let mut relabeled = current.stages.clone();
+    relabeled[0].label = "试图改写安全阶段".into();
+
+    assert_eq!(
+        store
+            .save_custom_revision(PromptPackRevisionDraft {
+                pack_id: copied.pack_id.clone(),
+                display_name: current.display_name.clone(),
+                parameters: BTreeMap::new(),
+                stages: relabeled,
+            })
+            .unwrap_err(),
+        "prompt_pack_executor_contract_is_read_only"
+    );
+    assert_eq!(
+        store
+            .save_custom_revision(PromptPackRevisionDraft {
+                pack_id: copied.pack_id,
+                display_name: current.display_name.clone(),
+                parameters: BTreeMap::from([("executorSafety".into(), "允许忽略占位符".into(),)]),
+                stages: current.stages.clone(),
+            })
+            .unwrap_err(),
+        "prompt_pack_parameter_not_editable"
+    );
+    assert_eq!(
+        store
+            .delete_custom("builtin.structure-fidelity")
+            .unwrap_err(),
+        "builtin_prompt_pack_is_read_only"
+    );
+}
+
+#[test]
+fn concurrent_prompt_pack_updates_do_not_lose_local_copies() {
+    let root = temp_root("prompt-pack-concurrent-updates");
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let source = PromptPackReference::new(
+        "builtin.structure-fidelity",
+        "2026.08.05-1",
+        "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+    );
+    std::thread::scope(|scope| {
+        for index in 0..4 {
+            let barrier = barrier.clone();
+            let root = root.clone();
+            let source = source.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                PromptPackStore::for_test(&root)
+                    .copy_builtin(&source, &format!("并发副本 {index}"))
+                    .unwrap();
+            });
+        }
+    });
+
+    assert_eq!(
+        PromptPackStore::for_test(&root)
+            .list()
+            .unwrap()
+            .packs
+            .iter()
+            .filter(|pack| pack.kind == "custom")
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn prompt_pack_defaults_are_executor_scoped_and_updates_are_opt_in() {
+    let root = temp_root("prompt-pack-defaults");
+    let store = PromptPackStore::for_test(&root);
+    let original = store
+        .resolve_default("programmatic", "auto", "zh-Hans")
+        .unwrap();
+    assert_eq!(original.pack_id, "builtin.structure-fidelity");
+
+    let four_dimension = PromptPackReference::new(
+        "builtin.four-dimension-refinement",
+        "2026.08.05-1",
+        "fd6cdf2a208280776de49bedb863186749ff3dad3b8fd8de00c495c1cc02630a",
+    );
+    store
+        .set_default("programmatic", "auto", "zh-Hans", four_dimension.clone())
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_default("programmatic", "auto", "zh-Hans")
+            .unwrap(),
+        four_dimension
+    );
+    assert!(store
+        .set_default(
+            "programmatic",
+            "auto",
+            "zh-Hans",
+            PromptPackReference::new(
+                "builtin.context-backtracking",
+                "2026.08.05-1",
+                "13d0d89ed81c8572311c31dbb8be56c95b583a9a0a86f779ad7ae8b1ec1e5fc7",
+            ),
+        )
+        .unwrap_err()
+        .contains("prompt_pack_executor_mismatch"));
+}
+
+#[test]
+fn new_builtin_revision_is_visible_diffable_and_never_silently_adopted() {
+    let root = temp_root("prompt-pack-builtin-update");
+    let store = PromptPackStore::for_test(&root);
+    let before = four_dimension_prompt_pack_reference();
+    let after = PromptPackReference::new(
+        "builtin.four-dimension-refinement",
+        "2026.08.05-2",
+        "e86141d65f8bfb4a674c597f157a86c6da80d49ac02d081d21f2ca325c8ea2e8",
+    );
+    let pack = store
+        .list()
+        .unwrap()
+        .packs
+        .into_iter()
+        .find(|pack| pack.pack_id == before.pack_id)
+        .unwrap();
+    assert_eq!(pack.revisions.len(), 2);
+    assert_eq!(
+        pack.latest_revision().unwrap().revision_id,
+        after.revision_id
+    );
+
+    store
+        .set_default("programmatic", "auto", "zh-Hans", before.clone())
+        .unwrap();
+    let copied = store.copy_builtin(&before, "旧版独立副本").unwrap();
+    let diff = store.diff_revisions(&before, &after).unwrap();
+    assert_ne!(diff.before_metadata.source, diff.after_metadata.source);
+    assert_eq!(
+        diff.after_metadata.source["license"],
+        serde_json::json!("MIT")
+    );
+    assert_eq!(
+        diff.stages
+            .iter()
+            .map(|stage| stage.stage_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["improve", "reflect"]
+    );
+    assert_eq!(
+        store
+            .resolve_default("programmatic", "auto", "zh-Hans")
+            .unwrap(),
+        before
+    );
+    assert!(copied.latest_revision().unwrap().stages[1]
+        .template
+        .contains("具体、可执行"));
+
+    store
+        .set_default("programmatic", "auto", "zh-Hans", after.clone())
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_default("programmatic", "auto", "zh-Hans")
+            .unwrap(),
+        after
+    );
+    assert!(copied.latest_revision().unwrap().stages[1]
+        .template
+        .contains("具体、可执行"));
+}
+
+#[test]
+fn expert_handoff_uses_the_selected_revision_without_persisting_private_prompt_text() {
+    let root = temp_root("prompt-pack-expert-handoff");
+    let store = PromptPackStore::for_test(&root);
+    let reference = store
+        .resolve_default("expert-agent", "auto", "zh-Hans")
+        .unwrap();
+    let handoff = store
+        .compile_expert_handoff(&reference, "Private source sample", &["Term=术语".into()])
+        .unwrap();
+
+    assert_eq!(handoff.prompt_pack_reference, reference);
+    assert_eq!(handoff.source_language, "auto");
+    assert_eq!(handoff.target_language, "zh-Hans");
+    assert_eq!(
+        handoff.skill_dependency_versions["expert-translation-quality"],
+        "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47"
+    );
+    assert_eq!(handoff.stage_instructions[0].stage_id, "context_plan");
+    assert!(handoff.actual_prompt.contains("Private source sample"));
+    assert!(handoff.actual_prompt.contains("语境计划"));
+    let persisted = fs::read_to_string(store.path()).unwrap_or_default();
+    assert!(!persisted.contains("Private source sample"));
+    assert!(!persisted.contains("Term=术语"));
+
+    let full_loop = PromptPackReference::new(
+        "builtin.full-quality-loop",
+        "2026.08.05-2",
+        "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
+    );
+    let full_handoff = store
+        .compile_expert_handoff(&full_loop, "Private source sample", &[])
+        .unwrap();
+    assert_ne!(handoff.actual_prompt, full_handoff.actual_prompt);
+    assert!(full_handoff.actual_prompt.contains("独立复核"));
+    assert!(full_handoff.evidence_policy.unwrap().independent_review);
+    assert!(full_handoff
+        .excluded_responsibilities
+        .contains(&"publication".into()));
+
+    let local = store.copy_builtin(&reference, "我的语境方案").unwrap();
+    let local_revision = local.latest_revision().unwrap();
+    let edited = store
+        .save_custom_revision(PromptPackRevisionDraft {
+            pack_id: local.pack_id.clone(),
+            display_name: "我的语境方案（二版）".into(),
+            parameters: BTreeMap::from([(
+                "styleGuidance".into(),
+                "LOCAL_EXPERT_PARAMETER 使用克制的现代汉语".into(),
+            )]),
+            stages: local_revision.stages.clone(),
+        })
+        .unwrap();
+    let local_handoff = store
+        .compile_expert_handoff(
+            &PromptPackReference::from_revision(&edited),
+            "Private source sample",
+            &[],
+        )
+        .unwrap();
+    assert!(local_handoff
+        .actual_prompt
+        .contains("LOCAL_EXPERT_PARAMETER"));
+    assert_eq!(
+        local_handoff.parameters["styleGuidance"],
+        "LOCAL_EXPERT_PARAMETER 使用克制的现代汉语"
+    );
+    assert_eq!(
+        local_handoff.skill_dependency_versions["expert-translation-quality"],
+        "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47"
+    );
+}
+
+#[test]
+fn changing_a_books_prompt_pack_rebinds_translation_approval_to_the_new_hash() {
+    let root = temp_root("prompt-pack-approval-rebind");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let prompt_store = PromptPackStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# Chapter\n\nPrivate paragraph.\n",
+    );
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    approve_ready_translation_for_test(&store, &job_id);
+    let before = store.load().unwrap().jobs[0].clone();
+    let old_approval = before.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .unwrap()
+        .approval_id
+        .clone()
+        .unwrap();
+
+    let changed = select_book_prompt_pack(
+        &store,
+        &prompt_store,
+        &job_id,
+        None,
+        four_dimension_prompt_pack_reference(),
+    )
+    .unwrap();
+
+    let gate = changed.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .unwrap();
+    assert_eq!(gate.status, STATUS_READY);
+    assert_eq!(changed.prompt_pack_selection_source, "book-override");
+    assert_eq!(
+        changed.children[0].prompt_pack_selection_source,
+        "book-override"
+    );
+    assert!(gate.approval_id.is_none());
+    assert!(gate.approval_request.as_ref().unwrap().second_pass_enabled);
+    assert!(!changed.second_pass_enabled);
+    assert_eq!(
+        gate.input_hashes["promptPackContentSha256"],
+        four_dimension_prompt_pack_reference().content_sha256
+    );
+    assert!(!changed
+        .approval_references
+        .iter()
+        .any(|approval| approval.approval_id == old_approval));
+    let persisted = fs::read_to_string(&store.state_path).unwrap();
+    assert!(!persisted.contains("Private paragraph"));
+    assert!(!persisted.contains("四维反思建议"));
+}
+
+#[test]
+fn selecting_an_expert_pack_adopts_its_exact_skill_contract() {
+    let root = temp_root("prompt-pack-expert-skill-switch");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let prompt_store = PromptPackStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# Chapter\n\nPrivate paragraph.\n",
+    );
+    configure_expert_job(&store, &job_id);
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    let full_loop = PromptPackReference::new(
+        "builtin.full-quality-loop",
+        "2026.08.05-2",
+        "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
+    );
+
+    let changed = select_book_prompt_pack(&store, &prompt_store, &job_id, None, full_loop).unwrap();
+
+    assert_eq!(
+        changed.translation_skill_ids,
+        vec![
+            "expert-translation-quality".to_string(),
+            "translation-quality-defect-families".to_string(),
+        ]
+    );
+    let request = changed.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .unwrap()
+        .approval_request
+        .as_ref()
+        .unwrap();
+    assert_eq!(request.skill_ids, changed.translation_skill_ids);
+}
+
+#[test]
+fn full_quality_loop_rejects_open_issues_and_accepts_closed_defect_families() {
+    let root = temp_root("full-quality-loop-gate");
+    let store = PromptPackStore::for_test(&root);
+    let reference = PromptPackReference::new(
+        "builtin.full-quality-loop",
+        "2026.08.05-2",
+        "978bfafaff1a120356d685b2d2daa373e8a2ecc7de28e90a7e7b12588ede13ee",
+    );
+    let revision = store.resolve_revision(&reference, "expert-agent").unwrap();
+    let handoff_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let stage_evidence = revision
+        .required_evidence
+        .iter()
+        .map(|kind| {
+            (
+                kind.clone(),
+                write_translation_stage_evidence(
+                    &root,
+                    kind,
+                    &reference,
+                    handoff_sha256,
+                    if kind == "independent-review" {
+                        serde_json::json!({
+                            "translatorId": "translator-a",
+                            "independentReviewerId": "reviewer-b",
+                            "latestReviewOpenIssueCount": 1,
+                        })
+                    } else {
+                        serde_json::json!({})
+                    },
+                ),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let mut receipt = serde_json::json!({
+        "schema": "translation-prompt-pack-receipt-v1",
+        "translationHandoffSha256": handoff_sha256,
+        "promptPackReference": &reference,
+        "stageEvidence": stage_evidence,
+    });
+
+    assert!(store
+        .validate_expert_receipt(
+            &reference,
+            &receipt,
+            receipt["translationHandoffSha256"].as_str().unwrap(),
+            &root,
+        )
+        .unwrap_err()
+        .contains("expert_gate_open_issues"));
+
+    let defect_evidence = ["candidate-scan", "repair", "recheck"].map(|name| {
+        let relative = format!("qa/evidence/{name}.json");
+        let path = root.join(&relative);
+        fs::write(&path, format!("{{\"evidence\":\"{name}\"}}\n")).unwrap();
+        serde_json::json!({
+            "path": relative,
+            "sha256": sha256_file(&path).unwrap(),
+        })
+    });
+    let defect_families = serde_json::json!([{
+        "familyId": "omitted-honorific",
+        "candidateCount": 4,
+        "repairedCount": 4,
+        "openCount": 0,
+        "candidateScanEvidence": defect_evidence[0],
+        "repairEvidence": defect_evidence[1],
+        "recheckEvidence": defect_evidence[2],
+        "status": "closed"
+    }]);
+    receipt["stageEvidence"]["independent-review"] = write_translation_stage_evidence(
+        &root,
+        "independent-review",
+        &reference,
+        handoff_sha256,
+        serde_json::json!({
+            "translatorId": "translator-a",
+            "independentReviewerId": "reviewer-b",
+            "latestReviewOpenIssueCount": 0,
+        }),
+    );
+    receipt["stageEvidence"]["defect-family-closure"] = write_translation_stage_evidence(
+        &root,
+        "defect-family-closure",
+        &reference,
+        handoff_sha256,
+        serde_json::json!({"defectFamilies": defect_families.clone()}),
+    );
+
+    store
+        .validate_expert_receipt(
+            &reference,
+            &receipt,
+            receipt["translationHandoffSha256"].as_str().unwrap(),
+            &root,
+        )
+        .unwrap();
+
+    let research_path = root.join(
+        receipt["stageEvidence"]["research-brief"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let research_evidence = fs::read(&research_path).unwrap();
+    fs::write(&research_path, b"tampered evidence\n").unwrap();
+    assert_eq!(
+        store
+            .validate_expert_receipt(
+                &reference,
+                &receipt,
+                receipt["translationHandoffSha256"].as_str().unwrap(),
+                &root,
+            )
+            .unwrap_err(),
+        "invalid_translation_stage_evidence:research-brief"
+    );
+    fs::write(&research_path, research_evidence).unwrap();
+
+    let copied = store.copy_builtin(&reference, "本地全流程闭环").unwrap();
+    let copied_reference = PromptPackReference::from_revision(copied.latest_revision().unwrap());
+    assert!(copied.latest_revision().unwrap().evidence_policy.is_some());
+    receipt["promptPackReference"] = serde_json::to_value(&copied_reference).unwrap();
+    receipt["stageEvidence"] = serde_json::Value::Object(
+        copied
+            .latest_revision()
+            .unwrap()
+            .required_evidence
+            .iter()
+            .map(|kind| {
+                let extra = match kind.as_str() {
+                    "independent-review" => serde_json::json!({
+                        "translatorId": "translator-a",
+                        "independentReviewerId": "reviewer-b",
+                        "latestReviewOpenIssueCount": 1,
+                    }),
+                    "defect-family-closure" => {
+                        serde_json::json!({"defectFamilies": defect_families.clone()})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                (
+                    kind.clone(),
+                    write_translation_stage_evidence(
+                        &root,
+                        kind,
+                        &copied_reference,
+                        handoff_sha256,
+                        extra,
+                    ),
+                )
+            })
+            .collect(),
+    );
+    assert_eq!(
+        store
+            .validate_expert_receipt(
+                &copied_reference,
+                &receipt,
+                receipt["translationHandoffSha256"].as_str().unwrap(),
+                &root,
+            )
+            .unwrap_err(),
+        "expert_gate_open_issues"
     );
 }
 
@@ -44,6 +742,32 @@ fn executable_fixture(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, "#!/bin/sh\n").unwrap();
     path
+}
+
+#[test]
+fn concurrent_project_reservations_never_share_a_user_directory() {
+    let root = temp_root("concurrent-project-reservations");
+    let target = root.join("books/local/zh-Hans");
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let workers = (0..2)
+        .map(|_| {
+            let target = target.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                create_new_local_project(&target, "same_book").unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut projects = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    projects.sort();
+
+    assert_ne!(projects[0], projects[1]);
+    assert!(projects.iter().all(|project| project.is_dir()));
+    fs::remove_dir_all(root).ok();
 }
 
 #[test]
@@ -179,6 +903,8 @@ fn mineru_overlay_fixture_job(project: &Path) -> BookPipelineJob {
     serde_json::from_value(serde_json::json!({
         "id": "job-mineru-overlay",
         "mode": "convert_then_translate",
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
         "source": { "kind": "zotero_attachment", "routeOverrides": {} },
         "route": [],
         "status": "completed",
@@ -193,6 +919,8 @@ fn mineru_overlay_fixture_job(project: &Path) -> BookPipelineJob {
             "parentJobId": "job-mineru-overlay",
             "status": "completed",
             "currentStageId": "validate_reading",
+            "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+            "promptPackSelectionSource": "default",
             "source": { "kind": "zotero_attachment", "routeOverrides": {} },
             "route": [{
                 "id": "book",
@@ -260,7 +988,7 @@ fn runner_program_falls_back_to_the_bare_name_when_nothing_resolves() {
     let root = temp_root("program-missing");
     fs::create_dir_all(&root).unwrap();
     assert_eq!(
-        resolve_runner_program_in(&[root.clone()], Path::new("uv")),
+        resolve_runner_program_in(std::slice::from_ref(&root), Path::new("uv")),
         PathBuf::from("uv")
     );
     fs::remove_dir_all(&root).ok();
@@ -268,9 +996,11 @@ fn runner_program_falls_back_to_the_bare_name_when_nothing_resolves() {
 
 #[test]
 fn runner_child_path_carries_every_search_dir() {
-    let value = runner_path_env_value().expect("search dirs should join into a PATH");
+    let resource_root = PathBuf::from("/App/Contents/Resources/bibliosmith-runtime");
+    let value = runner_path_env_value(&resource_root).expect("search dirs should join into a PATH");
     let carried = env::split_paths(&value).collect::<Vec<_>>();
-    assert_eq!(carried, program_search_dirs());
+    assert_eq!(carried.first(), Some(&resource_root.join("bin")));
+    assert_eq!(&carried[1..], program_search_dirs());
 }
 
 fn nvm_fixture(root: &Path, versions: &[&str], default_alias: Option<&str>) -> PathBuf {
@@ -419,7 +1149,7 @@ fn pipeline_process_programs_are_resolvable() {
     for program in ["uv", "node", "java", "python3"] {
         let resolved = resolve_runner_program(Path::new(program));
         assert!(
-            resolved.is_absolute() || resolved == PathBuf::from(program),
+            resolved.is_absolute() || resolved == Path::new(program),
             "{program} resolved to an unusable relative path: {}",
             display_path(&resolved)
         );
@@ -432,6 +1162,7 @@ impl PipelineRunner for ArtifactFixtureRunner {
     fn run(&self, _job: &BookPipelineJob, output_dir: &Path) -> Result<RunnerOutput, String> {
         fs::create_dir_all(output_dir).unwrap();
         fs::write(output_dir.join("book.md"), "# Markdown\n").unwrap();
+        write_publication_evidence_fixture(&output_dir.join("book.md"), "pdf");
         fs::write(output_dir.join("book.html"), "<h1>HTML</h1>\n").unwrap();
         fs::write(output_dir.join("book.epub"), "epub bytes").unwrap();
         Ok(RunnerOutput {
@@ -499,7 +1230,11 @@ impl TranslationHandoffRunner for FakeTranslationHandoffRunner {
         fs::create_dir_all(source_path.parent().unwrap()).unwrap();
         fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
         fs::copy(&markdown.path, &source_path).unwrap();
-        fs::write(&manifest_path, "{\"schema\":\"fake-source-manifest-v1\"}\n").unwrap();
+        fs::write(
+            &manifest_path,
+            "{\"schema\":\"local-reading-source-manifest-v1\",\"source_format\":\"md\",\"extraction_status\":\"cleaned_markdown_ready\",\"structure_evidence_kind\":\"normalized_markdown\",\"publication_evidence_required\":false}\n",
+        )
+        .unwrap();
         Ok(TranslationHandoffOutput {
             log_summary: vec!["Fake translation handoff ready".into()],
             artifacts: vec![
@@ -546,7 +1281,11 @@ impl TranslationHandoffRunner for FakeTranslationHandoffRunner {
         fs::create_dir_all(source_path.parent().unwrap()).unwrap();
         fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
         fs::copy(artifact_path, &source_path).unwrap();
-        fs::write(&manifest_path, "{\"schema\":\"fake-source-manifest-v1\"}\n").unwrap();
+        fs::write(
+            &manifest_path,
+            "{\"schema\":\"local-reading-source-manifest-v1\",\"source_format\":\"md\",\"extraction_status\":\"cleaned_markdown_ready\",\"structure_evidence_kind\":\"normalized_markdown\",\"publication_evidence_required\":false}\n",
+        )
+        .unwrap();
         let markdown_key = child
             .artifacts
             .iter()
@@ -628,6 +1367,7 @@ impl RunnerCommandExecutor for LocalPdfFixtureExecutor {
         let book_dir = command.output_dir.join("Sample Book");
         fs::create_dir_all(&book_dir).unwrap();
         fs::write(book_dir.join("sample.md"), "# Markdown\n").unwrap();
+        write_publication_evidence_fixture(&book_dir.join("sample.md"), "pdf");
         fs::write(book_dir.join("sample.html"), "<h1>HTML</h1>\n").unwrap();
         fs::write(book_dir.join("sample.epub"), "epub bytes").unwrap();
         fs::write(book_dir.join("_state.json"), "{\"status\":\"done\"}\n").unwrap();
@@ -657,6 +1397,7 @@ impl RunnerCommandExecutor for PaddleWrapperLayoutExecutor {
         let assets_dir = book_dir.join("Sample_Book_assets");
         fs::create_dir_all(&assets_dir).unwrap();
         fs::write(book_dir.join("Sample_Book.md"), PADDLE_WRAPPER_MARKDOWN).unwrap();
+        write_publication_evidence_fixture(&book_dir.join("Sample_Book.md"), "ocr");
         fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
         fs::write(
             book_dir.join("_state.json"),
@@ -697,6 +1438,7 @@ impl RunnerCommandExecutor for DirectTextWrapperLayoutExecutor {
             DIRECT_TEXT_WRAPPER_MARKDOWN,
         )
         .unwrap();
+        write_publication_evidence_fixture(&book_dir.join("Sample_Book.md"), "pdf");
         fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
         fs::write(
             book_dir.join("_state.json"),
@@ -721,6 +1463,7 @@ impl RunnerCommandExecutor for PaddleScratchLayoutExecutor {
         let book_dir = command.output_dir.join("Sample_Book");
         fs::create_dir_all(&book_dir).unwrap();
         fs::write(book_dir.join("Sample_Book.md"), "# Sample Book\n").unwrap();
+        write_publication_evidence_fixture(&book_dir.join("Sample_Book.md"), "ocr");
         fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
         fs::write(book_dir.join("_state.json"), "{\"pages_done\":2}\n").unwrap();
         let chunks = command
@@ -816,6 +1559,7 @@ impl RunnerCommandExecutor for SingleBookLayoutExecutor {
         let book_dir = command.output_dir.join("Sample_Book");
         fs::create_dir_all(&book_dir).unwrap();
         fs::write(book_dir.join("Sample_Book.md"), "# Sample Book\n\nBody\n").unwrap();
+        write_publication_evidence_fixture(&book_dir.join("Sample_Book.md"), "pdf");
         fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
         Ok(RunnerCommandResult {
             stdout: String::new(),
@@ -842,6 +1586,7 @@ impl RunnerCommandExecutor for MultiBookLayoutExecutor {
                 format!("# {title}\n\nBody of {title}\n"),
             )
             .unwrap();
+            write_publication_evidence_fixture(&book_dir.join(format!("{title}.md")), "pdf");
             fs::write(
                 book_dir.join(format!("{title}.html")),
                 format!("<h1>{title}</h1>\n"),
@@ -1425,7 +2170,7 @@ struct TranslationEngineFixtureExecutor {
     requested_units: Mutex<Vec<Vec<String>>>,
     expected_second_pass_enabled: bool,
     expected_text_cleanup: bool,
-    expected_custom_instructions: Option<BookPipelineCustomInstructions>,
+    expected_prompt_pack_id: &'static str,
     merge_translation_paragraphs: bool,
     // Emitted on every completed unit, so a test can drive the runner's
     // handling of a glossary warning without a real model to disobey.
@@ -1440,7 +2185,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
-            expected_custom_instructions: None,
+            expected_prompt_pack_id: "builtin.structure-fidelity",
             merge_translation_paragraphs: false,
             glossary_violations: Vec::new(),
         }
@@ -1453,7 +2198,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: true,
             expected_text_cleanup: false,
-            expected_custom_instructions: None,
+            expected_prompt_pack_id: "builtin.four-dimension-refinement",
             merge_translation_paragraphs: false,
             glossary_violations: Vec::new(),
         }
@@ -1466,20 +2211,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: true,
-            expected_custom_instructions: None,
-            merge_translation_paragraphs: false,
-            glossary_violations: Vec::new(),
-        }
-    }
-
-    fn with_custom_instructions(custom_instructions: BookPipelineCustomInstructions) -> Self {
-        Self {
-            fail_once: Mutex::new(None),
-            failure_code: "translation_structure_invalid".into(),
-            requested_units: Mutex::new(Vec::new()),
-            expected_second_pass_enabled: true,
-            expected_text_cleanup: false,
-            expected_custom_instructions: Some(custom_instructions),
+            expected_prompt_pack_id: "builtin.structure-fidelity",
             merge_translation_paragraphs: false,
             glossary_violations: Vec::new(),
         }
@@ -1492,7 +2224,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
-            expected_custom_instructions: None,
+            expected_prompt_pack_id: "builtin.structure-fidelity",
             merge_translation_paragraphs: false,
             glossary_violations: Vec::new(),
         }
@@ -1512,7 +2244,7 @@ impl TranslationEngineFixtureExecutor {
             requested_units: Mutex::new(Vec::new()),
             expected_second_pass_enabled: false,
             expected_text_cleanup: false,
-            expected_custom_instructions: None,
+            expected_prompt_pack_id: "builtin.structure-fidelity",
             merge_translation_paragraphs: true,
             glossary_violations: Vec::new(),
         }
@@ -1538,7 +2270,7 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
         assert_eq!(command.kind, RunnerCommandKind::Process);
         assert_eq!(command.label, TRANSLATION_ENGINE_COMMAND_LABEL);
         assert_eq!(command.program, PathBuf::from("uv"));
-        let repo_root = local_reading_repo_root().unwrap();
+        let repo_root = bundled_resource_root().unwrap();
         assert_eq!(command.cwd.as_deref(), Some(repo_root.as_path()));
         assert_eq!(command.accepted_exit_codes, vec![0, 1]);
         let manifest_path = PathBuf::from(&command.args[5]);
@@ -1562,13 +2294,11 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
         assert_eq!(manifest["targetLanguage"], "zh-Hans");
         assert_eq!(manifest["providerProfileId"], "fake-provider-profile");
         assert_eq!(manifest["providerConfigId"], "fake-provider-config");
-        match &self.expected_custom_instructions {
-            Some(custom_instructions) => assert_eq!(
-                manifest["customInstructions"],
-                serde_json::to_value(custom_instructions).unwrap()
-            ),
-            None => assert!(manifest.get("customInstructions").is_none()),
-        }
+        assert!(manifest.get("customInstructions").is_none());
+        assert_eq!(
+            manifest["promptPack"]["packId"],
+            self.expected_prompt_pack_id
+        );
         assert_eq!(
             manifest["secondPassEnabled"],
             self.expected_second_pass_enabled
@@ -1593,8 +2323,8 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
             let task: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(task_path).unwrap()).unwrap();
             requested.push((
-                task["chapterId"].as_str().unwrap().to_string(),
-                task["sourceChapterPath"].as_str().unwrap().to_string(),
+                task["unitId"].as_str().unwrap().to_string(),
+                task["sourceUnitPath"].as_str().unwrap().to_string(),
             ));
         }
         self.requested_units.lock().unwrap().push(
@@ -1694,19 +2424,11 @@ impl RunnerCommandExecutor for TranslationEngineFixtureExecutor {
 #[derive(Default)]
 struct TranslationSampleFixtureExecutor {
     requests: Mutex<Vec<(String, String)>>,
-    // Recorded so a test can assert the sample manifest carries the same
-    // translation settings as the full run; without them the preview shows a
-    // translation the real run would not produce.
-    prompt_inputs: Mutex<Vec<(serde_json::Value, serde_json::Value)>>,
 }
 
 impl TranslationSampleFixtureExecutor {
     fn requests(&self) -> Vec<(String, String)> {
         self.requests.lock().unwrap().clone()
-    }
-
-    fn prompt_inputs(&self) -> Vec<(serde_json::Value, serde_json::Value)> {
-        self.prompt_inputs.lock().unwrap().clone()
     }
 }
 
@@ -1742,14 +2464,6 @@ impl RunnerCommandExecutor for TranslationSampleFixtureExecutor {
             .lock()
             .unwrap()
             .push((profile, config.clone()));
-        self.prompt_inputs.lock().unwrap().push((
-            manifest["textCleanup"].clone(),
-            manifest
-                .get("customInstructions")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        ));
-
         let units = manifest["units"].as_array().unwrap();
         assert_eq!(units.len(), 5);
         let mut chapter_ids = Vec::new();
@@ -1759,7 +2473,7 @@ impl RunnerCommandExecutor for TranslationSampleFixtureExecutor {
                 .join(unit["taskManifestPath"].as_str().unwrap());
             let task: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(task_path).unwrap()).unwrap();
-            chapter_ids.push(task["chapterId"].as_str().unwrap().to_string());
+            chapter_ids.push(task["unitId"].as_str().unwrap().to_string());
         }
         let samples = chapter_ids[1..4]
             .iter()
@@ -1787,6 +2501,8 @@ impl RunnerCommandExecutor for TranslationSampleFixtureExecutor {
 struct ReadingPipelineFixtureExecutor {
     translation: TranslationEngineFixtureExecutor,
     reading_epubcheck_passes: bool,
+    structural_readability_passes: bool,
+    renderer_version_mismatch: bool,
     digest_epubcheck_passes: bool,
     digest_enabled: bool,
     bilingual_fallback: bool,
@@ -1798,6 +2514,8 @@ impl ReadingPipelineFixtureExecutor {
         Self {
             translation: TranslationEngineFixtureExecutor::succeeding(),
             reading_epubcheck_passes: true,
+            structural_readability_passes: true,
+            renderer_version_mismatch: false,
             digest_epubcheck_passes: true,
             digest_enabled: false,
             bilingual_fallback: false,
@@ -1809,6 +2527,8 @@ impl ReadingPipelineFixtureExecutor {
         Self {
             translation: TranslationEngineFixtureExecutor::succeeding(),
             reading_epubcheck_passes: true,
+            structural_readability_passes: true,
+            renderer_version_mismatch: false,
             digest_epubcheck_passes: true,
             digest_enabled: true,
             bilingual_fallback: false,
@@ -1820,6 +2540,21 @@ impl ReadingPipelineFixtureExecutor {
         Self {
             translation: TranslationEngineFixtureExecutor::succeeding(),
             reading_epubcheck_passes: false,
+            structural_readability_passes: true,
+            renderer_version_mismatch: false,
+            digest_epubcheck_passes: true,
+            digest_enabled: false,
+            bilingual_fallback: false,
+            command_labels: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn failing_structural_readability() -> Self {
+        Self {
+            translation: TranslationEngineFixtureExecutor::succeeding(),
+            reading_epubcheck_passes: true,
+            structural_readability_passes: false,
+            renderer_version_mismatch: false,
             digest_epubcheck_passes: true,
             digest_enabled: false,
             bilingual_fallback: false,
@@ -1831,6 +2566,8 @@ impl ReadingPipelineFixtureExecutor {
         Self {
             translation: TranslationEngineFixtureExecutor::with_paragraph_mismatch(),
             reading_epubcheck_passes: true,
+            structural_readability_passes: true,
+            renderer_version_mismatch: false,
             digest_epubcheck_passes: true,
             digest_enabled: false,
             bilingual_fallback: true,
@@ -1842,10 +2579,19 @@ impl ReadingPipelineFixtureExecutor {
         Self {
             translation: TranslationEngineFixtureExecutor::succeeding(),
             reading_epubcheck_passes: true,
+            structural_readability_passes: true,
+            renderer_version_mismatch: false,
             digest_epubcheck_passes: false,
             digest_enabled: true,
             bilingual_fallback: false,
             command_labels: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn mismatched_renderer_version() -> Self {
+        Self {
+            renderer_version_mismatch: true,
+            ..Self::passing()
         }
     }
 
@@ -1867,14 +2613,14 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                 assert_eq!(command.program, PathBuf::from("node"));
                 assert_eq!(command.cwd.as_deref(), Some(command.output_dir.as_path()));
                 assert_eq!(command.accepted_exit_codes, vec![0]);
-                assert_eq!(command.args.len(), 1);
+                assert_eq!(command.args.len(), 2);
+                assert_eq!(command.args[0], "--jitless");
                 assert_eq!(
-                    Path::new(&command.args[0])
+                    Path::new(&command.args[1])
                         .file_name()
                         .and_then(|name| name.to_str()),
-                    Some("build_epub.js")
+                    Some("build_epub.cjs")
                 );
-                assert!(command.output_dir.join("output/reading/book.md").is_file());
                 let final_dir = command.output_dir.join("chapters/final");
                 let mut final_paths = fs::read_dir(&final_dir)
                     .unwrap()
@@ -1906,18 +2652,21 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
             }
             BILINGUAL_BUILD_COMMAND_LABEL => {
                 assert_eq!(command.kind, RunnerCommandKind::Process);
-                assert_eq!(command.program, PathBuf::from("python3"));
+                assert_eq!(command.program, PathBuf::from("uv"));
                 assert_eq!(command.cwd.as_deref(), Some(command.output_dir.as_path()));
                 assert_eq!(command.accepted_exit_codes, vec![0]);
-                assert_eq!(command.args.len(), 3);
+                assert_eq!(command.args.len(), 7);
+                assert_eq!(command.args[0], "run");
+                assert_eq!(command.args[1], "--project");
+                assert_eq!(command.args[3], "python");
                 assert_eq!(
-                    Path::new(&command.args[0])
+                    Path::new(&command.args[4])
                         .file_name()
                         .and_then(|name| name.to_str()),
                     Some("build_bilingual_epub.py")
                 );
-                assert_eq!(command.args[1], "--book-root");
-                assert_eq!(command.args[2], display_path(&command.output_dir));
+                assert_eq!(command.args[5], "--book-root");
+                assert_eq!(command.args[6], display_path(&command.output_dir));
                 assert!(command
                     .output_dir
                     .join("metadata/source_map.json")
@@ -1989,7 +2738,11 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                             "nFatal": 0,
                             "nError": if epubcheck_passes { 0 } else { 1 },
                             "nWarning": if epubcheck_passes { 1 } else { 0 },
-                        }
+                        },
+                        "messages": if epubcheck_passes { Vec::<serde_json::Value>::new() } else { vec![serde_json::json!({
+                            "ID": "OPF-999",
+                            "message": "fixture package failure"
+                        })] }
                     }))
                     .unwrap()
                         + "\n",
@@ -2005,12 +2758,88 @@ impl RunnerCommandExecutor for ReadingPipelineFixtureExecutor {
                     log_summary: vec!["EPUBCheck fixture completed".into()],
                 })
             }
+            STRUCTURAL_READABILITY_COMMAND_LABEL => {
+                assert_eq!(command.kind, RunnerCommandKind::Process);
+                assert_eq!(command.program, PathBuf::from("uv"));
+                assert_eq!(command.accepted_exit_codes, vec![0]);
+                let managed_chromium = command
+                    .env
+                    .iter()
+                    .find(|(key, _)| key == "BIBLIOSMITH_CHROME")
+                    .map(|(_, value)| PathBuf::from(value))
+                    .expect("structural audit must be pinned to the hashed managed Chromium");
+                assert!(managed_chromium.is_file());
+                let renderer_version = chromium_version(&managed_chromium).unwrap();
+                let renderer_version = if self.renderer_version_mismatch {
+                    format!("{renderer_version}0")
+                } else {
+                    renderer_version
+                };
+                assert_eq!(command.args[0], "run");
+                assert_eq!(command.args[1], "--project");
+                assert_eq!(command.args[3], "python");
+                assert_eq!(
+                    Path::new(&command.args[4])
+                        .file_name()
+                        .and_then(|name| name.to_str()),
+                    Some("audit_epub.py")
+                );
+                assert_eq!(command.args[5], "--epub");
+                assert!(Path::new(&command.args[6]).is_file());
+                assert_eq!(command.args[7], "--publication-map");
+                assert!(Path::new(&command.args[8]).is_file());
+                assert_eq!(command.args[9], "--output");
+                let report_path = PathBuf::from(&command.args[10]);
+                let findings = if self.structural_readability_passes {
+                    Vec::new()
+                } else {
+                    vec![serde_json::json!({
+                        "severity": "error",
+                        "code": "navigation.order",
+                        "message": "fixture structural mismatch"
+                    })]
+                };
+                fs::write(
+                    &report_path,
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": STRUCTURAL_READABILITY_REPORT_SCHEMA,
+                        "generatedAt": "2026-08-05T12:00:00+00:00",
+                        "auditor": { "name": "BiblioSmith structural readability auditor", "version": "1" },
+                        "status": if self.structural_readability_passes { "passed" } else { "failed" },
+                        "epub": Path::new(&command.args[6]).file_name().unwrap().to_string_lossy(),
+                        "checks": {},
+                        "metrics": {
+                            "findings": findings.len(),
+                            "viewportSmoke": [{
+                                "renderer": "Chromium",
+                                "rendererVersion": renderer_version
+                            }]
+                        },
+                        "findings": findings,
+                    }))
+                    .unwrap()
+                        + "\n",
+                )
+                .unwrap();
+                Ok(RunnerCommandResult {
+                    stdout: format!(
+                        "structural-readability: {}",
+                        if self.structural_readability_passes {
+                            "passed"
+                        } else {
+                            "failed"
+                        }
+                    ),
+                    stderr: String::new(),
+                    log_summary: vec!["Structural readability fixture completed".into()],
+                })
+            }
             DIGEST_BUILD_COMMAND_LABEL if self.digest_enabled => {
                 assert_eq!(command.kind, RunnerCommandKind::Process);
                 assert_eq!(command.program, PathBuf::from("uv"));
                 assert_eq!(
                     command.cwd.as_deref(),
-                    Some(local_reading_repo_root().unwrap().as_path())
+                    Some(bundled_resource_root().unwrap().as_path())
                 );
                 assert_eq!(command.accepted_exit_codes, vec![0]);
                 assert_eq!(
@@ -2214,6 +3043,115 @@ fn temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("book-pipeline-{name}-{suffix}"))
 }
 
+fn write_publication_evidence_fixture(markdown_path: &Path, source_format: &str) {
+    let markdown = fs::read_to_string(markdown_path).unwrap();
+    let stem = markdown_path.file_stem().unwrap().to_str().unwrap();
+    let mineru_sidecar_name = format!("{stem}.mineru");
+    let sidecar_name = if markdown_path.with_file_name(&mineru_sidecar_name).is_dir() {
+        mineru_sidecar_name
+    } else {
+        format!("{stem}_assets")
+    };
+    let retained = markdown_path
+        .with_file_name(&sidecar_name)
+        .join("source_documents/fixture/source.md");
+    fs::create_dir_all(retained.parent().unwrap()).unwrap();
+    fs::write(&retained, &markdown).unwrap();
+    let retained_relative = format!("{sidecar_name}/source_documents/fixture/source.md");
+    let mut sections =
+        serde_json::to_value(split_source_markdown(&markdown).publication_sections).unwrap();
+    for section in sections.as_array_mut().unwrap() {
+        let id = section["id"].as_str().unwrap_or("fixture-section");
+        section["sourceHref"] = serde_json::json!(format!("fixture://{id}"));
+        section["sourceFiles"] = serde_json::json!([retained_relative.as_str()]);
+        section["evidence"] = serde_json::json!(["test extractor retained source"]);
+        section["confidence"] = serde_json::json!(1.0);
+        section["anomalies"] = serde_json::json!([]);
+    }
+    let evidence = serde_json::json!({
+        "schema": "publication-extraction-evidence-v2",
+        "sourceFormat": source_format,
+        "extractionEngine": "test-extractor-fixture",
+        "sourceDocuments": [{
+            "path": retained_relative,
+            "startLine": 1,
+            "endLine": markdown.lines().count(),
+            "pages": [],
+            "kind": "fixture_source_markdown",
+            "sha256": sha256_file(&retained).unwrap(),
+            "sourceHref": format!("fixture://{stem}")
+        }],
+        "sections": sections,
+        "notes": []
+    });
+    fs::write(
+        markdown_path.with_extension("publication.json"),
+        serde_json::to_string_pretty(&evidence).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+fn refresh_project_manifest_artifact(store: &BookPipelineStore, job_id: &str, project_root: &Path) {
+    let manifest_path = project_root.join("metadata/source_manifest.json");
+    let mut state = store.load().unwrap();
+    let job = state.jobs.iter_mut().find(|job| job.id == job_id).unwrap();
+    let child = job
+        .children
+        .iter_mut()
+        .find(|child| {
+            child.local_project_root.as_deref() == Some(display_path(project_root).as_str())
+        })
+        .unwrap();
+    let artifact = child
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.kind == "source_manifest")
+        .unwrap();
+    let old_artifact_id = artifact.artifact_id.clone();
+    let manifest_sha256 = sha256_file(&manifest_path).unwrap();
+    artifact.sha256 = Some(manifest_sha256.clone());
+    artifact.artifact_id = format!(
+        "artifact-{}",
+        sha256_str(&format!(
+            "{}\0{}\0{}",
+            artifact.kind, artifact.path, manifest_sha256
+        ))
+    );
+    let new_artifact_id = artifact.artifact_id.clone();
+    for stage in &mut child.stages {
+        for artifact_id in &mut stage.artifact_ids {
+            if *artifact_id == old_artifact_id {
+                *artifact_id = new_artifact_id.clone();
+            }
+        }
+    }
+    store.save(&state).unwrap();
+}
+
+fn bind_project_publication_evidence(
+    store: &BookPipelineStore,
+    job_id: &str,
+    project_root: &Path,
+    structure_kind: &str,
+) {
+    let evidence_path = project_root.join("metadata/extracted_publication_evidence.json");
+    let manifest_path = project_root.join("metadata/source_manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["structure_evidence_kind"] = serde_json::json!(structure_kind);
+    manifest["publication_evidence_path"] =
+        serde_json::json!("metadata/extracted_publication_evidence.json");
+    manifest["publication_evidence_sha256"] =
+        serde_json::json!(sha256_file(&evidence_path).unwrap());
+    manifest["publication_evidence_required"] = serde_json::json!(true);
+    fs::write(
+        manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    refresh_project_manifest_artifact(store, job_id, project_root);
+}
+
 fn fake_source(behavior: Option<&str>) -> BookPipelineSource {
     BookPipelineSource {
         kind: "fake".into(),
@@ -2234,6 +3172,7 @@ fn fake_translation_intent() -> BookPipelineTranslationIntent {
         profile_id: "fake-provider-profile".into(),
         config_id: "fake-provider-config".into(),
         skill_ids: Vec::new(),
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         second_pass_enabled: false,
         text_cleanup: false,
         digest_mode: false,
@@ -3014,6 +3953,7 @@ fn fast_translation_intent() -> BookPipelineTranslationIntent {
         profile_id: "fixture-profile".into(),
         config_id: "fixture-config".into(),
         skill_ids: Vec::new(),
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         second_pass_enabled: false,
         text_cleanup: false,
         digest_mode: false,
@@ -3085,10 +4025,165 @@ fn delete_job_removes_a_queued_job_and_persists() {
     )
     .unwrap();
 
-    let state = delete_job(&store, &job.id, None, true).unwrap();
+    let state = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: job.id.clone(),
+            child_id: None,
+        }],
+        true,
+    )
+    .unwrap();
 
     assert!(state.jobs.is_empty());
     assert!(store.load().unwrap().jobs.is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn batch_remove_is_atomic_and_keeps_local_project_files() {
+    let root = temp_root("batch-remove-shelf");
+    let store = BookPipelineStore::for_test(&root);
+    let first = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let second = queue_job(
+        &store,
+        fake_source(None),
+        "conversion_only".into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let first_project = root.join("books/local/zh-Hans/first");
+    let second_project = root.join("books/local/zh-Hans/second");
+    fs::create_dir_all(&first_project).unwrap();
+    fs::create_dir_all(&second_project).unwrap();
+    fs::write(first_project.join("book.epub"), "first").unwrap();
+    fs::write(second_project.join("book.epub"), "second").unwrap();
+
+    let rejected = remove_books_from_shelf_in_store(
+        &store,
+        &[
+            BookPipelineShelfSelection {
+                job_id: first.id.clone(),
+                child_id: Some(first.children[0].id.clone()),
+            },
+            BookPipelineShelfSelection {
+                job_id: "missing-job".into(),
+                child_id: Some("missing-child".into()),
+            },
+        ],
+        true,
+    )
+    .unwrap_err();
+    assert!(rejected.contains("not found"));
+    assert_eq!(store.load().unwrap().jobs.len(), 2, "no partial removal");
+
+    let removed = remove_books_from_shelf_in_store(
+        &store,
+        &[
+            BookPipelineShelfSelection {
+                job_id: first.id,
+                child_id: Some(first.children[0].id.clone()),
+            },
+            BookPipelineShelfSelection {
+                job_id: second.id,
+                child_id: Some(second.children[0].id.clone()),
+            },
+        ],
+        true,
+    )
+    .unwrap();
+
+    assert!(removed.jobs.is_empty());
+    assert!(first_project.join("book.epub").is_file());
+    assert!(second_project.join("book.epub").is_file());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn explicit_project_migration_copies_verifies_and_rebinds_open_output() {
+    let root = temp_root("explicit-project-migration");
+    let old_project = root.join("old-repository/books/local/zh-Hans/001_Example");
+    let old_reading = old_project.join("output/reading");
+    fs::create_dir_all(&old_reading).unwrap();
+    let old_epub = old_reading.join("book.epub");
+    fs::write(&old_epub, "verified reading output").unwrap();
+    let workspace = root.join("Documents/BiblioSmith");
+    fs::create_dir_all(workspace.join("books/local/zh-Hans")).unwrap();
+
+    let store = MemoryStateStore::new(&root);
+    let mut queued = queue_job(
+        &store,
+        fake_source(None),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let child_id = {
+        let child = queued.children.first_mut().unwrap();
+        child.local_project_root = Some(display_path(&old_project));
+        child.stages = vec![BookPipelineStage {
+            stage_id: "validate_reading".into(),
+            status: STATUS_COMPLETED.into(),
+            ..BookPipelineStage::default()
+        }];
+        let mut artifact = BookPipelineArtifact {
+            kind: "reading_epub".into(),
+            path: display_path(&old_epub),
+            ..BookPipelineArtifact::default()
+        };
+        enrich_artifact(
+            &mut artifact,
+            Some(&child.id),
+            &queued.source,
+            &child.source,
+            &child.stages,
+            1,
+            &queued.created_at,
+        );
+        let child_id = child.id.clone();
+        child.artifacts = vec![artifact];
+        child_id
+    };
+    let old_artifact_id = queued.children[0].artifacts[0].artifact_id.clone();
+    derive_job(&mut queued);
+    *store.state.lock().unwrap() = BookPipelineState {
+        schema_version: JOB_SCHEMA_VERSION.into(),
+        revision: 1,
+        jobs: vec![queued.clone()],
+    };
+
+    let migrated =
+        migrate_book_project_in_store(&store, &queued.id, Some(&child_id), &workspace, true)
+            .unwrap();
+    let migrated_job = &migrated.jobs[0];
+    let migrated_child = &migrated_job.children[0];
+    let destination = workspace.join("books/local/zh-Hans/001_Example");
+
+    assert_eq!(
+        migrated_child.local_project_root.as_deref(),
+        Some(display_path(&destination).as_str())
+    );
+    assert_eq!(
+        fs::read(destination.join("output/reading/book.epub")).unwrap(),
+        b"verified reading output"
+    );
+    assert!(old_epub.exists(), "the source project is never removed");
+    assert_ne!(migrated_child.artifacts[0].artifact_id, old_artifact_id);
+    assert!(migrated_child.artifacts[0]
+        .path
+        .starts_with(&display_path(&destination)));
+    let opened =
+        resolve_book_pipeline_open_target(migrated_job, std::slice::from_ref(&workspace)).unwrap();
+    assert_eq!(opened.kind, "reading_output_directory");
+    assert!(opened
+        .path
+        .starts_with(fs::canonicalize(workspace).unwrap()));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -3117,7 +4212,15 @@ fn dropping_one_book_of_a_batch_keeps_the_rest_and_the_frozen_membership() {
     let survivors = job.children.len() - 1;
     let membership_before = job.membership.clone();
 
-    let state = delete_job(&store, &job.id, Some(&dropped), true).unwrap();
+    let state = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: job.id.clone(),
+            child_id: Some(dropped.clone()),
+        }],
+        true,
+    )
+    .unwrap();
 
     let stored = state.jobs.iter().find(|item| item.id == job.id).unwrap();
     assert_eq!(
@@ -3150,7 +4253,15 @@ fn dropping_one_book_of_a_batch_keeps_the_rest_and_the_frozen_membership() {
     // a shelf row nobody could dismiss.
     for child in stored.children.clone() {
         if child.removed_at.is_none() {
-            delete_job(&store, &job.id, Some(&child.id), true).unwrap();
+            remove_books_from_shelf_in_store(
+                &store,
+                &[BookPipelineShelfSelection {
+                    job_id: job.id.clone(),
+                    child_id: Some(child.id.clone()),
+                }],
+                true,
+            )
+            .unwrap();
         }
     }
     assert!(store.load().unwrap().jobs.is_empty());
@@ -3172,7 +4283,15 @@ fn dropping_the_only_book_removes_the_job() {
     .unwrap();
     let child_id = job.children[0].id.clone();
 
-    let state = delete_job(&store, &job.id, Some(&child_id), true).unwrap();
+    let state = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: job.id.clone(),
+            child_id: Some(child_id.clone()),
+        }],
+        true,
+    )
+    .unwrap();
 
     assert!(state.jobs.is_empty());
     let _ = fs::remove_dir_all(root);
@@ -3190,11 +4309,27 @@ fn delete_job_requires_explicit_approval_and_a_known_job() {
     )
     .unwrap();
 
-    let refused = delete_job(&store, &job.id, None, false).unwrap_err();
+    let refused = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: job.id.clone(),
+            child_id: None,
+        }],
+        false,
+    )
+    .unwrap_err();
     assert!(refused.contains("Explicit approval"), "got: {refused}");
     assert_eq!(store.load().unwrap().jobs.len(), 1);
 
-    let missing = delete_job(&store, "job-nonexistent", None, true).unwrap_err();
+    let missing = remove_books_from_shelf_in_store(
+        &store,
+        &[BookPipelineShelfSelection {
+            job_id: "job-nonexistent".into(),
+            child_id: None,
+        }],
+        true,
+    )
+    .unwrap_err();
     assert!(missing.contains("not found"), "got: {missing}");
     let _ = fs::remove_dir_all(root);
 }
@@ -3220,7 +4355,7 @@ fn a_job_with_a_running_stage_counts_as_actively_running() {
 
 #[test]
 fn book_ocr_conversion_root_prefers_monorepo_ocr_package() {
-    let root = book_ocr_conversion_root();
+    let root = book_ocr_conversion_root().unwrap();
 
     assert!(
         root.ends_with(Path::new("packages").join("ocr")),
@@ -3241,6 +4376,8 @@ fn legacy_jobs_migrate_to_versioned_parent_child_stage_state() {
         serde_json::json!({
             "id": id,
             "mode": "convert_then_translate",
+            "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+            "promptPackSelectionSource": "default",
             "source": {
                 "kind": "zotero_attachment",
                 "title": "Fabricated source",
@@ -3459,6 +4596,8 @@ fn stored_conversion_only_jobs_still_open_and_keep_their_three_stage_shape() {
         "jobs": [{
             "id": "stored-conversion-only",
             "mode": MODE_CONVERSION_ONLY,
+            "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+            "promptPackSelectionSource": "default",
             "source": {
                 "kind": "zotero_attachment",
                 "title": "Fabricated source",
@@ -3534,6 +4673,7 @@ fn queued_translation_modes_and_binding_identity_survive_persistence() {
             profile_id: "fake-provider-profile".into(),
             config_id: "fake-provider-config".into(),
             skill_ids: Vec::new(),
+            prompt_pack_reference: four_dimension_prompt_pack_reference(),
             second_pass_enabled: true,
             text_cleanup: true,
             digest_mode: false,
@@ -3551,6 +4691,7 @@ fn queued_translation_modes_and_binding_identity_survive_persistence() {
             profile_id: "fake-agent-profile".into(),
             config_id: "fake-agent-config".into(),
             skill_ids: vec!["expert-translation-quality".into()],
+            prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT),
             second_pass_enabled: false,
             text_cleanup: false,
             digest_mode: false,
@@ -3614,6 +4755,7 @@ fn queued_digest_mode_is_book_level_and_survives_persistence() {
         "profileId": "fake-provider-profile",
         "configId": "fake-provider-config",
         "skillIds": [],
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         "secondPassEnabled": false,
         "digestMode": true,
     }))
@@ -3623,6 +4765,7 @@ fn queued_digest_mode_is_book_level_and_survives_persistence() {
         "profileId": "fake-agent-profile",
         "configId": "fake-agent-config",
         "skillIds": ["expert-translation-quality"],
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT),
         "secondPassEnabled": false,
         "digestMode": true,
     }))
@@ -3675,6 +4818,7 @@ fn queued_output_formats_are_ordered_deduplicated_and_persisted() {
             profile_id: "fake-provider-profile".into(),
             config_id: "fake-provider-config".into(),
             skill_ids: Vec::new(),
+            prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
             second_pass_enabled: false,
             text_cleanup: false,
             digest_mode: false,
@@ -3712,6 +4856,7 @@ fn expert_translation_intent_rejects_fast_only_second_pass() {
         profile_id: "fake-agent-profile".into(),
         config_id: "fake-agent-config".into(),
         skill_ids: vec!["expert-translation-quality".into()],
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT),
         second_pass_enabled: true,
         text_cleanup: false,
         digest_mode: false,
@@ -3729,6 +4874,7 @@ fn expert_translation_intent_rejects_fast_only_text_cleanup() {
         profile_id: "fake-agent-profile".into(),
         config_id: "fake-agent-config".into(),
         skill_ids: vec!["expert-translation-quality".into()],
+        prompt_pack_reference: default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT),
         second_pass_enabled: false,
         text_cleanup: true,
         digest_mode: false,
@@ -3748,6 +4894,8 @@ fn legacy_collection_migration_preserves_route_union_and_parent_handoff_state() 
         "jobs": [{
             "id": "legacy-collection-handoff",
             "mode": MODE_CONVERT_THEN_TRANSLATE,
+            "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+            "promptPackSelectionSource": "default",
             "source": {
                 "kind": "zotero_collection",
                 "title": "Fabricated collection",
@@ -6175,17 +7323,6 @@ fn reaching_the_same_terminal_status_again_delivers_one_webhook() {
 }
 
 #[test]
-fn webhook_config_reads_only_the_requested_dotenv_value() {
-    let raw = "# private config\nOTHER_SETTING=ignored\nexport BOOK_PIPELINE_WEBHOOK_URL='https://localhost/hooks/books'\n";
-
-    assert_eq!(
-        dotenv_value(raw, "BOOK_PIPELINE_WEBHOOK_URL").as_deref(),
-        Some("https://localhost/hooks/books")
-    );
-    assert_eq!(dotenv_value(raw, "MISSING"), None);
-}
-
-#[test]
 fn concurrent_saves_reject_one_stale_revision_and_keep_valid_json() {
     let root = temp_root("concurrent-save-protection");
     let store = std::sync::Arc::new(BookPipelineStore::for_test(&root));
@@ -6393,23 +7530,6 @@ fn every_ocr_entry_point_runs_through_the_workspace_venv() {
     );
 
     fs::remove_dir_all(&root).ok();
-}
-
-// `~/BiblioSmith` is a guess, not a promise. Handing a missing directory to
-// the runner as its cwd only produced an errno about a path the user never
-// picked, so the check has to name the settings that fix it instead.
-#[test]
-fn missing_repo_root_names_the_settings_that_fix_it() {
-    let missing = temp_root("repo-root-absent");
-    let error = existing_repo_root(missing.clone()).unwrap_err();
-
-    assert!(error.contains(&display_path(&missing)), "{error}");
-    assert!(error.contains("设置"), "{error}");
-    assert!(error.contains("BIBLIOSMITH_HOME"), "{error}");
-
-    fs::create_dir_all(&missing).unwrap();
-    assert_eq!(existing_repo_root(missing.clone()).unwrap(), missing);
-    fs::remove_dir_all(&missing).ok();
 }
 
 #[test]
@@ -8233,10 +9353,14 @@ fn markdown_artifact_handoff_creates_translation_ready_project() {
         "fixture",
     )
     .unwrap();
+    let original_pdf = root.join("original.pdf");
+    fs::write(&original_pdf, b"%PDF original source\n").unwrap();
+    let mut source = fake_source(None);
+    source.path = Some(display_path(&original_pdf));
     let store = BookPipelineStore::for_test(&root);
     let job = queue_job(
         &store,
-        fake_source(None),
+        source,
         "conversion_only".into(),
         BookPipelinePreviewConfig::default(),
     )
@@ -8267,8 +9391,8 @@ fn markdown_artifact_handoff_creates_translation_ready_project() {
         fs::read_to_string(project_root.join("metadata").join("source_manifest.json")).unwrap();
     assert!(manifest.contains("cleaned_markdown_ready"));
     assert_eq!(
-        fs::read_to_string(project_root.join("source").join("source.md")).unwrap(),
-        fs::read_to_string(project_root.join("source").join("original.md")).unwrap()
+        fs::read(project_root.join("source").join("original.pdf")).unwrap(),
+        b"%PDF original source\n"
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -9028,6 +10152,12 @@ fn mineru_handoff_preserves_assets_and_split_keeps_links_resolvable() {
         "# Wrong per-part candidate\n",
     )
     .unwrap();
+    fs::write(
+        &source_path,
+        "# One\n\n![Figure](source.mineru/images/figure.png)\n",
+    )
+    .unwrap();
+    write_publication_evidence_fixture(&source_path, "mineru");
     let store = BookPipelineStore::for_test(&root);
     let job_id = handoff_ready_child_job(
         &store,
@@ -9049,6 +10179,18 @@ fn mineru_handoff_preserves_assets_and_split_keeps_links_resolvable() {
         .all(|artifact| { !artifact.path.contains("source.mineru/parts/0001/part.md") }));
 
     let split = advance_job(&store, &job_id, None, false).unwrap();
+    assert_eq!(
+        child_stage_status(&split, "split"),
+        STATUS_COMPLETED,
+        "{:?}",
+        split.children[0].last_error
+    );
+    let structure_report: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_root.join("qa/structure_recovery.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(structure_report["source"], "mineru_layout_evidence");
+    assert_eq!(structure_report["status"], "passed");
     let chapter_path = split.children[0]
         .artifacts
         .iter()
@@ -9071,7 +10213,7 @@ fn mineru_handoff_preserves_assets_and_split_keeps_links_resolvable() {
 }
 
 const PADDLE_ASSET_MARKDOWN: &str =
-    "# Sample Book\n\nChapter One\n\n![Figure](Sample_Book_assets/figure.png)\n";
+    "# Sample Book\n\n## Chapter One\n\nA paragraph with punctuation.\n\n![Figure](Sample_Book_assets/figure.png)\n";
 
 /// Writes the layout `packages/ocr/scripts/pdf_to_html_paddleocr.py` produces:
 /// the cleaned Markdown beside its `<stem>_assets` directory, with the image
@@ -9085,6 +10227,7 @@ impl RunnerCommandExecutor for PaddleAssetsLayoutExecutor {
         let assets_dir = book_dir.join("Sample_Book_assets");
         fs::create_dir_all(&assets_dir).unwrap();
         fs::write(book_dir.join("Sample_Book.md"), PADDLE_ASSET_MARKDOWN).unwrap();
+        write_publication_evidence_fixture(&book_dir.join("Sample_Book.md"), "ocr");
         fs::write(book_dir.join("Sample_Book.html"), "<h1>Sample Book</h1>\n").unwrap();
         fs::write(assets_dir.join("figure.png"), b"png-fixture").unwrap();
         Ok(RunnerCommandResult {
@@ -9153,6 +10296,15 @@ fn paddle_handoff_copies_the_assets_directory_and_keeps_links_resolvable() {
         manifest.contains("source/Sample_Book_assets"),
         "the manifest must record where the resources landed: {manifest}"
     );
+
+    let split = advance_job(&store, &job.id, None, false).unwrap();
+    assert_eq!(child_stage_status(&split, "split"), STATUS_COMPLETED);
+    let structure_report: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_root.join("qa/structure_recovery.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(structure_report["source"], "ocr_layout_evidence");
+    assert_eq!(structure_report["status"], "passed");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -9174,15 +10326,21 @@ fn fake_handoff_ready_job_with_text_cleanup(store: &BookPipelineStore, repo: &Pa
         "profileId": "fake-provider-profile",
         "configId": "fake-provider-config",
         "skillIds": [],
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
         "secondPassEnabled": false,
         "textCleanup": true,
         "digestMode": false,
         "outputFormats": default_output_formats(),
     }))
     .unwrap();
+    let original = repo.join("fixtures/fake-source.txt");
+    fs::create_dir_all(original.parent().unwrap()).unwrap();
+    fs::write(&original, b"fake source fixture\n").unwrap();
+    let mut source = fake_source(None);
+    source.path = Some(display_path(&original));
     let job = queue_job_with_translation_intent(
         store,
-        fake_source(None),
+        source,
         MODE_CONVERT_THEN_TRANSLATE.into(),
         translation_intent,
         BookPipelinePreviewConfig::default(),
@@ -9226,15 +10384,25 @@ fn fake_handoff_ready_job_with_output_formats(
     digest_mode: bool,
     output_formats: Vec<String>,
 ) -> String {
+    let original = repo.join("fixtures/fake-source.txt");
+    fs::create_dir_all(original.parent().unwrap()).unwrap();
+    fs::write(&original, b"fake source fixture\n").unwrap();
+    let mut source = fake_source(None);
+    source.path = Some(display_path(&original));
     let job = queue_job_with_translation_intent(
         store,
-        fake_source(None),
+        source,
         MODE_CONVERT_THEN_TRANSLATE.into(),
         BookPipelineTranslationIntent {
             translation_mode: TRANSLATION_MODE_FAST.into(),
             profile_id: "fake-provider-profile".into(),
             config_id: "fake-provider-config".into(),
             skill_ids: Vec::new(),
+            prompt_pack_reference: if second_pass_enabled {
+                four_dimension_prompt_pack_reference()
+            } else {
+                default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST)
+            },
             second_pass_enabled,
             text_cleanup: false,
             digest_mode,
@@ -9299,6 +10467,10 @@ fn configure_expert_job(store: &BookPipelineStore, job_id: &str) {
     job.translation_profile_id = "fake-agent-profile".into();
     job.translation_config_id = "fake-agent-config".into();
     job.translation_skill_ids = vec![EXPERT_QA_SKILL_ID.into()];
+    job.prompt_pack_reference = default_prompt_pack_reference_for_mode(TRANSLATION_MODE_EXPERT);
+    for child in &mut job.children {
+        child.prompt_pack_reference = job.prompt_pack_reference.clone();
+    }
     job.updated_at = now_label();
     derive_job(job);
     store.save(&state).unwrap();
@@ -9344,12 +10516,45 @@ fn satisfy_translation_handoff(job: &BookPipelineJob) {
     for unit in handoff["units"].as_array().unwrap() {
         let unit_id = unit["unitId"].as_str().unwrap();
         let source =
-            fs::read_to_string(project_root.join(unit["sourceChapterPath"].as_str().unwrap()))
+            fs::read_to_string(project_root.join(unit["sourceUnitPath"].as_str().unwrap()))
                 .unwrap();
         let output_path = project_root.join(unit["outputPath"].as_str().unwrap());
         fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         fs::write(output_path, fixture_translation(&source, unit_id)).unwrap();
     }
+    let handoff_path = project_root.join("qa/handoffs/translate.json");
+    let handoff_sha256 = sha256_file(&handoff_path).unwrap();
+    let reference: PromptPackReference =
+        serde_json::from_value(handoff["promptPackReference"].clone()).unwrap();
+    let stage_evidence = handoff["requiredEvidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|kind| {
+            let kind = kind.as_str().unwrap();
+            (
+                kind.to_string(),
+                write_translation_stage_evidence(
+                    &project_root,
+                    kind,
+                    &reference,
+                    &handoff_sha256,
+                    serde_json::json!({}),
+                ),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let receipt = serde_json::json!({
+        "schema": "translation-prompt-pack-receipt-v1",
+        "translationHandoffSha256": handoff_sha256,
+        "promptPackReference": handoff["promptPackReference"].clone(),
+        "stageEvidence": stage_evidence,
+    });
+    fs::write(
+        project_root.join("qa/handoffs/translate-receipt.json"),
+        serde_json::to_string_pretty(&receipt).unwrap() + "\n",
+    )
+    .unwrap();
 }
 
 fn qa_handoff(job: &BookPipelineJob) -> ExpertQaHandoff {
@@ -9637,8 +10842,8 @@ fn advance_runs_prepare_and_parks_before_translation_gate() {
             .join("chapter_001.json"),
     )
     .unwrap();
-    assert!(task_manifest.contains("\"chapterId\": \"chapter_001\""));
-    assert!(task_manifest.contains("\"sourceChapterSha256\""));
+    assert!(task_manifest.contains("\"unitId\": \"chapter_001\""));
+    assert!(task_manifest.contains("\"sourceUnitSha256\""));
     assert!(!task_manifest.contains("First body paragraph"));
     let persisted = store.load().unwrap();
     let persisted_job = persisted.jobs.iter().find(|job| job.id == job_id).unwrap();
@@ -9656,20 +10861,20 @@ fn advance_runs_prepare_and_parks_before_translation_gate() {
         .clone();
     let mut toggled = advanced.clone();
     toggled.second_pass_enabled = true;
-    assert!(ready_translation_approval_gate(&mut toggled, 0));
+    assert!(!ready_translation_approval_gate(&mut toggled, 0));
     let toggled_gate = toggled.children[0]
         .stages
         .iter()
         .find(|stage| stage.stage_id == "approve_translation")
         .unwrap();
     assert!(
-        toggled_gate
+        !toggled_gate
             .approval_request
             .as_ref()
             .unwrap()
             .second_pass_enabled
     );
-    assert_ne!(
+    assert_eq!(
         toggled_gate.input_hashes["approvalBindingSha256"],
         original_binding
     );
@@ -9744,71 +10949,6 @@ fn public_gate_approval_requires_explicit_current_binding() {
     )
     .unwrap_err();
     assert!(repeated.contains("not ready"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn preflight_sample_manifest_carries_the_run_text_cleanup_and_custom_instructions() {
-    // The sample exists so a user can approve the full run on the strength of
-    // a few translated passages. It only earns that if it is translated under
-    // the same instructions -- previously it carried neither field, so anyone
-    // who had set one was judging a preview the real run would not reproduce.
-    let root = temp_root("translation-sample-prompt-inputs");
-    let repo = handoff_repo_fixture(&root);
-    let source_path = root.join("source.md");
-    let store = BookPipelineStore::for_test(&root);
-    let job_id = handoff_ready_child_job(
-        &store,
-        &repo,
-        &source_path,
-        "# One\n\nFirst.\n\n# Two\n\nSecond.\n\n# Three\n\nThird.\n\n# Four\n\nFourth.\n\n# Five\n\nFifth.\n",
-    );
-    advance_job(&store, &job_id, None, false).unwrap();
-    let prepared = advance_job(&store, &job_id, None, false).unwrap();
-    let child_id = prepared.children[0].id.clone();
-
-    let custom_instructions = BookPipelineCustomInstructions {
-        translation: Some("Use restrained literary Chinese.".into()),
-        reflection: Some("Critique anachronistic wording.".into()),
-    };
-    save_book_custom_instructions(
-        &store,
-        &job_id,
-        Some(&child_id),
-        custom_instructions.clone(),
-    )
-    .unwrap();
-    let mut state = store.load().unwrap();
-    let job = state.jobs.iter_mut().find(|job| job.id == job_id).unwrap();
-    job.text_cleanup = true;
-    job.updated_at = now_label();
-    store.save(&state).unwrap();
-
-    let executor = TranslationSampleFixtureExecutor::default();
-    run_translation_sample_with_executor(
-        &store,
-        &job_id,
-        Some(&child_id),
-        "fake-provider-profile",
-        "sample-config-a",
-        false,
-        &executor,
-    )
-    .unwrap();
-
-    let inputs = executor.prompt_inputs();
-    assert_eq!(inputs.len(), 1);
-    let (text_cleanup, custom) = &inputs[0];
-    assert_eq!(text_cleanup, &serde_json::json!(true));
-    // The whole object goes over, matching the run manifest. The engine drops
-    // the reflection half on the sample path, which runs no reflection pass.
-    assert_eq!(
-        custom,
-        &serde_json::json!({
-            "translation": "Use restrained literary Chinese.",
-            "reflection": "Critique anachronistic wording.",
-        })
-    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -10176,78 +11316,21 @@ fn output_formats_change_reopens_completed_translation_approval() {
 }
 
 #[test]
-fn custom_instructions_change_reopens_completed_translation_approval() {
-    let root = temp_root("custom-instructions-approval-recheck");
-    let repo = handoff_repo_fixture(&root);
-    let source_path = root.join("source.md");
-    let store = BookPipelineStore::for_test(&root);
-    let job_id = handoff_ready_child_job(
-        &store,
-        &repo,
-        &source_path,
-        "# Chapter\n\nBody paragraph.\n",
-    );
-    advance_job(&store, &job_id, None, false).unwrap();
-    advance_job(&store, &job_id, None, false).unwrap();
-    approve_ready_translation_for_test(&store, &job_id);
-    let approved = store
-        .load()
-        .unwrap()
-        .jobs
-        .into_iter()
-        .find(|job| job.id == job_id)
-        .unwrap();
-    let original_gate = approved.children[0]
-        .stages
-        .iter()
-        .find(|stage| stage.stage_id == "approve_translation")
-        .unwrap();
-    let original_binding = original_gate.input_hashes["approvalBindingSha256"].clone();
-    let original_approval_id = original_gate.approval_id.clone().unwrap();
-
-    let updated = save_book_custom_instructions(
-        &store,
-        &job_id,
-        None,
-        BookPipelineCustomInstructions {
-            translation: Some("Use restrained literary Chinese.".into()),
-            reflection: None,
-        },
-    )
-    .unwrap();
-    let updated_gate = updated.children[0]
-        .stages
-        .iter()
-        .find(|stage| stage.stage_id == "approve_translation")
-        .unwrap();
-    assert_eq!(updated_gate.status, STATUS_READY);
-    assert!(updated_gate.approval_id.is_none());
-    assert!(updated_gate
-        .input_hashes
-        .contains_key("customInstructionsSha256"));
-    assert_ne!(
-        updated_gate.input_hashes["approvalBindingSha256"],
-        original_binding
-    );
-    assert!(!updated
-        .approval_references
-        .iter()
-        .any(|approval| approval.approval_id == original_approval_id));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn fast_book_passes_enabled_second_pass_to_translation_manifest() {
+fn four_dimension_pack_drives_second_pass_even_when_job_flag_is_stale() {
     let root = temp_root("fake-translate-second-pass");
     let repo = handoff_repo_fixture(&root);
     let store = BookPipelineStore::for_test(&root);
     let job_id = fake_handoff_ready_job_with_second_pass(&store, &repo, true);
+    let mut stale = store.load().unwrap();
+    stale.jobs[0].second_pass_enabled = false;
+    stale.revision = stale.revision.saturating_add(1);
+    store.write_state_unlocked(&stale).unwrap();
     let executor = TranslationEngineFixtureExecutor::with_second_pass_enabled();
 
     advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     let advanced = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
 
-    assert!(advanced.second_pass_enabled);
+    assert!(!advanced.second_pass_enabled);
     assert_eq!(child_stage_status(&advanced, "translate"), STATUS_COMPLETED);
     assert_eq!(
         executor.requested_units(),
@@ -10273,104 +11356,6 @@ fn fast_book_passes_enabled_text_cleanup_to_translation_manifest() {
         executor.requested_units(),
         vec![vec!["chapter_001".to_string()]]
     );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn book_custom_instructions_persist_bind_approval_and_flow_to_run_manifest() {
-    let root = temp_root("book-custom-instructions");
-    let repo = handoff_repo_fixture(&root);
-    let store = BookPipelineStore::for_test(&root);
-    let job_id = fake_handoff_ready_job_with_second_pass(&store, &repo, true);
-    let custom_instructions = BookPipelineCustomInstructions {
-        translation: Some("Use restrained literary Chinese.".into()),
-        reflection: Some("Critique anachronistic wording.".into()),
-    };
-
-    let saved =
-        save_book_custom_instructions(&store, &job_id, None, custom_instructions.clone()).unwrap();
-
-    assert_eq!(
-        saved.children[0].custom_instructions.as_ref(),
-        Some(&custom_instructions)
-    );
-    let persisted: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&store.state_path).unwrap()).unwrap();
-    assert_eq!(
-        persisted["jobs"][0]["children"][0]["customInstructions"],
-        serde_json::json!({
-            "translation": "Use restrained literary Chinese.",
-            "reflection": "Critique anachronistic wording.",
-        })
-    );
-
-    let executor =
-        TranslationEngineFixtureExecutor::with_custom_instructions(custom_instructions.clone());
-    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
-    let advanced = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
-    let gate = advanced.children[0]
-        .stages
-        .iter()
-        .find(|stage| stage.stage_id == "approve_translation")
-        .unwrap();
-    assert!(gate.input_hashes.contains_key("customInstructionsSha256"));
-    assert_eq!(child_stage_status(&advanced, "translate"), STATUS_COMPLETED);
-    let manifest: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(child_project_root(&advanced).join("qa/tasks/run.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        manifest["customInstructions"],
-        serde_json::to_value(custom_instructions).unwrap()
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn custom_instructions_are_per_book_and_reject_overlong_text() {
-    let root = temp_root("per-book-custom-instructions");
-    let store = BookPipelineStore::for_test(&root);
-    let job = queue_job_with_translation_intent(
-        &store,
-        fake_collection_source(),
-        MODE_CONVERT_THEN_TRANSLATE.into(),
-        fast_translation_intent(),
-        BookPipelinePreviewConfig::default(),
-    )
-    .unwrap();
-    let selected_child_id = job.children[0].id.clone();
-    let custom_instructions = BookPipelineCustomInstructions {
-        translation: Some("Keep this book's dry humor.".into()),
-        reflection: None,
-    };
-
-    let saved = save_book_custom_instructions(
-        &store,
-        &job.id,
-        Some(&selected_child_id),
-        custom_instructions.clone(),
-    )
-    .unwrap();
-
-    assert_eq!(
-        saved.children[0].custom_instructions.as_ref(),
-        Some(&custom_instructions)
-    );
-    assert!(saved.children[1..]
-        .iter()
-        .all(|child| child.custom_instructions.is_none()));
-
-    let error = save_book_custom_instructions(
-        &store,
-        &job.id,
-        Some(&selected_child_id),
-        BookPipelineCustomInstructions {
-            translation: Some("x".repeat(2001)),
-            reflection: None,
-        },
-    )
-    .unwrap_err();
-    assert!(error.contains("custom_instructions_too_long"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -10707,6 +11692,14 @@ fn the_automatic_retry_ladder_is_walked_without_sleeping_through_it() {
     use std::time::Instant;
 
     let _ = take_skipped_retry_waits();
+    let direct_wait_started = Instant::now();
+    wait_before_stage_retry(7);
+    assert!(
+        direct_wait_started.elapsed() < Duration::from_secs(1),
+        "the test-only retry wait must return immediately"
+    );
+    assert_eq!(take_skipped_retry_waits(), vec![7]);
+
     let root = temp_root("stage-retry-no-sleep");
     let repo = handoff_repo_fixture(&root);
     let store = BookPipelineStore::for_test(&root);
@@ -10719,9 +11712,7 @@ fn the_automatic_retry_ladder_is_walked_without_sleeping_through_it() {
     advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     let _ = take_skipped_retry_waits();
 
-    let started = Instant::now();
     let failed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
-    let elapsed = started.elapsed();
 
     // Asserted first: without it the timing below passes for the wrong reason,
     // by never reaching a retry at all.
@@ -10739,11 +11730,6 @@ fn the_automatic_retry_ladder_is_walked_without_sleeping_through_it() {
     assert_eq!(
         child_stage_status(&failed, "validate_reading"),
         STATUS_FAILED
-    );
-
-    assert!(
-        elapsed < Duration::from_secs(ladder.into()),
-        "walking a {ladder}s backoff ladder took {elapsed:?}: the automatic retry slept for real"
     );
 
     // The countdown is still the production one -- only the sleeping is skipped.
@@ -11271,7 +12257,16 @@ fn reading_validation_status_marks_every_finished_stage_explicitly() {
     )
     .unwrap();
 
-    write_reading_validation_status(&root, &EpubCheckSummary::default(), true, &[]).unwrap();
+    write_reading_validation_status(
+        &root,
+        &EpubCheckSummary::default(),
+        ReadingValidationOutcome::Passed,
+        ReadingValidationOutcome::Passed,
+        0,
+        &ReadingValidationToolEvidence::default(),
+        &[],
+    )
+    .unwrap();
 
     let status = fs::read_to_string(root.join("qa/status.md")).unwrap();
     for completed_line in [
@@ -11280,12 +12275,95 @@ fn reading_validation_status_marks_every_finished_stage_explicitly() {
         "- expert QA: passed",
         "- reading output: passed",
         "- EPUBCheck: passed",
+        "- Package validity: passed",
+        "- Structural readability: passed",
+        "- Reader acceptance: not recorded",
     ] {
         assert!(status.contains(completed_line), "{status}");
     }
     assert!(!status.contains(": pending"), "{status}");
     assert!(status.contains("- EPUBCheck: fatal=0, error=0, warning=0"));
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn managed_chromium_manifest_cannot_escape_the_runtime_root() {
+    let root = temp_root("managed-chromium-manifest-traversal");
+    let playwright_root = root.join("vendor/playwright-core");
+    fs::create_dir_all(&playwright_root).unwrap();
+    let package_manifest = playwright_root.join("package.json");
+    fs::write(&package_manifest, "{}\n").unwrap();
+    fs::write(
+        playwright_root.join("browser-manifest.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema": "bibliosmith-browser-runtime-v1",
+            "relativePath": "../../outside/chrome-headless-shell",
+            "version": "1.2.3",
+            "sha256": "0".repeat(64),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = managed_chromium_runtime(&root, &package_manifest)
+        .err()
+        .expect("a browser path outside the runtime root must be rejected");
+
+    assert!(error.contains("escapes the runtime root"), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn markdown_and_html_only_outputs_do_not_claim_epub_validation_passed() {
+    for (case, output_formats) in [
+        ("markdown-only", vec![OUTPUT_FORMAT_MD.into()]),
+        ("html-only", vec![OUTPUT_FORMAT_HTML.into()]),
+    ] {
+        let root = temp_root(case);
+        let repo = handoff_repo_fixture(&root);
+        let store = BookPipelineStore::for_test(&root);
+        let executor = ReadingPipelineFixtureExecutor::passing();
+        let job_id =
+            fake_handoff_ready_job_with_output_formats(&store, &repo, false, false, output_formats);
+        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+        let waiting = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+        satisfy_qa_handoff(&waiting);
+        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+        approve_ready_promotion_for_test(&store, &job_id);
+        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+        advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+        let completed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+        assert_eq!(
+            child_stage_status(&completed, "validate_reading"),
+            STATUS_COMPLETED
+        );
+        let status =
+            fs::read_to_string(child_project_root(&completed).join("qa/status.md")).unwrap();
+        for expected in [
+            "- reading output: not applicable",
+            "- EPUBCheck: not run",
+            "- Package validity: not run",
+            "- Structural readability: not run",
+        ] {
+            assert!(
+                status.contains(expected),
+                "{expected} missing from:\n{status}"
+            );
+        }
+        assert!(!executor.command_labels().iter().any(|label| matches!(
+            label.as_str(),
+            EPUBCHECK_COMMAND_LABEL | STRUCTURAL_READABILITY_COMMAND_LABEL
+        )));
+        let validation = completed.children[0]
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == "validate_reading")
+            .unwrap();
+        assert!(!validation.input_hashes.contains_key("chromiumBinarySha256"));
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 // Story 18's second half — "and a real reader" — had nowhere to land, so the
@@ -11587,15 +12665,23 @@ fn fake_pipeline_promotes_builds_validates_and_completes() {
         );
     }
     assert!(!qa_status.contains(": pending"), "{qa_status}");
-    assert!(qa_status.contains(
-        "- accepted residual risks: 1 EPUBCheck warning(s), accepted for local reading output"
-    ));
+    assert!(qa_status.contains("- accepted residual risks: reader acceptance not recorded"));
+    let validation = completed.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "validate_reading")
+        .unwrap();
+    assert!(validation.input_hashes.contains_key("chromiumBinarySha256"));
+    assert!(validation
+        .input_hashes
+        .contains_key("chromiumVersionSha256"));
     assert_eq!(
         executor.command_labels(),
         vec![
             TRANSLATION_ENGINE_COMMAND_LABEL.to_string(),
             READING_BUILD_COMMAND_LABEL.to_string(),
             EPUBCHECK_COMMAND_LABEL.to_string(),
+            STRUCTURAL_READABILITY_COMMAND_LABEL.to_string(),
         ]
     );
     let _ = fs::remove_dir_all(root);
@@ -11653,9 +12739,7 @@ fn fake_pipeline_builds_and_validates_bilingual_epub_when_selected() {
         .is_file());
     let qa_status = fs::read_to_string(project_root.join("qa/status.md")).unwrap();
     assert!(qa_status.contains("- reading output: passed"));
-    assert!(qa_status.contains(
-        "- accepted residual risks: 2 EPUBCheck warning(s), accepted for local reading output"
-    ));
+    assert!(qa_status.contains("- accepted residual risks: reader acceptance not recorded"));
     assert!(completed
         .log_summary
         .iter()
@@ -11667,7 +12751,9 @@ fn fake_pipeline_builds_and_validates_bilingual_epub_when_selected() {
             READING_BUILD_COMMAND_LABEL.to_string(),
             BILINGUAL_BUILD_COMMAND_LABEL.to_string(),
             EPUBCHECK_COMMAND_LABEL.to_string(),
+            STRUCTURAL_READABILITY_COMMAND_LABEL.to_string(),
             EPUBCHECK_COMMAND_LABEL.to_string(),
+            STRUCTURAL_READABILITY_COMMAND_LABEL.to_string(),
         ]
     );
     let _ = fs::remove_dir_all(root);
@@ -11800,6 +12886,7 @@ fn fake_pipeline_builds_digest_when_book_intent_is_enabled() {
             TRANSLATION_ENGINE_COMMAND_LABEL.to_string(),
             READING_BUILD_COMMAND_LABEL.to_string(),
             EPUBCHECK_COMMAND_LABEL.to_string(),
+            STRUCTURAL_READABILITY_COMMAND_LABEL.to_string(),
             DIGEST_BUILD_COMMAND_LABEL.to_string(),
             EPUBCHECK_COMMAND_LABEL.to_string(),
         ]
@@ -11860,6 +12947,7 @@ fn fake_expert_pipeline_builds_digest_when_book_intent_is_enabled() {
         vec![
             READING_BUILD_COMMAND_LABEL.to_string(),
             EPUBCHECK_COMMAND_LABEL.to_string(),
+            STRUCTURAL_READABILITY_COMMAND_LABEL.to_string(),
             DIGEST_BUILD_COMMAND_LABEL.to_string(),
             EPUBCHECK_COMMAND_LABEL.to_string(),
         ]
@@ -11972,6 +13060,145 @@ fn epubcheck_failure_stops_at_validation_failed() {
     let qa_status = fs::read_to_string(child_project_root(&failed).join("qa/status.md")).unwrap();
     assert!(qa_status.contains("- reading output: failed"));
     assert!(qa_status.contains("fatal=0, error=1, warning=0"));
+    assert!(qa_status.contains("- EPUBCheck finding: OPF-999: fixture package failure"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn structural_failure_blocks_reading_even_when_epubcheck_passes() {
+    let root = temp_root("fake-reading-structural-failed");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let executor = ReadingPipelineFixtureExecutor::failing_structural_readability();
+    let (job_id, waiting) = fake_job_waiting_for_expert_qa(&store, &repo, &executor);
+    satisfy_qa_handoff(&waiting);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    approve_ready_promotion_for_test(&store, &job_id);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    let failed = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    assert_eq!(failed.status, STATUS_FAILED);
+    assert_eq!(
+        child_stage_status(&failed, "validate_reading"),
+        STATUS_FAILED
+    );
+    assert!(failed.last_error.as_deref().is_some_and(|error| {
+        error.contains("Structural readability failed")
+            && error.contains("EPUBCheck package validity passed")
+    }));
+    assert!(failed.children[0].artifacts.iter().any(|artifact| {
+        artifact.kind == "structural_readability_report"
+            && artifact.producer_stage.as_deref() == Some("validate_reading")
+    }));
+    let qa_status = fs::read_to_string(child_project_root(&failed).join("qa/status.md")).unwrap();
+    assert!(
+        qa_status.contains("- Package validity: passed"),
+        "{qa_status}"
+    );
+    assert!(
+        qa_status.contains("- Structural readability: failed"),
+        "{qa_status}"
+    );
+    assert!(
+        qa_status.contains("- reading output: failed"),
+        "{qa_status}"
+    );
+    assert!(
+        qa_status.contains("- structural finding: navigation.order: fixture structural mismatch"),
+        "{qa_status}"
+    );
+    assert!(
+        qa_status.contains("- renderer version: Chromium ")
+            && !qa_status.contains("123.0.0-fixture"),
+        "{qa_status}"
+    );
+    assert!(
+        qa_status.contains("- structural evidence time: 2026-08-05T12:00:00+00:00"),
+        "{qa_status}"
+    );
+    assert!(
+        qa_status.contains("- EPUBCheck version: 5.2.1"),
+        "{qa_status}"
+    );
+
+    let retry_executor = ReadingPipelineFixtureExecutor::passing();
+    let completed =
+        advance_job_with_executor(&store, &job_id, None, false, &retry_executor).unwrap();
+    assert_eq!(completed.status, STATUS_COMPLETED);
+    assert_eq!(
+        child_stage_status(&completed, "validate_reading"),
+        STATUS_COMPLETED
+    );
+    assert_eq!(
+        retry_executor.command_labels(),
+        vec![
+            EPUBCHECK_COMMAND_LABEL.to_string(),
+            STRUCTURAL_READABILITY_COMMAND_LABEL.to_string(),
+        ]
+    );
+    let retried_qa_status =
+        fs::read_to_string(child_project_root(&completed).join("qa/status.md")).unwrap();
+    assert!(retried_qa_status.contains("- Package validity: passed"));
+    assert!(retried_qa_status.contains("- Structural readability: passed"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn structural_validation_rejects_a_renderer_version_prefix_match() {
+    let root = temp_root("renderer-version-prefix-mismatch");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let executor = ReadingPipelineFixtureExecutor::mismatched_renderer_version();
+    let (job_id, waiting) = fake_job_waiting_for_expert_qa(&store, &repo, &executor);
+    satisfy_qa_handoff(&waiting);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    approve_ready_promotion_for_test(&store, &job_id);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let built = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    let error = match run_validate_reading_stage(&built, &built.children[0], &executor) {
+        Ok(_) => panic!("renderer version prefix must not satisfy the exact-version gate"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.contains("did not report the pinned Chromium version"),
+        "{error}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_pass_label_cannot_hide_a_tampered_structural_report() {
+    let root = temp_root("structural-report-hash-gate");
+    fs::create_dir_all(&root).unwrap();
+    let report_path = root.join("structural_readability.json");
+    fs::write(&report_path, r#"{"status":"passed"}"#).unwrap();
+    let source = BookPipelineSource::default();
+    let mut artifact = BookPipelineArtifact {
+        kind: "structural_readability_report".into(),
+        path: display_path(&report_path),
+        sha256: Some("deliberately-wrong-sha256".into()),
+        producer_stage: Some("validate_reading".into()),
+        ..BookPipelineArtifact::default()
+    };
+
+    enrich_artifact(
+        &mut artifact,
+        Some("child"),
+        &source,
+        &source,
+        &[],
+        1,
+        "now",
+    );
+
+    assert!(artifact.validation.exists);
+    assert!(artifact.validation.nonempty);
+    assert!(!artifact.validation.hash_matches);
+    assert_eq!(artifact.validation.required_checks_passed, Some(false));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -12037,6 +13264,31 @@ fn artifact_sha(job: &BookPipelineJob, kind: &str) -> Option<String> {
         .unwrap()
         .sha256
         .clone()
+}
+
+fn mutate_durable_structure_map(job: &BookPipelineJob, kind: &str) {
+    let path = job.children[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == kind)
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .expect("durable structure artifact");
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    match kind {
+        "publication_map" => {
+            document["sections"][0]["role"] = serde_json::json!("frontmatter");
+        }
+        "source_map" => {
+            document["translationUnits"][0]["sourceStartLine"] = serde_json::json!(2);
+        }
+        other => panic!("unsupported structure map: {other}"),
+    }
+    fs::write(
+        path,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
 }
 
 fn chapter_source_count(job: &BookPipelineJob) -> usize {
@@ -12106,6 +13358,1337 @@ fn source_change_before_prepare_reruns_split_without_blocking() {
     assert_eq!(stage_attempt(&resplit, "split"), 2);
     assert_eq!(chapter_source_count(&resplit), 2);
     assert_ne!(artifact_sha(&resplit, "source_map"), first_map);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn structure_map_drift_before_prepare_never_reaches_prepare() {
+    for kind in ["publication_map", "source_map"] {
+        let root = temp_root(&format!("{kind}-drift-before-prepare"));
+        let repo = handoff_repo_fixture(&root);
+        let source_path = root.join("source.md");
+        let store = BookPipelineStore::for_test(&root);
+        let job_id = handoff_ready_child_job(
+            &store,
+            &repo,
+            &source_path,
+            "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+        );
+
+        let split = advance_job(&store, &job_id, None, false).unwrap();
+        mutate_durable_structure_map(&split, kind);
+        let advanced = advance_job(&store, &job_id, None, false).unwrap();
+
+        assert_ne!(
+            child_stage_status(&advanced, "prepare"),
+            STATUS_COMPLETED,
+            "{kind} drift must not be accepted as prepared input"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn structure_map_drift_after_translation_approval_invalidates_the_gate() {
+    let root = temp_root("publication-map-drift-after-translation-approval");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    approve_ready_translation_for_test(&store, &job_id);
+    let approved = store.load().unwrap().jobs.remove(0);
+    let approval_id = approved.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .and_then(|stage| stage.approval_id.clone())
+        .expect("translation approval ID");
+    mutate_durable_structure_map(&approved, "publication_map");
+
+    let invalidated = advance_job(&store, &job_id, None, false).unwrap();
+
+    assert_ne!(
+        child_stage_status(&invalidated, "approve_translation"),
+        STATUS_COMPLETED
+    );
+    assert_eq!(child_stage_status(&invalidated, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&invalidated, "prepare"), STATUS_PENDING);
+    assert_eq!(
+        child_stage_status(&invalidated, "translate"),
+        STATUS_PENDING
+    );
+    assert!(!invalidated
+        .approval_references
+        .iter()
+        .any(|approval| approval.approval_id == approval_id));
+
+    let resplit = advance_job(&store, &job_id, None, true).unwrap();
+    assert_eq!(child_stage_status(&resplit, "split"), STATUS_COMPLETED);
+    assert_eq!(child_stage_status(&resplit, "prepare"), STATUS_PENDING);
+    let rereadied = advance_job(&store, &job_id, None, false).unwrap();
+    assert_eq!(child_stage_status(&rereadied, "prepare"), STATUS_COMPLETED);
+    assert_eq!(
+        child_stage_status(&rereadied, "approve_translation"),
+        STATUS_READY
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn structure_map_drift_after_promotion_approval_cannot_be_promoted() {
+    let root = temp_root("source-map-drift-after-promotion-approval");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let executor = TranslationEngineFixtureExecutor::succeeding();
+    let job_id = fake_handoff_ready_job(&store, &repo);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let waiting = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    satisfy_qa_handoff(&waiting);
+    let ready = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let approval_id = approve_ready_promotion_for_test(&store, &job_id);
+    mutate_durable_structure_map(&ready, "source_map");
+
+    let invalidated = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    assert_ne!(
+        child_stage_status(&invalidated, "promote"),
+        STATUS_COMPLETED
+    );
+    assert_eq!(child_stage_status(&invalidated, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&invalidated, "prepare"), STATUS_PENDING);
+    assert!(!invalidated
+        .approval_references
+        .iter()
+        .any(|approval| approval.approval_id == approval_id));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn promoted_publication_map_drift_cannot_reach_the_reading_builder() {
+    let root = temp_root("promoted-publication-map-drift-before-build");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let executor = ReadingPipelineFixtureExecutor::passing();
+    let (job_id, waiting) = fake_job_waiting_for_expert_qa(&store, &repo, &executor);
+    satisfy_qa_handoff(&waiting);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    approve_ready_promotion_for_test(&store, &job_id);
+    let promoted = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    assert_eq!(child_stage_status(&promoted, "promote"), STATUS_COMPLETED);
+    mutate_durable_structure_map(&promoted, "publication_map");
+    let command_count_before_build = executor.command_labels().len();
+
+    let blocked = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    assert_ne!(
+        child_stage_status(&blocked, "build_reading"),
+        STATUS_COMPLETED
+    );
+    assert_eq!(executor.command_labels().len(), command_count_before_build);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn source_map_drift_after_build_rolls_back_before_validation() {
+    let root = temp_root("source-map-drift-after-build");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let executor = ReadingPipelineFixtureExecutor::passing();
+    let (job_id, waiting) = fake_job_waiting_for_expert_qa(&store, &repo, &executor);
+    satisfy_qa_handoff(&waiting);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let approval_id = approve_ready_promotion_for_test(&store, &job_id);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let built = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    assert_eq!(
+        child_stage_status(&built, "build_reading"),
+        STATUS_COMPLETED
+    );
+    mutate_durable_structure_map(&built, "source_map");
+    let command_count_before_validation = executor.command_labels().len();
+
+    let invalidated = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    assert_eq!(child_stage_status(&invalidated, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&invalidated, "prepare"), STATUS_PENDING);
+    assert_eq!(
+        child_stage_status(&invalidated, "validate_reading"),
+        STATUS_PENDING
+    );
+    assert!(!invalidated
+        .approval_references
+        .iter()
+        .any(|approval| approval.approval_id == approval_id));
+    assert_eq!(
+        executor.command_labels().len(),
+        command_count_before_validation
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn translation_unit_boundaries_do_not_change_the_publication_structure() {
+    let root = temp_root("publication-map-independent-from-translation-units");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let section = "x".repeat(40 * 1024);
+    let source = format!(
+        "# One published chapter\n\n## Section A\n\n{section}\n\n## Section B\n\n{section}\n\n## Section C\n\n{section}\n"
+    );
+    let normal_plan = split_source_markdown_with_limit(&source, 64 * 1024);
+    let smaller_plan = split_source_markdown_with_limit(&source, 24 * 1024);
+    assert_ne!(normal_plan.chapters.len(), smaller_plan.chapters.len());
+    assert_eq!(
+        serde_json::to_value(&normal_plan.publication_sections).unwrap(),
+        serde_json::to_value(&smaller_plan.publication_sections).unwrap()
+    );
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, &source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let child = &split.children[0];
+    let publication_map_path = child
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "publication_map")
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .expect("split must register a publication map");
+    let source_map_path = child
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "source_map")
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .expect("split must register a source map");
+    let publication_map_text = fs::read_to_string(&publication_map_path).unwrap();
+    let publication_map: serde_json::Value = serde_json::from_str(&publication_map_text).unwrap();
+    let source_map: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(source_map_path).unwrap()).unwrap();
+
+    assert_eq!(
+        publication_map["schema"],
+        "local-reading-publication-map-v1"
+    );
+    assert_eq!(publication_map["sections"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        publication_map["sections"][0]["title"],
+        "One published chapter"
+    );
+    assert_eq!(publication_map["sections"][0]["role"], "bodymatter");
+    assert_eq!(source_map["schema"], "local-reading-source-map-v2");
+    assert_eq!(source_map["translationUnits"].as_array().unwrap().len(), 3);
+    let units = source_map["translationUnits"].as_array().unwrap();
+    let sections_by_id = publication_map["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|section| (section["id"].as_str().unwrap(), section))
+        .collect::<BTreeMap<_, _>>();
+    assert!(units
+        .iter()
+        .any(|unit| unit["publicationSectionId"] != "section_001"));
+    for unit in units {
+        let section = sections_by_id[unit["publicationSectionId"].as_str().unwrap()];
+        let source_start = unit["sourceStartCharacter"].as_u64().unwrap();
+        let source_end = unit["sourceEndCharacter"].as_u64().unwrap();
+        let section_source_start = section["sourceStartCharacter"].as_u64().unwrap();
+        assert_eq!(
+            unit["sectionStartCharacter"].as_u64().unwrap(),
+            source_start - section_source_start
+        );
+        assert_eq!(
+            unit["sectionEndCharacter"].as_u64().unwrap(),
+            source_end - section_source_start
+        );
+        assert!(
+            unit["sectionEndLine"].as_u64().unwrap()
+                <= section["sourceEndLine"].as_u64().unwrap()
+                    - section["sourceStartLine"].as_u64().unwrap()
+                    + 1
+        );
+    }
+    assert!(publication_map["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|section| !section["title"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("unit_")));
+    let typed_map: PublicationMapDocument = serde_json::from_str(&publication_map_text).unwrap();
+    let round_trip = serde_json::to_string_pretty(&typed_map).unwrap() + "\n";
+    assert_eq!(round_trip, publication_map_text);
+    assert_eq!(
+        Some(sha256_str(&round_trip)),
+        artifact_sha(&split, "publication_map")
+    );
+
+    let prepared = advance_job(&store, &job_id, None, false).unwrap();
+    let prepare = prepared.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "prepare")
+        .unwrap();
+    assert_eq!(
+        prepare.input_hashes.get("publicationMapSha256"),
+        artifact_sha(&prepared, "publication_map").as_ref()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn publication_map_expresses_front_body_and_nested_backmatter_roles() {
+    let source = "# Preface\n\nOpening context.\n\n# Part One\n\n## Chapter One\n\n### Section One\n\nBody sentence.\n\n# Bibliography\n\nReference entry.\n\n# Appendix A\n\nAppendix body.\n";
+    let plan = split_source_markdown(source);
+    let sections = &plan.publication_sections;
+
+    assert_eq!(sections[0].role, "frontmatter");
+    assert_eq!(sections[0].kind, "preface");
+    assert_eq!(sections[1].role, "bodymatter");
+    assert_eq!(
+        sections[2].parent_id.as_deref(),
+        Some(sections[1].id.as_str())
+    );
+    assert_eq!(
+        sections[3].parent_id.as_deref(),
+        Some(sections[2].id.as_str())
+    );
+    assert_eq!(sections[4].role, "backmatter");
+    assert_eq!(sections[4].kind, "bibliography");
+    assert_eq!(sections[5].role, "backmatter");
+    assert_eq!(sections[5].kind, "appendix");
+}
+
+#[test]
+fn pdf_page_anchors_become_structure_and_source_mapping_evidence() {
+    let source = "<!-- page: 11 -->\n\n# Chapter\n\nOpening paragraph.\n\n<!-- page: 12 -->\n\n## Section\n\nContinued paragraph.\n";
+    let plan = split_source_markdown(source);
+
+    assert_eq!(plan.publication_sections[0].source_pages, vec![11, 12]);
+    assert_eq!(plan.publication_sections[1].source_pages, vec![12]);
+    assert_eq!(plan.chapters.len(), 1);
+    assert_eq!(plan.chapters[0].title, "Chapter");
+    assert_eq!(plan.chapters[0].start_line, 3);
+    let mut sections = plan.publication_sections.clone();
+    let audit = audit_publication_structure(source, &mut sections, "direct_pdf_markdown");
+    assert_eq!(audit.status, "passed", "{:?}", audit.anomalies);
+    assert!(sections[0]
+        .evidence
+        .iter()
+        .any(|evidence| evidence.contains("source page anchors 11,12")));
+}
+
+#[test]
+fn publication_character_ranges_count_unicode_scalars_not_utf8_bytes() {
+    let source = "# Kapitel\n\n中德混排 äöü。\n\n## Abschnitt\n\n正文。\n";
+    let mut sections = split_source_markdown(source).publication_sections;
+    apply_section_character_ranges(source, &mut sections);
+
+    let child = &sections[1];
+    let recovered = source
+        .chars()
+        .skip(child.source_start_character)
+        .take(child.source_end_character - child.source_start_character)
+        .collect::<String>();
+    assert!(recovered.starts_with("## Abschnitt"));
+    assert!(recovered.contains("正文。"));
+    assert_ne!(
+        child.source_start_character,
+        source[..source.find("## Abschnitt").unwrap()].len()
+    );
+}
+
+#[test]
+fn epub_navigation_evidence_preserves_nested_sections_inside_one_spine_document() {
+    let markdown = "# Part I\n\n## Chapter 1\n\n### Section A\n\nA.\n\n### Section B\n\nB.\n";
+    let evidence: ExtractedPublicationEvidence = serde_json::from_value(serde_json::json!({
+        "schema": "publication-extraction-evidence-v2",
+        "sourceFormat": "epub",
+        "sourceDocuments": [
+            {
+                "path":"book_assets/source_documents/one.xhtml","startLine":1,
+                "endLine":markdown.lines().count(),"pages":[],"kind":"epub_xhtml",
+                "sha256":"a".repeat(64),"sourceHref":"one.xhtml"
+            },
+            {
+                "path":"book_assets/source_documents/nav.xhtml","startLine":0,"endLine":0,
+                "pages":[],"kind":"epub_navigation","sha256":"b".repeat(64),
+                "sourceHref":"nav.xhtml","anomalies":["navigation evidence has no assembled Markdown line range"]
+            }
+        ],
+        "sections": [
+            {"id": "epub_section_001", "title": "Part I", "parentId": null, "headingLevel": 1, "sourceHref": "one.xhtml", "navigationSourceHref":"nav.xhtml", "sourceFiles":["book_assets/source_documents/one.xhtml","book_assets/source_documents/nav.xhtml"]},
+            {"id": "epub_section_002", "title": "Chapter 1", "parentId": "epub_section_001", "headingLevel": 2, "sourceHref": "one.xhtml#chapter", "navigationSourceHref":"nav.xhtml", "sourceFiles":["book_assets/source_documents/one.xhtml","book_assets/source_documents/nav.xhtml"]},
+            {"id": "epub_section_003", "title": "Section A", "parentId": "epub_section_002", "headingLevel": 3, "sourceHref": "one.xhtml#a", "navigationSourceHref":"nav.xhtml", "sourceFiles":["book_assets/source_documents/one.xhtml","book_assets/source_documents/nav.xhtml"]},
+            {"id": "epub_section_004", "title": "Section B", "parentId": "epub_section_002", "headingLevel": 3, "sourceHref": "one.xhtml#b", "navigationSourceHref":"nav.xhtml", "sourceFiles":["book_assets/source_documents/one.xhtml","book_assets/source_documents/nav.xhtml"]}
+        ]
+    }))
+    .unwrap();
+
+    let sections = publication_sections_from_extracted_evidence(markdown, &evidence).unwrap();
+
+    assert_eq!(sections.len(), 4);
+    assert_eq!(sections[1].parent_id.as_deref(), Some("section_001"));
+    assert_eq!(sections[2].parent_id.as_deref(), Some("section_002"));
+    assert_eq!(sections[3].parent_id.as_deref(), Some("section_002"));
+    assert_eq!(sections[1].source_start_line, 3);
+    assert_eq!(sections[1].source_end_line, markdown.lines().count());
+}
+
+#[test]
+fn authoritative_nav_link_is_valid_when_an_unmapped_legacy_ncx_is_retained() {
+    let markdown = "# Chapter\n\nBody.\n";
+    let evidence: ExtractedPublicationEvidence = serde_json::from_value(serde_json::json!({
+        "schema": "publication-extraction-evidence-v2",
+        "sourceFormat": "epub",
+        "sourceDocuments": [
+            {
+                "path": "assets/source_documents/document.xhtml",
+                "startLine": 1,
+                "endLine": 3,
+                "pages": [],
+                "kind": "epub_xhtml",
+                "sha256": "a".repeat(64),
+                "sourceHref": "OEBPS/one.xhtml"
+            },
+            {
+                "path": "assets/source_documents/navigation.xhtml",
+                "startLine": 0,
+                "endLine": 0,
+                "pages": [],
+                "kind": "epub_navigation",
+                "sha256": "b".repeat(64),
+                "sourceHref": "OEBPS/nav.xhtml",
+                "anomalies": ["navigation evidence has no assembled Markdown line range"]
+            },
+            {
+                "path": "assets/source_documents/toc.ncx",
+                "startLine": 0,
+                "endLine": 0,
+                "pages": [],
+                "kind": "epub_ncx",
+                "sha256": "c".repeat(64),
+                "sourceHref": "OEBPS/toc.ncx",
+                "anomalies": ["navigation evidence has no assembled Markdown line range"]
+            }
+        ],
+        "sections": [{
+            "id": "epub_section_001",
+            "title": "Chapter",
+            "parentId": null,
+            "headingLevel": 1,
+            "sourceHref": "OEBPS/one.xhtml",
+            "navigationSourceHref": "OEBPS/nav.xhtml",
+            "sourceStartLine": 1,
+            "sourceEndLine": 3,
+            "sourceFiles": [
+                "assets/source_documents/document.xhtml",
+                "assets/source_documents/navigation.xhtml"
+            ]
+        }]
+    }))
+    .unwrap();
+
+    let sections = publication_sections_from_extracted_evidence(markdown, &evidence).unwrap();
+
+    assert_eq!(sections.len(), 1);
+    assert!(sections[0]
+        .evidence
+        .iter()
+        .any(|item| item.contains("navigation.xhtml")));
+}
+
+#[test]
+fn extractor_navigation_contract_is_bound_to_epub_source_format() {
+    let markdown = "# Chapter\n\nBody.\n";
+    let missing_navigation: ExtractedPublicationEvidence =
+        serde_json::from_value(serde_json::json!({
+            "schema": "publication-extraction-evidence-v2",
+            "sourceFormat": "epub",
+            "sourceDocuments": [{
+                "path": "document.xhtml", "startLine": 1, "endLine": 3,
+                "pages": [], "kind": "epub_xhtml", "sha256": "a".repeat(64)
+            }],
+            "sections": [{
+                "id": "chapter", "title": "Chapter", "parentId": null,
+                "headingLevel": 1, "sourceHref": "chapter.xhtml",
+                "sourceStartLine": 1, "sourceEndLine": 3,
+                "sourceFiles": ["document.xhtml"]
+            }]
+        }))
+        .unwrap();
+    let error =
+        publication_sections_from_extracted_evidence(markdown, &missing_navigation).unwrap_err();
+    assert!(error.contains("no retained NAV or NCX"), "{error}");
+
+    let foreign_navigation: ExtractedPublicationEvidence =
+        serde_json::from_value(serde_json::json!({
+            "schema": "publication-extraction-evidence-v2",
+            "sourceFormat": "pdf",
+            "sourceDocuments": [
+                {
+                    "path": "document.md", "startLine": 1, "endLine": 3,
+                    "pages": [1], "kind": "pdf_markdown", "sha256": "a".repeat(64)
+                },
+                {
+                    "path": "nav.xhtml", "startLine": 0, "endLine": 0,
+                    "pages": [], "kind": "epub_navigation", "sha256": "b".repeat(64),
+                    "sourceHref": "OEBPS/nav.xhtml", "anomalies": ["unmapped"]
+                }
+            ],
+            "sections": [{
+                "id": "chapter", "title": "Chapter", "parentId": null,
+                "headingLevel": 1, "sourceHref": "pdf://page/1",
+                "navigationSourceHref": "OEBPS/nav.xhtml",
+                "sourceStartLine": 1, "sourceEndLine": 3,
+                "sourceFiles": ["document.md", "nav.xhtml"]
+            }]
+        }))
+        .unwrap();
+    let error =
+        publication_sections_from_extracted_evidence(markdown, &foreign_navigation).unwrap_err();
+    assert!(error.contains("Non-EPUB"), "{error}");
+}
+
+#[test]
+fn extractor_evidence_uses_source_ranges_and_preserves_auditable_facts() {
+    let markdown = "# Repeated\n\nFirst body.\n\n# Repeated\n\nSecond body.\n";
+    let evidence: ExtractedPublicationEvidence = serde_json::from_value(serde_json::json!({
+        "schema": "publication-extraction-evidence-v2",
+        "sourceFormat": "mineru",
+        "sourceDocuments": [
+            {"path":"parts/0001/full.md","startLine":1,"endLine":4,"pages":[3,4],"kind":"mineru_part_markdown","sha256":"a".repeat(64)},
+            {"path":"parts/0002/full.md","startLine":5,"endLine":7,"pages":[4,5],"kind":"mineru_part_markdown","sha256":"b".repeat(64)}
+        ],
+        "sections": [
+            {
+                "id": "node-a", "title": "Repeated", "parentId": null,
+                "headingLevel": 1, "sourceHref": "mineru://part/1",
+                "sourceStartLine": 1, "sourceEndLine": 4, "sourcePages": [3, 4],
+                "sourceFiles": ["parts/0001/full.md"],
+                "evidence": ["font and page-position heading evidence"],
+                "confidence": 0.91, "anomalies": []
+            },
+            {
+                "id": "node-b", "title": "Repeated", "parentId": null,
+                "headingLevel": 1, "sourceHref": "mineru://part/2",
+                "sourceStartLine": 5, "sourceEndLine": 7, "sourcePages": [4, 5],
+                "sourceFiles": ["parts/0002/full.md"],
+                "evidence": ["second extractor document retains this section"],
+                "confidence": 0.87, "anomalies": []
+            }
+        ]
+    }))
+    .unwrap();
+
+    let sections = publication_sections_from_extracted_evidence(markdown, &evidence).unwrap();
+
+    assert_eq!(sections[0].source_start_line, 1);
+    assert_eq!(sections[0].source_end_line, 4);
+    assert_eq!(sections[1].source_start_line, 5);
+    assert_eq!(sections[1].source_pages, [4, 5]);
+    assert_eq!(sections[1].confidence, 0.87);
+    assert!(sections[1]
+        .evidence
+        .iter()
+        .any(|item| item.contains("parts/0002/full.md")));
+}
+
+#[test]
+fn extractor_evidence_rejects_invalid_external_structure_instead_of_panicking() {
+    let markdown = "# Chapter\n\nBody.\n";
+    for (sections, expected_error) in [
+        (
+            serde_json::json!([{
+                "id": "node", "title": "Chapter", "parentId": null,
+                "headingLevel": 1, "sourceHref": "source#chapter",
+                "sourceStartLine": 1, "sourceEndLine": 3, "role": "outside",
+                "sourceFiles": ["source.md"],
+            }]),
+            "unsupported role",
+        ),
+        (
+            serde_json::json!([{
+                "id": "node", "title": "Chapter", "parentId": null,
+                "headingLevel": 1, "sourceHref": "source#chapter",
+                "sourceStartLine": 1, "sourceEndLine": 3, "kind": "volume",
+                "sourceFiles": ["source.md"],
+            }]),
+            "unsupported kind",
+        ),
+    ] {
+        let evidence: ExtractedPublicationEvidence = serde_json::from_value(serde_json::json!({
+            "schema": "publication-extraction-evidence-v2",
+            "sourceFormat": "pdf",
+            "sourceDocuments": [{
+                "path": "source.md", "startLine": 1, "endLine": 3,
+                "pages": [], "kind": "fixture_document", "sha256": "a".repeat(64),
+            }],
+            "sections": sections,
+        }))
+        .unwrap();
+        let error = publication_sections_from_extracted_evidence(markdown, &evidence).unwrap_err();
+        assert!(error.contains(expected_error), "{error}");
+    }
+}
+
+#[test]
+fn extractor_evidence_rejects_unknown_formats_and_noncanonical_ranges_or_pages() {
+    let markdown = "<!-- page: 3 -->\n# Alpha\n\nBody.\n\n<!-- page: 4 -->\n# Beta\n\nMore.\n";
+    let base = serde_json::json!({
+        "schema": "publication-extraction-evidence-v2",
+        "sourceFormat": "pdf",
+        "sourceDocuments": [{
+            "path": "source.md", "startLine": 1, "endLine": 9,
+            "pages": [3, 4], "kind": "fixture_document", "sha256": "a".repeat(64),
+        }],
+        "sections": [
+            {
+                "id": "alpha", "title": "Alpha", "parentId": null,
+                "headingLevel": 1, "sourceHref": "pdf://page/3",
+                "sourceStartLine": 2, "sourceEndLine": 6, "sourcePages": [3, 4],
+                "sourceFiles": ["source.md"]
+            },
+            {
+                "id": "beta", "title": "Beta", "parentId": null,
+                "headingLevel": 1, "sourceHref": "pdf://page/4",
+                "sourceStartLine": 7, "sourceEndLine": 9, "sourcePages": [4],
+                "sourceFiles": ["source.md"]
+            }
+        ]
+    });
+
+    let mut unknown = base.clone();
+    unknown["sourceFormat"] = serde_json::json!("future-layout");
+    let error = serde_json::from_value::<ExtractedPublicationEvidence>(unknown)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("unknown variant"), "{error}");
+
+    let mut truncated = base.clone();
+    truncated["sections"][0]["sourceEndLine"] = serde_json::json!(4);
+    let evidence: ExtractedPublicationEvidence = serde_json::from_value(truncated).unwrap();
+    let error = publication_sections_from_extracted_evidence(markdown, &evidence).unwrap_err();
+    assert!(error.contains("canonical publication boundary"), "{error}");
+
+    let mut forged_pages = base;
+    forged_pages["sections"][0]["sourcePages"] = serde_json::json!([3]);
+    let evidence: ExtractedPublicationEvidence = serde_json::from_value(forged_pages).unwrap();
+    let error = publication_sections_from_extracted_evidence(markdown, &evidence).unwrap_err();
+    assert!(error.contains("pages do not match"), "{error}");
+}
+
+#[test]
+fn extractor_evidence_fails_closed_on_ids_parents_cycles_and_title_ranges() {
+    let markdown = "# Alpha\n\nBody.\n\n# Beta\n\nMore.\n";
+    let cases = [
+        (
+            serde_json::json!([
+                {"id":"same","title":"Alpha","parentId":null,"headingLevel":1,"sourceHref":"x#a","sourceStartLine":1,"sourceEndLine":3},
+                {"id":"same","title":"Beta","parentId":null,"headingLevel":1,"sourceHref":"x#b","sourceStartLine":5,"sourceEndLine":7}
+            ]),
+            "duplicate section ID",
+        ),
+        (
+            serde_json::json!([
+                {"id":"../escape","title":"Alpha","parentId":null,"headingLevel":1,"sourceHref":"x#a","sourceStartLine":1,"sourceEndLine":3}
+            ]),
+            "invalid publication section ID",
+        ),
+        (
+            serde_json::json!([
+                {"id":"a","title":"Alpha","parentId":"missing","headingLevel":1,"sourceHref":"x#a","sourceStartLine":1,"sourceEndLine":3}
+            ]),
+            "invalid parent",
+        ),
+        (
+            serde_json::json!([
+                {"id":"a","title":"Alpha","parentId":"b","headingLevel":1,"sourceHref":"x#a","sourceStartLine":1,"sourceEndLine":3},
+                {"id":"b","title":"Beta","parentId":"a","headingLevel":1,"sourceHref":"x#b","sourceStartLine":5,"sourceEndLine":7}
+            ]),
+            "parent depth",
+        ),
+        (
+            serde_json::json!([
+                {"id":"a","title":"Beta","parentId":null,"headingLevel":1,"sourceHref":"x#b","sourceStartLine":1,"sourceEndLine":3}
+            ]),
+            "title does not match its source range",
+        ),
+    ];
+    for (mut sections, expected_error) in cases {
+        for section in sections.as_array_mut().unwrap() {
+            section["sourceFiles"] = serde_json::json!(["source.md"]);
+        }
+        let evidence: ExtractedPublicationEvidence = serde_json::from_value(serde_json::json!({
+            "schema": "publication-extraction-evidence-v2",
+            "sourceFormat": "pdf",
+            "sourceDocuments": [{
+                "path": "source.md", "startLine": 1, "endLine": 7,
+                "pages": [], "kind": "fixture_document", "sha256": "a".repeat(64),
+            }],
+            "sections": sections
+        }))
+        .unwrap();
+        let error = publication_sections_from_extracted_evidence(markdown, &evidence).unwrap_err();
+        assert!(error.contains(expected_error), "{error}");
+    }
+}
+
+#[test]
+fn extractor_evidence_validates_source_document_digests_and_section_links() {
+    let markdown = "# Alpha\n\nBody.\n";
+    for (sha256, source_file) in [
+        (
+            "not-a-digest".to_string(),
+            "book_assets/source_documents/part.md",
+        ),
+        ("a".repeat(64), "book_assets/source_documents/missing.md"),
+    ] {
+        let evidence: ExtractedPublicationEvidence = serde_json::from_value(serde_json::json!({
+            "schema": "publication-extraction-evidence-v2",
+            "sourceFormat": "pdf",
+            "sourceDocuments": [{
+                "path": "book_assets/source_documents/part.md",
+                "startLine": 1,
+                "endLine": 3,
+                "pages": [1],
+                "kind": "assembled_markdown",
+                "sha256": sha256,
+            }],
+            "sections": [{
+                "id":"a","title":"Alpha","parentId":null,"headingLevel":1,
+                "sourceHref":"pdf://page/1","sourceStartLine":1,"sourceEndLine":3,
+                "sourceFiles": [source_file]
+            }]
+        }))
+        .unwrap();
+        assert!(publication_sections_from_extracted_evidence(markdown, &evidence).is_err());
+    }
+}
+
+#[test]
+fn extractor_evidence_rejects_source_document_links_outside_the_section_range() {
+    let markdown = "# Alpha\n\nBody.\n\n# Beta\n\nMore.\n";
+    let evidence: ExtractedPublicationEvidence = serde_json::from_value(serde_json::json!({
+        "schema": "publication-extraction-evidence-v2",
+        "sourceFormat": "pdf",
+        "sourceDocuments": [
+            {
+                "path": "parts/alpha.md", "startLine": 1, "endLine": 4,
+                "pages": [1], "kind": "page_markdown", "sha256": "a".repeat(64),
+            },
+            {
+                "path": "parts/beta.md", "startLine": 5, "endLine": 7,
+                "pages": [2], "kind": "page_markdown", "sha256": "b".repeat(64),
+            }
+        ],
+        "sections": [
+            {
+                "id": "alpha", "title": "Alpha", "parentId": null, "headingLevel": 1,
+                "sourceHref": "pdf://page/1", "sourceStartLine": 1, "sourceEndLine": 4,
+                "sourcePages": [1],
+                "sourceFiles": ["parts/beta.md"]
+            },
+            {
+                "id": "beta", "title": "Beta", "parentId": null, "headingLevel": 1,
+                "sourceHref": "pdf://page/2", "sourceStartLine": 5, "sourceEndLine": 7,
+                "sourcePages": [2],
+                "sourceFiles": ["parts/beta.md"]
+            }
+        ]
+    }))
+    .unwrap();
+
+    let error = publication_sections_from_extracted_evidence(markdown, &evidence).unwrap_err();
+
+    assert!(
+        error.contains("source documents do not match its source range"),
+        "{error}"
+    );
+}
+
+#[test]
+fn pdf_and_epub_evidence_compile_to_equivalent_publication_hierarchies() {
+    let markdown = "# Part I\n\n## Chapter 1\n\n### Section A\n\nA complete paragraph.\n\n### Section B\n\nAnother complete paragraph.\n";
+    let pdf_sections = split_source_markdown(markdown).publication_sections;
+    let evidence: ExtractedPublicationEvidence = serde_json::from_value(serde_json::json!({
+        "schema": "publication-extraction-evidence-v2",
+        "sourceFormat": "epub",
+        "sourceDocuments": [
+            {
+                "path":"book_assets/source_documents/book.xhtml","startLine":1,
+                "endLine":markdown.lines().count(),"pages":[],"kind":"epub_xhtml",
+                "sha256":"a".repeat(64),"sourceHref":"book.xhtml"
+            },
+            {
+                "path":"book_assets/source_documents/nav.xhtml","startLine":0,"endLine":0,
+                "pages":[],"kind":"epub_navigation","sha256":"b".repeat(64),
+                "sourceHref":"nav.xhtml","anomalies":["navigation evidence has no assembled Markdown line range"]
+            }
+        ],
+        "sections": [
+            {"id": "nav-1", "title": "Part I", "parentId": null, "headingLevel": 1, "sourceHref": "book.xhtml#part", "navigationSourceHref":"nav.xhtml", "sourceFiles":["book_assets/source_documents/book.xhtml","book_assets/source_documents/nav.xhtml"]},
+            {"id": "nav-2", "title": "Chapter 1", "parentId": "nav-1", "headingLevel": 2, "sourceHref": "book.xhtml#chapter", "navigationSourceHref":"nav.xhtml", "sourceFiles":["book_assets/source_documents/book.xhtml","book_assets/source_documents/nav.xhtml"]},
+            {"id": "nav-3", "title": "Section A", "parentId": "nav-2", "headingLevel": 3, "sourceHref": "book.xhtml#a", "navigationSourceHref":"nav.xhtml", "sourceFiles":["book_assets/source_documents/book.xhtml","book_assets/source_documents/nav.xhtml"]},
+            {"id": "nav-4", "title": "Section B", "parentId": "nav-2", "headingLevel": 3, "sourceHref": "book.xhtml#b", "navigationSourceHref":"nav.xhtml", "sourceFiles":["book_assets/source_documents/book.xhtml","book_assets/source_documents/nav.xhtml"]}
+        ]
+    }))
+    .unwrap();
+    let epub_sections = publication_sections_from_extracted_evidence(markdown, &evidence).unwrap();
+
+    let signature = |sections: &[PublicationSection]| {
+        sections
+            .iter()
+            .map(|section| {
+                (
+                    section.title.clone(),
+                    section.heading_level,
+                    section.parent_id.clone(),
+                    section.role,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(signature(&pdf_sections), signature(&epub_sections));
+}
+
+#[test]
+fn printed_contents_with_many_unmatched_entries_requires_correction() {
+    let source = "# Contents\n\n- Missing Alpha ........ 1\n- Missing Beta ......... 2\n- Missing Gamma ........ 3\n\n# Chapter One\n\nA complete body paragraph with punctuation.\n\n# Appendix\n\nAppendix text.\n";
+    let mut sections = split_source_markdown(source).publication_sections;
+    let audit = audit_publication_structure(source, &mut sections, "ocr_markdown");
+
+    assert_eq!(audit.status, "failed");
+    assert_eq!(audit.unmatched_toc_entries, 3);
+    assert!(audit
+        .anomalies
+        .iter()
+        .any(|anomaly| anomaly.contains("printed contents has 3 unmatched entries")));
+}
+
+#[test]
+fn unsafe_structure_blocks_before_units_and_a_source_bound_correction_can_resume() {
+    let root = temp_root("structure-preproduction-gate");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let source = "# chapter_001\n\nMichael Author\n\n# Chapter One\n\nThis is a complete body paragraph with enough prose to identify real reading content.\n";
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, source);
+
+    let blocked = advance_job(&store, &job_id, None, false).unwrap();
+    let project_root = child_project_root(&blocked);
+    assert_eq!(child_stage_status(&blocked, "split"), STATUS_FAILED);
+    assert_eq!(chapter_source_count(&blocked), 0);
+    assert!(!project_root.join("metadata/source_map.json").exists());
+    let report: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_root.join("qa/structure_recovery.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report["status"], "failed");
+    assert!(report["anomalies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding
+            .as_str()
+            .unwrap_or_default()
+            .contains("internal publication title")));
+
+    let source_sha256 = sha256_file(&project_root.join("source/source.md")).unwrap();
+    let draft = structure_correction_draft(&store, &job_id, None).unwrap();
+    assert_eq!(draft.source_markdown_sha256, source_sha256);
+    assert!(!draft.anomalies.is_empty());
+    let mut corrected_sections = draft.sections.clone();
+    corrected_sections[0]["title"] = serde_json::json!("Title Page");
+    corrected_sections[0]["shortTitle"] = serde_json::json!("Title Page");
+    corrected_sections[0]["role"] = serde_json::json!("frontmatter");
+    corrected_sections[0]["kind"] = serde_json::json!("title_page");
+
+    let mut tampered_sections = corrected_sections.clone();
+    tampered_sections[0]["sourceStartLine"] = serde_json::json!(2);
+    let tampered = save_structure_correction(
+        &store,
+        &job_id,
+        None,
+        BookPipelineStructureCorrectionInput {
+            schema: draft.schema.clone(),
+            source_markdown_sha256: draft.source_markdown_sha256.clone(),
+            publication_map_sha256: draft.publication_map_sha256.clone(),
+            reason: "Attempt to move a source boundary.".into(),
+            sections: tampered_sections,
+        },
+    )
+    .unwrap_err();
+    assert!(tampered.contains("may edit titles, hierarchy, roles, and kinds"));
+
+    let mut invalid_tree = corrected_sections.clone();
+    invalid_tree[1]["parentId"] = serde_json::json!("section_001");
+    invalid_tree[1]["headingLevel"] = serde_json::json!(2);
+    let invalid_tree_error = save_structure_correction(
+        &store,
+        &job_id,
+        None,
+        BookPipelineStructureCorrectionInput {
+            schema: draft.schema.clone(),
+            source_markdown_sha256: draft.source_markdown_sha256.clone(),
+            publication_map_sha256: draft.publication_map_sha256.clone(),
+            reason: "Attempt to nest a disjoint chapter under the title page.".into(),
+            sections: invalid_tree,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        invalid_tree_error.contains("child source range escapes its parent"),
+        "{invalid_tree_error}"
+    );
+
+    let mut invalid_heading = corrected_sections.clone();
+    invalid_heading[0]["headingLevel"] = serde_json::json!(7);
+    let invalid_heading_error = save_structure_correction(
+        &store,
+        &job_id,
+        None,
+        BookPipelineStructureCorrectionInput {
+            schema: draft.schema.clone(),
+            source_markdown_sha256: draft.source_markdown_sha256.clone(),
+            publication_map_sha256: draft.publication_map_sha256.clone(),
+            reason: "Attempt to save an unsupported heading depth.".into(),
+            sections: invalid_heading,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        invalid_heading_error.contains("invalid heading level"),
+        "{invalid_heading_error}"
+    );
+
+    save_structure_correction(
+        &store,
+        &job_id,
+        None,
+        BookPipelineStructureCorrectionInput {
+            schema: draft.schema,
+            source_markdown_sha256: draft.source_markdown_sha256,
+            publication_map_sha256: draft.publication_map_sha256,
+            reason: "The source title-page heading was an extractor placeholder.".into(),
+            sections: corrected_sections,
+        },
+    )
+    .unwrap();
+    assert!(project_root
+        .join("metadata/publication_map.correction.json")
+        .is_file());
+    let correction_path = project_root.join("metadata/publication_map.correction.json");
+    let first_correction: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&correction_path).unwrap()).unwrap();
+    let second_draft = structure_correction_draft(&store, &job_id, None).unwrap();
+    let mut second_sections = second_draft.sections.clone();
+    second_sections[0]["title"] = serde_json::json!("Title Page");
+    second_sections[0]["shortTitle"] = serde_json::json!("Title Page");
+    second_sections[0]["role"] = serde_json::json!("frontmatter");
+    second_sections[0]["kind"] = serde_json::json!("title_page");
+    save_structure_correction(
+        &store,
+        &job_id,
+        None,
+        BookPipelineStructureCorrectionInput {
+            schema: second_draft.schema,
+            source_markdown_sha256: second_draft.source_markdown_sha256,
+            publication_map_sha256: second_draft.publication_map_sha256,
+            reason: "Clarified the same source-bound correction before retry.".into(),
+            sections: second_sections,
+        },
+    )
+    .unwrap();
+    let second_correction: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&correction_path).unwrap()).unwrap();
+    assert_eq!(
+        second_correction["recoveredStructureSha256"],
+        first_correction["recoveredStructureSha256"]
+    );
+    let correction_json = fs::read_to_string(&correction_path).unwrap();
+    let mut stale_correction: serde_json::Value = serde_json::from_str(&correction_json).unwrap();
+    stale_correction["recoveredStructureSha256"] = serde_json::json!("c".repeat(64));
+    fs::write(
+        &correction_path,
+        serde_json::to_string_pretty(&stale_correction).unwrap() + "\n",
+    )
+    .unwrap();
+    let stale_error = match run_split_stage(&blocked.children[0]) {
+        Ok(_) => panic!("stale structure correction reached split"),
+        Err(error) => error,
+    };
+    assert!(stale_error.contains("does not bind the current source/recovered structure"));
+    fs::write(&correction_path, correction_json).unwrap();
+
+    let recovered = advance_job(&store, &job_id, None, false).unwrap();
+    assert_eq!(child_stage_status(&recovered, "split"), STATUS_COMPLETED);
+    assert!(chapter_source_count(&recovered) >= 1);
+    assert!(recovered.children[0]
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "structure_correction"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_records_stable_semantic_notes_and_reference_ids() {
+    let root = temp_root("publication-map-semantic-notes");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let source = "# Chapter\n\nA claim[^end-legal-1] and another reference[^end-legal-1].\n\n[^end-legal-1]: The source note.\n    A continued paragraph with [a link](https://example.test).\n";
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, source);
+
+    let split = advance_job(&store, &job_id, None, false).unwrap();
+    let project_root = child_project_root(&split);
+    let publication_map: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_root.join("metadata/publication_map.json")).unwrap(),
+    )
+    .unwrap();
+    let note = &publication_map["notes"][0];
+
+    assert_eq!(note["id"], "note_001");
+    assert_eq!(note["sourceLabel"], "end-legal-1");
+    assert_eq!(note["kind"], "endnote");
+    assert_eq!(note["publicationSectionId"], "section_001");
+    assert_eq!(
+        note["referenceIds"],
+        serde_json::json!(["noteref_note_001_001", "noteref_note_001_002"])
+    );
+    assert_eq!(note["backlinkIds"], note["referenceIds"]);
+    assert_eq!(
+        note["sourceEndLine"].as_u64(),
+        note["sourceStartLine"].as_u64().map(|line| line + 1)
+    );
+    assert!(!note["translationUnitIds"].as_array().unwrap().is_empty());
+    let note_qa: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(project_root.join("qa/notes.json")).unwrap())
+            .unwrap();
+    assert_eq!(note_qa["status"], "passed");
+    assert_eq!(note_qa["sourceNotes"], 1);
+    assert_eq!(note_qa["sourceReferences"], 2);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn equivalent_epub_and_pdf_extractions_produce_the_same_note_model() {
+    fn split_with_extractor_evidence(root: &Path, source_format: &str) -> serde_json::Value {
+        let repo = handoff_repo_fixture(root);
+        let source_path = root.join("source.md");
+        let store = BookPipelineStore::for_test(root);
+        let source = "# Chapter\n\nA claim[^legal-1] and another reference[^legal-1].\n\n[^legal-1]: The source note.\n";
+        let job_id = handoff_ready_child_job(&store, &repo, &source_path, source);
+        let staged = store
+            .load()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        let project_root = child_project_root(&staged);
+        let evidence_document = project_root
+            .join("source")
+            .join(format!("{source_format}_evidence.txt"));
+        fs::write(&evidence_document, source).unwrap();
+        let evidence_document_path = format!("{source_format}_evidence.txt");
+        let mut source_documents = vec![serde_json::json!({
+            "path": evidence_document_path,
+            "startLine": 1,
+            "endLine": 5,
+            "pages": if source_format == "epub" { vec![] } else { vec![1] },
+            "kind": "fixture_source",
+            "sha256": sha256_file(&evidence_document).unwrap()
+        })];
+        let mut note_source_files = vec![evidence_document_path.clone()];
+        let mut section_source_files = vec![evidence_document_path.clone()];
+        let navigation_source_href = (source_format == "epub").then_some("OEBPS/nav.xhtml");
+        let source_anchor = if source_format == "epub" {
+            let original_note_document = project_root.join("source/epub_note_source.xhtml");
+            fs::write(
+                &original_note_document,
+                "<aside id=\"legal-1\">The source note.</aside>",
+            )
+            .unwrap();
+            source_documents.push(serde_json::json!({
+                "path": "epub_note_source.xhtml",
+                "startLine": 0,
+                "endLine": 0,
+                "pages": [],
+                "kind": "epub_xhtml",
+                "sha256": sha256_file(&original_note_document).unwrap(),
+                "sourceHref": "OEBPS/notes.xhtml",
+                "anomalies": ["source document produced no assembled Markdown lines"]
+            }));
+            note_source_files.push("epub_note_source.xhtml".into());
+            let navigation_document = project_root.join("source/epub_navigation.xhtml");
+            fs::write(&navigation_document, "<nav>Chapter</nav>").unwrap();
+            source_documents.push(serde_json::json!({
+                "path": "epub_navigation.xhtml",
+                "startLine": 0,
+                "endLine": 0,
+                "pages": [],
+                "kind": "epub_navigation",
+                "sha256": sha256_file(&navigation_document).unwrap(),
+                "sourceHref": "OEBPS/nav.xhtml",
+                "anomalies": ["navigation evidence has no assembled Markdown line range"]
+            }));
+            section_source_files.push("epub_navigation.xhtml".into());
+            "OEBPS/notes.xhtml#legal-1"
+        } else {
+            "markdown-footnote-note_001"
+        };
+        fs::write(
+            project_root.join("metadata/extracted_publication_evidence.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "publication-extraction-evidence-v2",
+                "sourceFormat": source_format,
+                "extractionEngine": if source_format == "epub" {
+                    "epub-package-navigation"
+                } else {
+                    "pdf-direct-text"
+                },
+                "sourceDocuments": source_documents,
+                "sections": [{
+                    "id": "extractor_section_001",
+                    "title": "Chapter",
+                    "parentId": null,
+                    "headingLevel": 1,
+                    "sourceHref": if source_format == "epub" {
+                        "OEBPS/chapter.xhtml"
+                    } else {
+                        "pdf://page/1"
+                    },
+                    "navigationSourceHref": navigation_source_href,
+                    "sourceStartLine": 1,
+                    "sourceEndLine": 5,
+                    "sourceFiles": section_source_files,
+                    "sourcePages": if source_format == "epub" { vec![] } else { vec![1] },
+                    "confidence": 1.0,
+                    "anomalies": []
+                }],
+                "notes": [{
+                    "id": "note_001",
+                    "sourceLabel": "legal-1",
+                    "kind": "footnote",
+                    "publicationSectionId": "extractor_section_001",
+                    "sourceStartLine": 5,
+                    "sourceEndLine": 5,
+                    "sourcePages": if source_format == "epub" { vec![] } else { vec![1] },
+                    "sourceFiles": note_source_files,
+                    "referenceSourceLines": [3, 3],
+                    "referenceIds": ["noteref_note_001_001", "noteref_note_001_002"],
+                    "sourceAnchor": source_anchor,
+                    "evidence": ["canonical Markdown note definition and reference"],
+                    "anomalies": []
+                }]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        bind_project_publication_evidence(
+            &store,
+            &job_id,
+            &project_root,
+            if source_format == "epub" {
+                "epub_navigation"
+            } else {
+                "direct_pdf_evidence"
+            },
+        );
+
+        let split = advance_job(&store, &job_id, None, false).unwrap();
+        assert_eq!(child_stage_status(&split, "split"), STATUS_COMPLETED);
+        serde_json::from_str(
+            &fs::read_to_string(project_root.join("metadata/publication_map.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    let epub_root = temp_root("epub-note-model-equivalence");
+    let pdf_root = temp_root("pdf-note-model-equivalence");
+    let epub = split_with_extractor_evidence(&epub_root, "epub");
+    let pdf = split_with_extractor_evidence(&pdf_root, "pdf");
+
+    let semantic_note_keys = [
+        "id",
+        "kind",
+        "publicationSectionId",
+        "referenceIds",
+        "backlinkIds",
+        "referenceSourceLines",
+        "sourceStartLine",
+        "sourceEndLine",
+        "sourceLabel",
+        "translationUnitIds",
+        "targetContentStatus",
+    ];
+    for key in semantic_note_keys {
+        assert_eq!(epub["notes"][0][key], pdf["notes"][0][key], "{key}");
+    }
+    assert_eq!(epub["notes"][0]["sourcePages"], serde_json::json!([]));
+    assert_eq!(pdf["notes"][0]["sourcePages"], serde_json::json!([1]));
+    assert_eq!(
+        epub["notes"][0]["sourceAnchor"],
+        "OEBPS/notes.xhtml#legal-1"
+    );
+    assert_eq!(
+        pdf["notes"][0]["sourceAnchor"],
+        "markdown-footnote-note_001"
+    );
+    assert_eq!(epub["notes"][0]["id"], "note_001");
+    assert_eq!(
+        epub["notes"][0]["referenceIds"],
+        serde_json::json!(["noteref_note_001_001", "noteref_note_001_002"])
+    );
+    let _ = fs::remove_dir_all(epub_root);
+    let _ = fs::remove_dir_all(pdf_root);
+}
+
+#[test]
+fn extractor_note_contract_cannot_omit_a_note_present_in_markdown() {
+    let root = temp_root("extractor-note-contract-omission");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let source = "# Chapter\n\nClaim[^n1].\n\n[^n1]: Source note.\n";
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, source);
+    let staged = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    let project_root = child_project_root(&staged);
+    let evidence_document = project_root.join("source/pdf_source.txt");
+    fs::write(&evidence_document, source).unwrap();
+    fs::write(
+        project_root.join("metadata/extracted_publication_evidence.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema": "publication-extraction-evidence-v2",
+            "sourceFormat": "pdf",
+            "sourceDocuments": [{
+                "path": "pdf_source.txt",
+                "startLine": 1,
+                "endLine": 5,
+                "kind": "fixture",
+                "sha256": sha256_file(&evidence_document).unwrap()
+            }],
+            "sections": [{
+                "id": "extracted_section_001",
+                "title": "Chapter",
+                "parentId": null,
+                "headingLevel": 1,
+                "sourceHref": "pdf://page/1",
+                "sourceStartLine": 1,
+                "sourceEndLine": 5,
+                "sourceFiles": ["pdf_source.txt"]
+            }],
+            "notes": []
+        }))
+        .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    bind_project_publication_evidence(&store, &job_id, &project_root, "direct_pdf_evidence");
+
+    let failed = advance_job(&store, &job_id, None, false).unwrap();
+
+    assert_eq!(child_stage_status(&failed, "split"), STATUS_FAILED);
+    assert!(failed.children[0]
+        .last_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("does not match canonical Markdown notes"));
+    assert!(!project_root.join("metadata/source_map.json").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn split_rejects_a_known_extractor_route_without_its_evidence_sidecar() {
+    let root = temp_root("split-missing-extractor-evidence");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# Chapter\n\nA complete source paragraph.\n",
+    );
+    let staged = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .unwrap();
+    let project_root = child_project_root(&staged);
+    let manifest_path = project_root.join("metadata/source_manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["structure_evidence_kind"] = serde_json::json!("epub_navigation");
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    refresh_project_manifest_artifact(&store, &job_id, &project_root);
+
+    let failed = advance_job(&store, &job_id, None, false).unwrap();
+
+    assert_eq!(child_stage_status(&failed, "split"), STATUS_FAILED);
+    assert!(failed.children[0]
+        .last_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("requires extracted publication evidence"));
+    assert!(!project_root.join("metadata/source_map.json").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn semantic_note_scanning_ignores_code_fences_comments_and_inline_code() {
+    let source = "# Chapter\n\nReal[^real]. `code [^inline]`\n\n`multiline inline code\nFake[^multiline].\n`\n\n```markdown\nFake[^fenced].\n<!-- an unclosed HTML-comment token is code here\n[^fenced]: Fake definition.\n```\n\n<!-- Fake [^comment].\n[^comment]: Fake definition. -->\n\n[^real]: Real definition.\n";
+    let plan = split_source_markdown(source);
+    let notes = recover_publication_notes(source, &plan.publication_sections, &plan.chapters);
+    let audit = audit_publication_notes(source, &notes);
+
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].source_label, "real");
+    assert_eq!(audit.status, "passed");
+    assert_eq!(audit.source_notes, 1);
+    assert_eq!(audit.source_references, 1);
+}
+
+#[test]
+fn orphan_note_relationship_blocks_before_translation_units() {
+    let root = temp_root("publication-map-orphan-note");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let source = "# Chapter\n\nA complete body sentence contains a missing note[^missing].\n";
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, source);
+
+    let blocked = advance_job(&store, &job_id, None, false).unwrap();
+    let project_root = child_project_root(&blocked);
+
+    assert_eq!(child_stage_status(&blocked, "split"), STATUS_FAILED);
+    assert_eq!(chapter_source_count(&blocked), 0);
+    let note_qa: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(project_root.join("qa/notes.json")).unwrap())
+            .unwrap();
+    assert_eq!(note_qa["status"], "failed");
+    assert_eq!(note_qa["orphanReferences"], serde_json::json!(["missing"]));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -12228,7 +14811,7 @@ fn mixed_fence_markers_do_not_close_the_active_code_block() {
 fn hard_bound_separates_a_small_fence_from_oversized_plain_text() {
     let text = format!("```text\nsmall\n```\n{}", "界".repeat(40 * 1024));
 
-    let pieces = hard_bound_text(&text);
+    let pieces = hard_bound_text(&text, MAX_TRANSLATION_UNIT_BYTES);
 
     assert!(pieces.len() > 1);
     assert!(pieces
@@ -12280,6 +14863,87 @@ fn source_change_after_prepare_blocks_split_pending_invalidation() {
     assert_eq!(
         blocked.children[0].last_error.as_deref(),
         Some("source_changed_downstream_exists")
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn retained_extractor_evidence_change_invalidates_a_committed_split() {
+    let root = temp_root("extractor-evidence-invalidation");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(&store, &repo, &source_path, "# One\n\nBody one.\n");
+    let staged = store.load().unwrap().jobs.remove(0);
+    let project_root = child_project_root(&staged);
+    let retained_document = project_root.join("source/extractor/source.txt");
+    fs::create_dir_all(retained_document.parent().unwrap()).unwrap();
+    fs::write(&retained_document, "first extractor evidence").unwrap();
+    let write_evidence = |document_sha256: &str| {
+        let evidence_path = project_root.join("metadata/extracted_publication_evidence.json");
+        fs::write(
+            &evidence_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "publication-extraction-evidence-v2",
+                "sourceFormat": "pdf",
+                "sourceDocuments": [{
+                    "path": "extractor/source.txt",
+                    "startLine": 1,
+                    "endLine": 3,
+                    "pages": [1],
+                    "kind": "fixture_source",
+                    "sha256": document_sha256
+                }],
+                "sections": [{
+                    "id": "fixture_section",
+                    "title": "One",
+                    "parentId": null,
+                    "headingLevel": 1,
+                    "sourceHref": "pdf://page/1",
+                    "sourceStartLine": 1,
+                    "sourceEndLine": 3,
+                    "sourcePages": [1],
+                    "sourceFiles": ["extractor/source.txt"]
+                }]
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+        bind_project_publication_evidence(&store, &job_id, &project_root, "direct_pdf_evidence");
+    };
+    write_evidence(&sha256_file(&retained_document).unwrap());
+
+    advance_job(&store, &job_id, None, false).unwrap();
+    let prepared = advance_job(&store, &job_id, None, false).unwrap();
+    assert_eq!(child_stage_status(&prepared, "prepare"), STATUS_COMPLETED);
+
+    fs::write(&retained_document, "revised extractor evidence").unwrap();
+    assert!(current_split_evidence_hashes(&project_root)
+        .unwrap_err()
+        .contains("failed its SHA-256 check"));
+    write_evidence(&sha256_file(&retained_document).unwrap());
+    let blocked = advance_job(&store, &job_id, None, false).unwrap();
+
+    assert_eq!(child_stage_status(&blocked, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&blocked, "prepare"), STATUS_PENDING);
+    assert_eq!(
+        blocked.children[0].last_error.as_deref(),
+        Some("source_changed_downstream_exists")
+    );
+    let split = blocked.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "split")
+        .unwrap();
+    assert_eq!(
+        split.input_hashes.get("publicationEvidenceDocumentsSha256"),
+        Some(
+            &current_split_evidence_hashes(&project_root)
+                .unwrap()
+                .evidence_documents
+                .unwrap()
+        )
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -12863,14 +15527,15 @@ fn split_and_prepare_keep_private_text_out_of_job_records() {
         assert!(!artifact.path.contains("Distinctivechaptertitle"));
     }
 
-    // Traceability metadata still lives in the local (gitignored) source map.
-    let source_map = fs::read_to_string(
+    // Reader-visible titles live only in the local (gitignored) publication
+    // map; the source map is now translation-unit traceability only.
+    let publication_map = fs::read_to_string(
         child_project_root(&advanced)
             .join("metadata")
-            .join("source_map.json"),
+            .join("publication_map.json"),
     )
     .unwrap();
-    assert!(source_map.contains("Distinctivechaptertitle"));
+    assert!(publication_map.contains("Distinctivechaptertitle"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -13310,6 +15975,8 @@ fn excerpt_fixture_job(artifact_path: &Path) -> BookPipelineJob {
     serde_json::from_value(serde_json::json!({
         "id": "job-excerpt",
         "mode": "convert_then_translate",
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
         "source": { "kind": "local_pdf_folder", "title": "Fixture" },
         "route": [],
         "status": "waiting_for_approval",
@@ -13445,10 +16112,8 @@ impl RunnerCommandExecutor for OcrSampleFixtureExecutor {
         // `uv run --package ocr` resolves the workspace from the OCR root, and
         // the script imports its sibling engine clients by bare name. Without
         // this the subprocess fails only against a real install.
-        assert_eq!(
-            command.cwd.as_deref(),
-            Some(book_ocr_conversion_root().as_path())
-        );
+        let ocr_root = book_ocr_conversion_root().unwrap();
+        assert_eq!(command.cwd.as_deref(), Some(ocr_root.as_path()));
         // Whatever the Keychain holds is what the engines authenticate with;
         // dropping inject_ocr_credentials would otherwise fail nothing here and
         // report "not configured" for both engines on a configured machine.
@@ -14395,6 +17060,8 @@ fn layout_job(route: Vec<BookPipelineRouteItem>) -> BookPipelineJob {
     let mut job: BookPipelineJob = serde_json::from_value(serde_json::json!({
         "id": "job-layout",
         "mode": MODE_LAYOUT_PRESERVING,
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
         "source": { "kind": "zotero_attachment", "title": "Fixture attachment" },
         "route": [],
         "status": "routed",
@@ -14852,11 +17519,35 @@ impl PipelineRunner for LayoutPdfFixtureRunner {
     }
 }
 
+fn point_layout_job_at_source(store: &dyn BookPipelineStateStore, job_id: &str, source_pdf: &Path) {
+    let mut state = store.load().unwrap();
+    let job = state.jobs.iter_mut().find(|job| job.id == job_id).unwrap();
+    job.source.path = Some(display_path(source_pdf));
+    for route in &mut job.route {
+        if route.route_kind != "translation_handoff" {
+            route.source_ref = display_path(source_pdf);
+        }
+    }
+    for child in &mut job.children {
+        child.source.path = Some(display_path(source_pdf));
+        for route in &mut child.route {
+            if route.route_kind != "translation_handoff" {
+                route.source_ref = display_path(source_pdf);
+            }
+        }
+    }
+    store.save(&state).unwrap();
+}
+
 #[test]
 fn a_layout_job_completes_at_extract_with_the_bilingual_pdf_registered() {
     let root = temp_root("layout-lifecycle");
     fs::create_dir_all(&root).unwrap();
     let store = BookPipelineStore::for_test(&root);
+    let source_pdf = root.join("source/Weber 1922.pdf");
+    fs::create_dir_all(source_pdf.parent().unwrap()).unwrap();
+    fs::write(&source_pdf, b"%PDF-1.7 original\n").unwrap();
+    let workspace = root.join("Documents/BiblioSmith");
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
@@ -14867,6 +17558,7 @@ fn a_layout_job_completes_at_extract_with_the_bilingual_pdf_registered() {
         },
     )
     .unwrap();
+    point_layout_job_at_source(&store, &job.id, &source_pdf);
 
     // Queued shape: two stages, and no translation handoff row on the route.
     let child = &job.children[0];
@@ -14886,7 +17578,14 @@ fn a_layout_job_completes_at_extract_with_the_bilingual_pdf_registered() {
         job.route
     );
 
-    let completed = run_job(&store, &LayoutPdfFixtureRunner, &job.id).unwrap();
+    let completed = run_job_with_handoff(
+        &store,
+        &LayoutPdfFixtureRunner,
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&workspace),
+    )
+    .unwrap();
 
     assert_eq!(completed.status, STATUS_COMPLETED);
     assert_eq!(
@@ -14895,8 +17594,31 @@ fn a_layout_job_completes_at_extract_with_the_bilingual_pdf_registered() {
             .iter()
             .map(|artifact| artifact.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["pdf"]
+        vec!["source_book", "source_manifest", "reading_bilingual_pdf"]
     );
+    let project_root = PathBuf::from(
+        completed.children[0]
+            .local_project_root
+            .as_deref()
+            .expect("layout book has a durable project"),
+    );
+    assert!(project_root.starts_with(&workspace));
+    assert_eq!(
+        fs::read(project_root.join("source/original.pdf")).unwrap(),
+        b"%PDF-1.7 original\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project_root.join("source/source.md")).unwrap(),
+        "# Layout-preserving source\n\nThe original source is stored as [original.pdf](original.pdf). This project preserves the translated reading output without extracting a Markdown source.\n"
+    );
+    let durable_pdf = completed
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "reading_bilingual_pdf")
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .expect("durable PDF");
+    assert!(durable_pdf.starts_with(&workspace));
+    assert!(!durable_pdf.starts_with(store.job_output_dir(&job.id)));
     // No gate is ever raised: the whole point of this track is one pass.
     assert!(
         completed
@@ -14952,6 +17674,10 @@ fn a_finished_layout_job_opens_the_bilingual_pdf_itself() {
     let root = temp_root("layout-open-target");
     fs::create_dir_all(&root).unwrap();
     let store = BookPipelineStore::for_test(&root);
+    let source_pdf = root.join("source/Weber 1922.pdf");
+    fs::create_dir_all(source_pdf.parent().unwrap()).unwrap();
+    fs::write(&source_pdf, b"%PDF-1.7 original\n").unwrap();
+    let workspace = root.join("Documents/BiblioSmith");
     let job = queue_job(
         &store,
         fake_direct_zotero_source(),
@@ -14962,8 +17688,16 @@ fn a_finished_layout_job_opens_the_bilingual_pdf_itself() {
         },
     )
     .unwrap();
+    point_layout_job_at_source(&store, &job.id, &source_pdf);
 
-    let completed = run_job(&store, &LayoutPdfFixtureRunner, &job.id).unwrap();
+    let completed = run_job_with_handoff(
+        &store,
+        &LayoutPdfFixtureRunner,
+        &LocalProjectHandoffRunner,
+        &job.id,
+        Some(&workspace),
+    )
+    .unwrap();
 
     assert_eq!(completed.status, STATUS_COMPLETED);
     let open_target = completed
@@ -14982,6 +17716,7 @@ fn a_finished_layout_job_opens_the_bilingual_pdf_itself() {
         "expected the bilingual PDF, got {}",
         target.path
     );
+    assert!(Path::new(&target.path).starts_with(&workspace));
 }
 
 #[test]
@@ -15223,15 +17958,127 @@ fn an_extracted_asset_sidecar_is_not_collected_as_its_own_artifact() {
 }
 
 #[test]
+fn known_extractor_handoff_rejects_missing_publication_evidence() {
+    let root = temp_root("missing-publication-evidence-handoff");
+    let extract_dir = root.join("extract");
+    let repo_root = root.join("repo");
+    fs::create_dir_all(&extract_dir).unwrap();
+    let markdown_path = extract_dir.join("Book.md");
+    let original_epub = root.join("Book.epub");
+    fs::write(&markdown_path, "# Chapter\n\nBody.\n").unwrap();
+    fs::write(&original_epub, b"PK fixture").unwrap();
+    let job: BookPipelineJob = serde_json::from_value(serde_json::json!({
+        "id": "job-missing-publication-evidence",
+        "mode": MODE_CONVERT_THEN_TRANSLATE,
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
+        "source": { "kind": "local_pdf_folder", "title": "Book", "path": display_path(&original_epub) },
+        "route": [],
+        "status": "running",
+        "currentStep": "handoff",
+        "lastError": null,
+        "logSummary": [],
+        "artifacts": [{
+            "artifactId": "art-md",
+            "kind": "markdown",
+            "path": display_path(&markdown_path),
+            "sha256": sha256_file(&markdown_path).unwrap(),
+            "zoteroKey": null
+        }],
+        "outputDir": display_path(&extract_dir),
+        "attempts": 1,
+        "createdAt": "2026-08-01T00:00:00Z",
+        "updatedAt": "2026-08-01T00:00:00Z"
+    }))
+    .unwrap();
+
+    let error = create_translation_handoff_project_with_title(&job, None, &repo_root, Some("Book"))
+        .unwrap_err();
+
+    assert!(error.contains("publication evidence"), "{error}");
+    assert!(!repo_root.join("books/local/zh-Hans").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it() {
     let root = temp_root("epub-sidecar-handoff");
     let extract_dir = root.join("extract");
     let repo_root = root.join("repo");
     fs::create_dir_all(extract_dir.join("Some_Book_assets")).unwrap();
     let markdown_path = extract_dir.join("Some_Book.md");
+    let original_epub = root.join("Some Book.epub");
+    fs::write(&original_epub, b"PK original epub").unwrap();
     fs::write(
         &markdown_path,
         "# Chapter One\n\n![A figure](Some_Book_assets/figure.png)\n\n# Chapter Two\n\nBody.\n",
+    )
+    .unwrap();
+    let source_document = extract_dir.join("Some_Book_assets/source_documents/epub/document.xhtml");
+    fs::create_dir_all(source_document.parent().unwrap()).unwrap();
+    fs::write(&source_document, "<h1>Chapter One</h1><p>Body.</p>").unwrap();
+    let navigation_document =
+        extract_dir.join("Some_Book_assets/source_documents/epub/navigation.xhtml");
+    fs::write(&navigation_document, "<nav>Chapter One; Chapter Two</nav>").unwrap();
+    fs::write(
+        extract_dir.join("Some_Book.publication.json"),
+        serde_json::to_string(&serde_json::json!({
+            "schema": "publication-extraction-evidence-v2",
+            "sourceFormat": "epub",
+            "title": "Some Book",
+            "creator": "Fixture Author",
+            "publisher": "Fixture Press",
+            "date": "2026",
+            "coverPath": "Some_Book_assets/cover.png",
+            "sourceDocuments": [
+                {
+                    "path": "Some_Book_assets/source_documents/epub/document.xhtml",
+                    "startLine": 1,
+                    "endLine": 7,
+                    "pages": [],
+                    "kind": "epub_xhtml",
+                    "sha256": sha256_file(&source_document).unwrap(),
+                    "sourceHref": "OEBPS/book.xhtml"
+                },
+                {
+                    "path": "Some_Book_assets/source_documents/epub/navigation.xhtml",
+                    "startLine": 0,
+                    "endLine": 0,
+                    "pages": [],
+                    "kind": "epub_navigation",
+                    "sha256": sha256_file(&navigation_document).unwrap(),
+                    "sourceHref": "OEBPS/nav.xhtml",
+                    "anomalies": ["navigation evidence has no assembled Markdown line range"]
+                }
+            ],
+            "sections": [
+                {
+                    "id": "epub_section_001",
+                    "title": "Chapter One",
+                    "parentId": null,
+                    "headingLevel": 1,
+                    "sourceHref": "OEBPS/one.xhtml",
+                    "navigationSourceHref": "OEBPS/nav.xhtml",
+                    "sourceStartLine": 1,
+                    "sourceEndLine": 4,
+                    "sourceFiles": ["Some_Book_assets/source_documents/epub/document.xhtml", "Some_Book_assets/source_documents/epub/navigation.xhtml"],
+                    "role": "bodymatter"
+                },
+                {
+                    "id": "epub_section_002",
+                    "title": "Chapter Two",
+                    "parentId": null,
+                    "headingLevel": 1,
+                    "sourceHref": "OEBPS/two.xhtml",
+                    "navigationSourceHref": "OEBPS/nav.xhtml",
+                    "sourceStartLine": 5,
+                    "sourceEndLine": 7,
+                    "sourceFiles": ["Some_Book_assets/source_documents/epub/document.xhtml", "Some_Book_assets/source_documents/epub/navigation.xhtml"],
+                    "role": "bodymatter"
+                }
+            ]
+        }))
+        .unwrap(),
     )
     .unwrap();
     fs::write(
@@ -15239,10 +18086,17 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
         "PNG bytes",
     )
     .unwrap();
+    fs::write(
+        extract_dir.join("Some_Book_assets").join("cover.png"),
+        "cover bytes",
+    )
+    .unwrap();
     let job: BookPipelineJob = serde_json::from_value(serde_json::json!({
         "id": "job-epub-sidecar",
         "mode": MODE_CONVERT_THEN_TRANSLATE,
-        "source": { "kind": "local_pdf_folder", "title": "Some Book" },
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
+        "source": { "kind": "local_pdf_folder", "title": "Some Book", "path": display_path(&original_epub) },
         "route": [],
         "status": "running",
         "currentStep": "handoff",
@@ -15279,6 +18133,24 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
             .is_file(),
         "the images an EPUB extraction pulled out must reach the translation project"
     );
+    assert_eq!(
+        fs::read(project_root.join("source/original.epub")).unwrap(),
+        b"PK original epub"
+    );
+    assert!(project_root
+        .join("metadata/extracted_publication_evidence.json")
+        .is_file());
+    assert_eq!(
+        fs::read(project_root.join("source/cover.png")).unwrap(),
+        b"cover bytes"
+    );
+    assert!(project_root
+        .join("source/Some_Book_assets/source_documents/epub/document.xhtml")
+        .is_file());
+    let book_metadata = fs::read_to_string(project_root.join("metadata/book.yaml")).unwrap();
+    assert!(book_metadata.contains("author: \"Fixture Author\""));
+    assert!(book_metadata.contains("publisher: \"Fixture Press\""));
+    assert!(book_metadata.contains("date: \"2026\""));
 
     let source_text = fs::read_to_string(project_root.join("source").join("source.md")).unwrap();
     let rewritten =
@@ -15287,6 +18159,576 @@ fn the_asset_sidecar_travels_into_the_translation_project_and_chapters_reach_it(
     assert!(
         rewritten.contains("](../../source/Some_Book_assets/figure.png)"),
         "chapter files sit two levels below source/: {rewritten}"
+    );
+    let split_child = split_child_for_project(&project_root);
+    let split = run_split_stage(&split_child).unwrap();
+    assert!(split.error.is_none());
+    let copied_evidence = project_root.join("metadata/extracted_publication_evidence.json");
+    assert_eq!(
+        split.input_hashes.get("publicationEvidenceSha256"),
+        Some(&sha256_file(&copied_evidence).unwrap())
+    );
+    assert!(split
+        .input_hashes
+        .contains_key("publicationEvidenceDocumentsSha256"));
+    let structure_report: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_root.join("qa/structure_recovery.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(structure_report["source"], "epub_navigation");
+    assert_eq!(structure_report["status"], "passed");
+    let _ = fs::remove_dir_all(root);
+}
+
+fn producer_contract_repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("src-tauri must live below the repository root")
+        .to_path_buf()
+}
+
+fn split_child_for_project(project_root: &Path) -> BookPipelineChildJob {
+    let manifest_path = project_root.join("metadata/source_manifest.json");
+    BookPipelineChildJob {
+        local_project_root: Some(display_path(project_root)),
+        artifacts: vec![BookPipelineArtifact {
+            kind: "source_manifest".into(),
+            path: display_path(&manifest_path),
+            sha256: Some(sha256_file(&manifest_path).unwrap()),
+            producer: BookPipelineArtifactProducer {
+                stage_id: "handoff".into(),
+                attempt: 1,
+                ..BookPipelineArtifactProducer::default()
+            },
+            producer_stage: Some("handoff".into()),
+            ..BookPipelineArtifact::default()
+        }],
+        ..BookPipelineChildJob::default()
+    }
+}
+
+fn producer_contract_handoff(
+    route: &serde_json::Value,
+    target_repo: &Path,
+) -> (PathBuf, serde_json::Value, Vec<u8>) {
+    let name = route["name"].as_str().unwrap();
+    let source_path = PathBuf::from(route["sourcePath"].as_str().unwrap());
+    let markdown_path = PathBuf::from(route["markdownPath"].as_str().unwrap());
+    let evidence_path = PathBuf::from(route["evidencePath"].as_str().unwrap());
+    let evidence_bytes = fs::read(&evidence_path).unwrap();
+    let evidence: serde_json::Value = serde_json::from_slice(&evidence_bytes).unwrap();
+    let job: BookPipelineJob = serde_json::from_value(serde_json::json!({
+        "id": format!("job-producer-contract-{name}"),
+        "mode": MODE_CONVERT_THEN_TRANSLATE,
+        "promptPackReference": default_prompt_pack_reference_for_mode(TRANSLATION_MODE_FAST),
+        "promptPackSelectionSource": "default",
+        "source": {
+            "kind": "local_pdf_folder",
+            "title": format!("Producer Contract {name}"),
+            "path": display_path(&source_path)
+        },
+        "route": [],
+        "status": "running",
+        "currentStep": "handoff",
+        "lastError": null,
+        "logSummary": [],
+        "artifacts": [{
+            "artifactId": format!("artifact-{name}"),
+            "kind": "markdown",
+            "path": display_path(&markdown_path),
+            "sha256": sha256_file(&markdown_path).unwrap(),
+            "zoteroKey": null
+        }],
+        "outputDir": display_path(markdown_path.parent().unwrap()),
+        "attempts": 1,
+        "createdAt": "2026-08-05T00:00:00Z",
+        "updatedAt": "2026-08-05T00:00:00Z"
+    }))
+    .unwrap();
+
+    create_translation_handoff_project_with_title(
+        &job,
+        None,
+        target_repo,
+        Some(&format!("Producer Contract {name}")),
+    )
+    .unwrap();
+    let project_root = fs::read_dir(target_repo.join("books/local/zh-Hans"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        fs::read(project_root.join("metadata/extracted_publication_evidence.json")).unwrap(),
+        evidence_bytes,
+        "{name}: handoff must preserve producer evidence byte-for-byte"
+    );
+    (project_root, evidence, evidence_bytes)
+}
+
+fn semantic_projection(value: &serde_json::Value, keys: &[&str]) -> serde_json::Value {
+    serde_json::Value::Object(
+        keys.iter()
+            .map(|key| ((*key).to_string(), value[*key].clone()))
+            .collect(),
+    )
+}
+
+#[test]
+fn real_producers_preserve_publication_semantics_through_handoff_and_split() {
+    let root = temp_root("real-producer-publication-contract");
+    let generated = root.join("generated");
+    let repo_root = producer_contract_repo_root();
+    let output = Command::new("uv")
+        .args([
+            "run",
+            "--package",
+            "ocr",
+            "python",
+            "packages/ocr/tests/generate_producer_contract_fixtures.py",
+            "--output",
+        ])
+        .arg(&generated)
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "producer fixture generation failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let index: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(generated.join("producer-contract-index.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(index["schema"], "producer-publication-contract-fixtures-v1");
+    let routes = index["routes"].as_array().unwrap();
+    assert_eq!(
+        routes
+            .iter()
+            .map(|route| route["name"].as_str().unwrap())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["direct_pdf", "epub", "mineru", "paddle"])
+    );
+
+    let section_keys = [
+        "id",
+        "title",
+        "parentId",
+        "headingLevel",
+        "sourceHref",
+        "sourceStartLine",
+        "sourceEndLine",
+        "sourcePages",
+        "sourceFiles",
+        "confidence",
+        "anomalies",
+    ];
+    let note_keys = [
+        "id",
+        "sourceLabel",
+        "kind",
+        "publicationSectionId",
+        "sourceStartLine",
+        "sourceEndLine",
+        "sourcePages",
+        "sourceFiles",
+        "referenceSourceLines",
+        "referenceIds",
+        "sourceAnchor",
+    ];
+    for route in routes {
+        let name = route["name"].as_str().unwrap();
+        let target_repo = root.join(format!("handoff-{name}"));
+        let (project_root, evidence, evidence_bytes) =
+            producer_contract_handoff(route, &target_repo);
+        assert!(
+            evidence["sections"].as_array().unwrap().len() >= 2,
+            "{name}"
+        );
+        assert!(
+            evidence["sections"].as_array().unwrap()[1]["parentId"]
+                .as_str()
+                .is_some(),
+            "{name}: fixture must exercise hierarchy"
+        );
+        assert_eq!(evidence["notes"].as_array().unwrap().len(), 1, "{name}");
+
+        for document in evidence["sourceDocuments"].as_array().unwrap() {
+            let path = project_root
+                .join("source")
+                .join(document["path"].as_str().unwrap());
+            assert!(
+                path.is_file(),
+                "{name}: missing retained source document {path:?}"
+            );
+            assert_eq!(sha256_file(&path).unwrap(), document["sha256"], "{name}");
+        }
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(project_root.join("metadata/source_manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest["publication_evidence_sha256"],
+            sha256_str(std::str::from_utf8(&evidence_bytes).unwrap()),
+            "{name}: manifest must bind the producer sidecar"
+        );
+
+        let child = split_child_for_project(&project_root);
+        let split = run_split_stage(&child)
+            .unwrap_or_else(|error| panic!("{name}: split rejected real producer output: {error}"));
+        assert!(split.error.is_none(), "{name}: {:?}", split.error);
+        let publication: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(project_root.join("metadata/publication_map.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(publication["audit"]["status"], "passed", "{name}");
+        let compiled_sections = publication["sections"].as_array().unwrap();
+        assert_eq!(
+            compiled_sections
+                .iter()
+                .map(|section| section["role"].clone())
+                .collect::<Vec<_>>(),
+            route["expectedRoles"].as_array().unwrap().clone(),
+            "{name}: section roles changed across the runtime boundary"
+        );
+        assert_eq!(
+            compiled_sections
+                .iter()
+                .map(|section| section["kind"].clone())
+                .collect::<Vec<_>>(),
+            route["expectedKinds"].as_array().unwrap().clone(),
+            "{name}: section kinds changed across the runtime boundary"
+        );
+        let section_id_map = evidence["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(compiled_sections)
+            .map(|(source, compiled)| {
+                (
+                    source["id"].as_str().unwrap(),
+                    compiled["id"].as_str().unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let expected_sections = evidence["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| {
+                let mut projected = semantic_projection(value, &section_keys);
+                projected["id"] = serde_json::json!(section_id_map[value["id"].as_str().unwrap()]);
+                projected["parentId"] = value["parentId"]
+                    .as_str()
+                    .map(|parent| serde_json::json!(section_id_map[parent]))
+                    .unwrap_or(serde_json::Value::Null);
+                if projected["sourcePages"].is_null() {
+                    projected["sourcePages"] = serde_json::json!([]);
+                }
+                projected
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected_sections,
+            publication["sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| semantic_projection(value, &section_keys))
+                .collect::<Vec<_>>(),
+            "{name}: section semantics changed across the runtime boundary"
+        );
+        for (source, compiled) in evidence["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(compiled_sections)
+        {
+            assert!(source["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|fact| { compiled["evidence"].as_array().unwrap().contains(fact) }));
+        }
+        let expected_notes = evidence["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| {
+                let mut projected = semantic_projection(value, &note_keys);
+                projected["publicationSectionId"] = serde_json::json!(
+                    section_id_map[value["publicationSectionId"].as_str().unwrap()]
+                );
+                if projected["sourcePages"].is_null() {
+                    projected["sourcePages"] = serde_json::json!([]);
+                }
+                projected
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected_notes,
+            publication["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| semantic_projection(value, &note_keys))
+                .collect::<Vec<_>>(),
+            "{name}: Note semantics changed across the runtime boundary"
+        );
+        let compiled_note = &publication["notes"][0];
+        assert_eq!(compiled_note["backlinkIds"], compiled_note["referenceIds"]);
+        assert!(!compiled_note["translationUnitIds"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(compiled_note["targetContentStatus"], "pending_translation");
+        if name == "direct_pdf" {
+            let source_map: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(project_root.join("metadata/source_map.json")).unwrap(),
+            )
+            .unwrap();
+            let units = source_map["translationUnits"].as_array().unwrap();
+            assert_eq!(
+                units.len(),
+                1,
+                "page anchors must not create a phantom unit"
+            );
+            assert_eq!(units[0]["sourceStartLine"], 3);
+            assert_eq!(units[0]["publicationSectionId"], "section_001");
+
+            let publication_path = project_root.join("metadata/publication_map.json");
+            let original_publication = fs::read_to_string(&publication_path).unwrap();
+            let mut invalid_id: serde_json::Value =
+                serde_json::from_str(&original_publication).unwrap();
+            invalid_id["sections"][0]["id"] = serde_json::json!("../escape");
+            fs::write(
+                &publication_path,
+                serde_json::to_string_pretty(&invalid_id).unwrap() + "\n",
+            )
+            .unwrap();
+            let invalid_id_error = match load_validated_publication_map(&project_root) {
+                Ok(_) => panic!("noncanonical durable publication ID reached prepare/build"),
+                Err(error) => error,
+            };
+            assert!(
+                invalid_id_error.contains("invalid publication section ID"),
+                "{invalid_id_error}"
+            );
+
+            let mut invalid_range: serde_json::Value =
+                serde_json::from_str(&original_publication).unwrap();
+            invalid_range["sections"][0]["sourceEndLine"] = serde_json::json!(10_000);
+            fs::write(
+                &publication_path,
+                serde_json::to_string_pretty(&invalid_range).unwrap() + "\n",
+            )
+            .unwrap();
+            let invalid_range_error = match load_validated_publication_map(&project_root) {
+                Ok(_) => panic!("out-of-source durable publication range reached prepare/build"),
+                Err(error) => error,
+            };
+            assert!(
+                invalid_range_error.contains("invalid source range"),
+                "{invalid_range_error}"
+            );
+            fs::write(&publication_path, original_publication).unwrap();
+        }
+    }
+
+    let direct = routes
+        .iter()
+        .find(|route| route["name"] == "direct_pdf")
+        .unwrap();
+    let rewritten_repo = root.join("negative-rewritten");
+    let (rewritten_project, _, _) = producer_contract_handoff(direct, &rewritten_repo);
+    let evidence_path = rewritten_project.join("metadata/extracted_publication_evidence.json");
+    let mut rewritten = fs::read_to_string(&evidence_path).unwrap();
+    rewritten.push('\n');
+    fs::write(&evidence_path, rewritten).unwrap();
+    let rewritten_error = match run_split_stage(&split_child_for_project(&rewritten_project)) {
+        Ok(_) => panic!("rewritten producer evidence reached split"),
+        Err(error) => error,
+    };
+    assert!(
+        rewritten_error.contains("publication evidence SHA-256"),
+        "{rewritten_error}"
+    );
+
+    let omitted_repo = root.join("negative-omitted");
+    let (omitted_project, _, _) = producer_contract_handoff(direct, &omitted_repo);
+    fs::remove_file(omitted_project.join("metadata/extracted_publication_evidence.json")).unwrap();
+    let omitted_error = match run_split_stage(&split_child_for_project(&omitted_project)) {
+        Ok(_) => panic!("omitted producer evidence fell back to Markdown"),
+        Err(error) => error,
+    };
+    assert!(omitted_error.contains("requires extracted publication evidence"));
+
+    let source_mutation_repo = root.join("negative-source-document");
+    let (source_mutation_project, evidence, _) =
+        producer_contract_handoff(direct, &source_mutation_repo);
+    let source_document = evidence["sourceDocuments"][0]["path"].as_str().unwrap();
+    fs::write(
+        source_mutation_project.join("source").join(source_document),
+        "mutated source evidence",
+    )
+    .unwrap();
+    let source_error = match run_split_stage(&split_child_for_project(&source_mutation_project)) {
+        Ok(_) => panic!("mutated retained source document reached split"),
+        Err(error) => error,
+    };
+    assert!(
+        source_error.contains("failed its SHA-256 check"),
+        "{source_error}"
+    );
+
+    let route_mismatch_repo = root.join("negative-route-mismatch");
+    let (route_mismatch_project, _, _) = producer_contract_handoff(direct, &route_mismatch_repo);
+    let manifest_path = route_mismatch_project.join("metadata/source_manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["structure_evidence_kind"] = serde_json::json!("ocr_layout_evidence");
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    let mismatch_error = match run_split_stage(&split_child_for_project(&route_mismatch_project)) {
+        Ok(_) => panic!("mismatched manifest route reached split"),
+        Err(error) => error,
+    };
+    assert!(
+        mismatch_error.contains("does not match extractor sourceFormat"),
+        "{mismatch_error}"
+    );
+
+    for (label, downgraded_route, expected_error) in [
+        (
+            "downgraded",
+            Some("normalized_markdown"),
+            "does not match extractor sourceFormat",
+        ),
+        (
+            "missing",
+            None,
+            "has no structure route for extractor sourceFormat",
+        ),
+    ] {
+        let target_repo = root.join(format!("negative-route-{label}"));
+        let (project, _, _) = producer_contract_handoff(direct, &target_repo);
+        let manifest_path = project.join("metadata/source_manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        if let Some(route) = downgraded_route {
+            manifest["structure_evidence_kind"] = serde_json::json!(route);
+        } else {
+            manifest
+                .as_object_mut()
+                .unwrap()
+                .remove("structure_evidence_kind");
+        }
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+        )
+        .unwrap();
+        let mut child = split_child_for_project(&project);
+        child.artifacts[0].sha256 = Some(sha256_file(&manifest_path).unwrap());
+        let error = match run_split_stage(&child) {
+            Ok(_) => panic!("{label} manifest route reached split"),
+            Err(error) => error,
+        };
+        assert!(error.contains(expected_error), "{label}: {error}");
+    }
+    for (label, downgraded_route) in [
+        ("joint-downgraded", Some("normalized_markdown")),
+        ("joint-missing", None),
+    ] {
+        let target_repo = root.join(format!("negative-route-{label}"));
+        let (project, _, _) = producer_contract_handoff(direct, &target_repo);
+        fs::remove_file(project.join("metadata/extracted_publication_evidence.json")).unwrap();
+        let manifest_path = project.join("metadata/source_manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        if let Some(route) = downgraded_route {
+            manifest["structure_evidence_kind"] = serde_json::json!(route);
+        } else {
+            manifest
+                .as_object_mut()
+                .unwrap()
+                .remove("structure_evidence_kind");
+        }
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+        )
+        .unwrap();
+        let mut child = split_child_for_project(&project);
+        child.artifacts[0].sha256 = Some(sha256_file(&manifest_path).unwrap());
+        let error = match run_split_stage(&child) {
+            Ok(_) => panic!("{label} route and sidecar downgrade fell back to Markdown"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("requires extracted publication evidence"),
+            "{label}: {error}"
+        );
+    }
+
+    let deleted_contract_repo = root.join("negative-deleted-manifest-and-sidecar");
+    let (deleted_contract_project, _, _) =
+        producer_contract_handoff(direct, &deleted_contract_repo);
+    let deleted_contract_child = split_child_for_project(&deleted_contract_project);
+    fs::remove_file(deleted_contract_project.join("metadata/source_manifest.json")).unwrap();
+    fs::remove_file(deleted_contract_project.join("metadata/extracted_publication_evidence.json"))
+        .unwrap();
+    let deleted_contract_error = match run_split_stage(&deleted_contract_child) {
+        Ok(_) => panic!("deleted manifest and sidecar fell back to Markdown"),
+        Err(error) => error,
+    };
+    assert!(
+        deleted_contract_error.contains("source_manifest artifact is missing"),
+        "{deleted_contract_error}"
+    );
+
+    let erased_obligations_repo = root.join("negative-erased-manifest-obligations");
+    let (erased_obligations_project, _, _) =
+        producer_contract_handoff(direct, &erased_obligations_repo);
+    let erased_obligations_child = split_child_for_project(&erased_obligations_project);
+    let manifest_path = erased_obligations_project.join("metadata/source_manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let manifest_object = manifest.as_object_mut().unwrap();
+    manifest_object.insert("source_format".into(), serde_json::json!("md"));
+    manifest_object.insert(
+        "structure_evidence_kind".into(),
+        serde_json::json!("normalized_markdown"),
+    );
+    manifest_object.insert(
+        "publication_evidence_required".into(),
+        serde_json::json!(false),
+    );
+    manifest_object.remove("publication_evidence_path");
+    manifest_object.remove("publication_evidence_sha256");
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+    )
+    .unwrap();
+    fs::remove_file(
+        erased_obligations_project.join("metadata/extracted_publication_evidence.json"),
+    )
+    .unwrap();
+    let erased_obligations_error = match run_split_stage(&erased_obligations_child) {
+        Ok(_) => panic!("rewritten manifest and deleted sidecar fell back to Markdown"),
+        Err(error) => error,
+    };
+    assert!(
+        erased_obligations_error.contains("source_manifest artifact failed its SHA-256"),
+        "{erased_obligations_error}"
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -15520,6 +18962,45 @@ fn attaching_a_finished_book_records_the_attachment_key() {
         .env
         .contains(&("ZSEARCH_FORMAT".into(), "json".into())));
 
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn zotero_import_is_blocked_without_a_passing_structural_report() {
+    let root = temp_root("zotero-attach-structural-gate");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let (job_id, artifact_id) =
+        attachable_reading_job(&store, &repo, &ReadingPipelineFixtureExecutor::passing());
+    let state = store.load().unwrap();
+    let report = state.jobs[0].children[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "structural_readability_report")
+        .unwrap();
+    let report_path = PathBuf::from(&report.path);
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    payload["status"] = serde_json::Value::String("failed".into());
+    fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&payload).unwrap() + "\n",
+    )
+    .unwrap();
+    let executor = ZoteroAttachFixtureExecutor::default();
+
+    let error = attach_artifact_to_zotero_with_executor(
+        &store,
+        &job_id,
+        &artifact_id,
+        false,
+        &attach_roots(&repo),
+        &executor,
+    )
+    .unwrap_err();
+
+    assert!(error.contains("report changed after validation"), "{error}");
+    assert!(executor.commands().is_empty(), "the gate still uploaded");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -16208,6 +19689,7 @@ fn a_locally_extracted_book_hands_off_to_translation_like_any_other() {
     // handoff that had come to depend on either would fail here.
     let root = local_pdf_folder_with_two_books("local-pdf-direct-handoff");
     let input = root.join("input");
+    fs::write(input.join("Sample_Book.pdf"), "%PDF sample book").unwrap();
     let repo_root = root.join("repo");
     fs::create_dir_all(repo_root.join("tools")).unwrap();
     fs::write(repo_root.join("AGENTS.md"), "fixture").unwrap();
@@ -16262,5 +19744,157 @@ fn a_locally_extracted_book_hands_off_to_translation_like_any_other() {
         fs::read_to_string(project_root.join("source").join("source.md")).unwrap(),
         DIRECT_TEXT_WRAPPER_MARKDOWN
     );
+    let split = advance_job(&store, &job.id, None, false).unwrap();
+    assert_eq!(child_stage_status(&split, "split"), STATUS_COMPLETED);
+    let structure_report: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_root.join("qa/structure_recovery.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(structure_report["source"], "direct_pdf_evidence");
+    assert_eq!(structure_report["status"], "passed");
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pipeline_state_and_ocr_staging_use_support_and_cache_not_the_workspace() {
+    let root = temp_root("four-layer-pipeline-paths");
+    let paths = crate::app_paths::AppPaths::from_roots(
+        root.join("App.app/Contents/Resources/bibliosmith-runtime"),
+        root.join("Library/Application Support/BiblioSmith/launcher"),
+        root.join("Library/Caches/BiblioSmith/launcher"),
+        root.join("Documents"),
+    );
+
+    assert_eq!(
+        state_dir_for(&paths),
+        root.join("Library/Application Support/BiblioSmith/launcher/book-pipeline")
+    );
+    assert_eq!(
+        output_root_for(&paths),
+        root.join("Library/Caches/BiblioSmith/launcher/book-pipeline/output")
+    );
+    assert!(!state_dir_for(&paths).starts_with(root.join("Documents")));
+    assert!(!output_root_for(&paths).starts_with(root.join("Documents")));
+}
+
+#[test]
+fn reading_builder_executes_from_read_only_resources_without_copying_into_a_book() {
+    let root = temp_root("bundled-reading-builder");
+    let resources = root.join("App.app/Contents/Resources/bibliosmith-runtime");
+    let script = resources.join("tools/bibliosmith-launcher/source/scripts/build_epub.cjs");
+    fs::create_dir_all(script.parent().unwrap()).unwrap();
+    fs::write(&script, "// bundled builder").unwrap();
+    let project = root.join("Documents/BiblioSmith/books/local/zh-Hans/001_Book");
+    fs::create_dir_all(&project).unwrap();
+
+    assert_eq!(reading_builder_path_for_root(&resources).unwrap(), script);
+    assert!(!project.join("scripts").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn uv_runtime_writes_environment_and_cache_outside_read_only_resources() {
+    let root = temp_root("uv-runtime-paths");
+    let paths = crate::app_paths::AppPaths::from_roots(
+        root.join("App.app/Contents/Resources/bibliosmith-runtime"),
+        root.join("Library/Application Support/BiblioSmith/launcher"),
+        root.join("Library/Caches/BiblioSmith/launcher"),
+        root.join("Documents"),
+    );
+
+    assert_eq!(
+        uv_runtime_env_for(&paths),
+        vec![
+            (
+                "UV_PROJECT_ENVIRONMENT".to_string(),
+                display_path(
+                    &root.join(
+                        "Library/Application Support/BiblioSmith/launcher/runtimes/python-env"
+                    )
+                ),
+            ),
+            (
+                "UV_CACHE_DIR".to_string(),
+                display_path(&root.join("Library/Caches/BiblioSmith/launcher/uv")),
+            ),
+            (
+                "UV_PYTHON_INSTALL_DIR".to_string(),
+                display_path(
+                    &root.join(
+                        "Library/Application Support/BiblioSmith/launcher/runtimes/uv-python"
+                    )
+                ),
+            ),
+            ("UV_NO_MODIFY_PATH".to_string(), "1".to_string()),
+            ("UV_FROZEN".to_string(), "1".to_string()),
+        ]
+    );
+    assert_eq!(
+        zotero_index_env_for(&paths),
+        (
+            "BIBLIOSMITH_ZOTERO_INDEX_PATH".to_string(),
+            display_path(&root.join("Library/Caches/BiblioSmith/launcher/zotero/vectors.sqlite")),
+        )
+    );
+}
+
+#[test]
+fn node_reading_commands_receive_protected_managed_uv_paths() {
+    let root = temp_root("node-reading-managed-uv");
+    let resources = root.join("App.app/Contents/Resources/bibliosmith-runtime");
+    let paths = crate::app_paths::AppPaths::from_roots(
+        resources.clone(),
+        root.join("Library/Application Support/BiblioSmith/launcher"),
+        root.join("Library/Caches/BiblioSmith/launcher"),
+        root.join("Documents"),
+    );
+    let command = RunnerCommand {
+        kind: RunnerCommandKind::Process,
+        label: READING_BUILD_COMMAND_LABEL.into(),
+        program: PathBuf::from("node"),
+        args: vec![
+            "--jitless".into(),
+            display_path(&resources.join("scripts/build_epub.cjs")),
+        ],
+        env: vec![(
+            "UV_PROJECT_ENVIRONMENT".into(),
+            display_path(&resources.join(".venv")),
+        )],
+        cwd: Some(root.join("Documents/BiblioSmith/books/local/zh-Hans/001_Book")),
+        output_dir: root.join("Documents/BiblioSmith/books/local/zh-Hans/001_Book"),
+        attempts: 0,
+        accepted_exit_codes: vec![0],
+    };
+
+    let environment = runner_runtime_env_for(&paths, &command)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(
+        environment.get("UV_PROJECT_ENVIRONMENT"),
+        Some(&display_path(&root.join(
+            "Library/Application Support/BiblioSmith/launcher/runtimes/python-env"
+        )))
+    );
+    assert_eq!(
+        environment.get("UV_CACHE_DIR"),
+        Some(&display_path(
+            &root.join("Library/Caches/BiblioSmith/launcher/uv")
+        ))
+    );
+    assert_eq!(
+        environment.get("UV_PYTHON_INSTALL_DIR"),
+        Some(&display_path(&root.join(
+            "Library/Application Support/BiblioSmith/launcher/runtimes/uv-python"
+        )))
+    );
+    assert_eq!(environment.get("UV_FROZEN"), Some(&"1".to_string()));
+    assert_eq!(
+        environment.get("BIBLIOSMITH_RUNTIME_ROOT"),
+        Some(&display_path(&resources))
+    );
+    assert_eq!(
+        environment.get("BIBLIOSMITH_DISABLE_DOTENV"),
+        Some(&"1".to_string())
+    );
 }
