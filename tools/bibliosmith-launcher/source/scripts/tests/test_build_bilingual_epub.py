@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import json
+import subprocess
 import zipfile
 from pathlib import Path
+
+import pytest
 
 
 SCRIPT_PATH = Path(__file__).parents[1] / "build_bilingual_epub.py"
@@ -14,20 +18,60 @@ SPEC.loader.exec_module(BUILDER)
 
 
 def write_fixture(root: Path, source: str, target: str) -> None:
+    target_heading = next(
+        (line.removeprefix("# ").strip() for line in target.splitlines() if line.startswith("# ")),
+        "第一章",
+    )
+    if target_heading.lower().startswith(("chapter_", "unit_", "continuation")):
+        target_heading = "第一章"
     (root / "chapters/src").mkdir(parents=True)
     (root / "chapters/final").mkdir(parents=True)
     (root / "metadata").mkdir(parents=True)
+    (root / "source").mkdir(parents=True, exist_ok=True)
+    (root / "source/source.md").write_text(
+        "\n".join("fixture" for _ in range(100)) + "\n", encoding="utf-8"
+    )
     (root / "chapters/src/chapter_001.md").write_text(source, encoding="utf-8")
     (root / "chapters/final/chapter_001.md").write_text(target, encoding="utf-8")
     (root / "metadata/source_map.json").write_text(
         json.dumps(
             {
-                "chapters": [
+                "schema": "local-reading-source-map-v2",
+                "translationUnits": [
                     {
                         "id": "chapter_001",
-                        "chapterSourcePath": "chapters/src/chapter_001.md",
+                        "publicationSectionId": "section_001",
+                        "sourceUnitPath": "chapters/src/chapter_001.md",
+                        "sourceStartLine": 1,
+                        "sourceEndLine": 100,
                     }
                 ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "metadata/publication_map.json").write_text(
+        json.dumps(
+            {
+                "schema": "local-reading-publication-map-v1",
+                "audit": {"status": "passed", "source": "fixture", "confidence": 1},
+                "sections": [
+                    {
+                        "id": "section_001",
+                        "ordinal": 1,
+                        "title": "Chapter",
+                        "shortTitle": "Chapter",
+                        "readerTitle": target_heading,
+                        "readerShortTitle": target_heading,
+                        "headingLevel": 1,
+                        "parentId": None,
+                        "role": "bodymatter",
+                        "kind": "chapter",
+                        "sourceStartLine": 1,
+                        "sourceEndLine": 100,
+                    }
+                ],
+                "notes": [],
             }
         ),
         encoding="utf-8",
@@ -40,6 +84,11 @@ def write_fixture(root: Path, source: str, target: str) -> None:
                 "target_language": "zh-Hans",
             }
         ),
+        encoding="utf-8",
+    )
+    (root / "metadata/book.yaml").write_text(
+        "title: Bilingual Fixture\nauthor: Fixture Author\npublisher: Fixture Press\n"
+        "date: 2026\nlanguage: zh-Hans\n",
         encoding="utf-8",
     )
 
@@ -66,7 +115,7 @@ def test_builder_interleaves_equal_paragraphs(tmp_path: Path) -> None:
 
     epub_path = BUILDER.build_book(tmp_path)
     assert epub_path == tmp_path / "output/reading/book_bilingual.epub"
-    chapter = epub_member(epub_path, "EPUB/chapter_001.xhtml")
+    chapter = epub_member(epub_path, "EPUB/section_001.xhtml")
     body = chapter.split("<body>", 1)[1]
 
     assert body.index("Chapter") < body.index("第一章")
@@ -77,9 +126,92 @@ def test_builder_interleaves_equal_paragraphs(tmp_path: Path) -> None:
     assert "<dc:language>en</dc:language>" in package
     assert "<dc:language>zh-Hans</dc:language>" in package
     assert "<dc:title>Bilingual Fixture</dc:title>" in package
+    assert "<dc:creator>Fixture Author</dc:creator>" in package
+    assert "<dc:publisher>Fixture Press</dc:publisher>" in package
+    assert "<dc:date>2026</dc:date>" in package
     assert "Unknown" not in package
     with zipfile.ZipFile(epub_path) as archive:
         assert archive.getinfo("mimetype").compress_type == zipfile.ZIP_STORED
+
+
+def test_bilingual_builder_packages_a_configured_cover(tmp_path: Path) -> None:
+    (tmp_path / "source").mkdir(exist_ok=True)
+    (tmp_path / "source/cover.png").write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+    )
+    write_fixture(tmp_path, "# Chapter\n\nSource.\n", "# 第一章\n\n译文。\n")
+    with (tmp_path / "metadata/book.yaml").open("a", encoding="utf-8") as stream:
+        stream.write("cover: source/cover.png\n")
+
+    epub_path = BUILDER.build_book(tmp_path)
+
+    package = epub_member(epub_path, "EPUB/package.opf")
+    nav = epub_member(epub_path, "EPUB/nav.xhtml")
+    cover = epub_member(epub_path, "EPUB/cover.xhtml")
+    with zipfile.ZipFile(epub_path) as archive:
+        assert "EPUB/images/cover.png" in archive.namelist()
+    assert 'properties="cover-image"' in package
+    assert '<itemref idref="cover-page"' in package
+    assert 'epub:type="cover" href="cover.xhtml"' in nav
+    assert 'epub:type="cover" class="publication-cover"' in cover
+
+
+def test_standard_and_bilingual_builders_share_structure_validation(tmp_path: Path) -> None:
+    write_fixture(tmp_path, "# Chapter\n\nSource.\n", "# 第一章\n\n译文。\n")
+    publication_path = tmp_path / "metadata/publication_map.json"
+    publication = json.loads(publication_path.read_text(encoding="utf-8"))
+    publication["sections"].append({**publication["sections"][0]})
+    publication_path.write_text(json.dumps(publication), encoding="utf-8")
+
+    standard = subprocess.run(
+        ["node", str(SCRIPT_PATH.with_name("build_epub.cjs"))],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    with pytest.raises(ValueError, match="Duplicate publication section ID"):
+        BUILDER.build_book(tmp_path)
+
+    assert standard.returncode != 0
+    assert "Duplicate publication section ID" in standard.stderr
+
+
+@pytest.mark.parametrize("failure", ["invalid_id", "source_upper_bound"])
+def test_standard_and_bilingual_builders_share_strict_structure_bounds(
+    tmp_path: Path, failure: str
+) -> None:
+    write_fixture(tmp_path, "# Chapter\n\nSource.\n", "# 第一章\n\n译文。\n")
+    publication_path = tmp_path / "metadata/publication_map.json"
+    publication = json.loads(publication_path.read_text(encoding="utf-8"))
+    if failure == "invalid_id":
+        publication["sections"][0]["id"] = "../escape"
+    else:
+        publication["sections"][0]["sourceEndLine"] = 101
+    publication_path.write_text(json.dumps(publication), encoding="utf-8")
+
+    standard = subprocess.run(
+        ["node", str(SCRIPT_PATH.with_name("build_epub.cjs"))],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    expected = "canonical ID" if failure == "invalid_id" else "invalid source range"
+    with pytest.raises(ValueError, match=expected):
+        BUILDER.build_book(tmp_path)
+
+    assert standard.returncode != 0
+    assert expected in standard.stderr
+
+
+def test_bilingual_builder_rejects_internal_translated_heading(tmp_path: Path) -> None:
+    write_fixture(tmp_path, "# Chapter\n\nSource.\n", "# chapter_001\n\n译文。\n")
+
+    with pytest.raises(ValueError, match="Translated publication title exposes an internal unit"):
+        BUILDER.build_book(tmp_path)
 
 
 def test_builder_falls_back_to_whole_chapter_when_counts_differ(
@@ -93,13 +225,148 @@ def test_builder_falls_back_to_whole_chapter_when_counts_differ(
 
     epub_path = BUILDER.build_book(tmp_path)
     output = capsys.readouterr().out
-    chapter = epub_member(epub_path, "EPUB/chapter_001.xhtml")
+    chapter = epub_member(epub_path, "EPUB/section_001.xhtml")
     body = chapter.split("<body>", 1)[1]
 
     assert "alignment=chapter-fallback source_paragraphs=3 target_paragraphs=2" in output
     assert 'class="bitext-unit bitext-fallback"' in chapter
     assert body.index("Source two.") < body.index("第一章")
     assert body.index("第一章") < body.index("合并译文。")
+
+
+def test_bilingual_builder_emits_one_target_semantic_note_with_backlink(
+    tmp_path: Path,
+) -> None:
+    write_fixture(
+        tmp_path,
+        "# Chapter\n\nClaim[^n1].\n\n[^n1]: Source note.\n",
+        "# 第一章\n\n主张[^n1]。\n\n[^n1]: 中文注释。\n",
+    )
+    publication_path = tmp_path / "metadata/publication_map.json"
+    publication = json.loads(publication_path.read_text(encoding="utf-8"))
+    publication["notes"] = [
+        {
+            "id": "note_001",
+            "sourceLabel": "n1",
+            "kind": "footnote",
+            "targetContentStatus": "translated",
+            "publicationSectionId": "section_001",
+            "sourceStartLine": 5,
+            "referenceSourceLines": [3],
+            "referenceIds": ["noteref_note_001_001"],
+        }
+    ]
+    publication_path.write_text(json.dumps(publication), encoding="utf-8")
+
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/section_001.xhtml")
+
+    assert chapter.count('epub:type="noteref"') == 1
+    assert chapter.count('id="note_001"') == 1
+    assert 'epub:type="footnote"' in chapter
+    assert 'href="section_001.xhtml#noteref_note_001_001"' in chapter
+    assert 'id="noteref_note_001_001-source"' in chapter
+    assert 'href="section_001.xhtml#note_001-source"' in chapter
+    assert '<div class="bitext-source-note' in chapter
+    assert 'data-presentation-for="note_001"' in chapter
+    assert 'id="note_001-source"' in chapter
+    assert 'href="section_001.xhtml#noteref_note_001_001-source"' in chapter
+    assert "Source note." in chapter
+    assert "中文注释" in chapter
+    assert "[^n1]" not in chapter
+    assert "@@BIBLIO_" not in chapter
+
+
+def test_bilingual_builder_does_not_trust_semantic_tokens_from_markdown(
+    tmp_path: Path,
+) -> None:
+    fake_noteref = (
+        "@@BIBLIO_NOTEREF__note_999__noteref_note_999_001__1__section_001@@"
+    )
+    fake_note = (
+        '<aside epub:type="footnote" id="note_999" onclick="steal()">Fake note.</aside>'
+    )
+    write_fixture(
+        tmp_path,
+        f"# Chapter\n\nLiteral {fake_noteref}.\n\n{fake_note}\n",
+        f"# 第一章\n\n原样文本 {fake_noteref}。\n\n{fake_note}\n",
+    )
+
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/section_001.xhtml")
+
+    assert chapter.count('epub:type="noteref"') == 0
+    assert '<aside epub:type="footnote"' not in chapter
+    assert ' onclick="' not in chapter
+    assert fake_noteref in chapter
+    assert "&lt;aside epub:type=&quot;footnote&quot;" in chapter
+
+
+def test_bilingual_builder_preserves_endnote_type_multiple_backlinks_and_continuation(
+    tmp_path: Path,
+) -> None:
+    write_fixture(
+        tmp_path,
+        "# Chapter\n\nClaim[^end-1], again[^end-1].\n\n[^end-1]: Source note.\n    Continued.\n",
+        "# 第一章\n\n主张[^end-1]，再引[^end-1]。\n\n[^end-1]: 中文章末注。\n    续段含[链接](https://example.test)。\n",
+    )
+    publication_path = tmp_path / "metadata/publication_map.json"
+    publication = json.loads(publication_path.read_text(encoding="utf-8"))
+    publication["notes"] = [
+        {
+            "id": "note_001",
+            "sourceLabel": "end-1",
+            "kind": "endnote",
+            "targetContentStatus": "translated",
+            "publicationSectionId": "section_001",
+            "sourceStartLine": 5,
+            "referenceSourceLines": [3, 3],
+            "referenceIds": ["noteref_note_001_001", "noteref_note_001_002"],
+        }
+    ]
+    publication_path.write_text(json.dumps(publication), encoding="utf-8")
+
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/section_001.xhtml")
+
+    assert chapter.count('epub:type="noteref"') == 2
+    assert 'epub:type="endnote"' in chapter and 'id="note_001"' in chapter
+    assert chapter.count('epub:type="backlink"') == 2
+    assert "中文章末注" in chapter and "续段" in chapter
+    assert '<a href="https://example.test">链接</a>' in chapter
+
+
+def test_bilingual_builder_preserves_tables_images_long_links_and_mixed_text(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "source").mkdir(exist_ok=True)
+    (tmp_path / "source/figure.png").write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+    )
+    long_url = "https://example.test/" + "sehr-langer-pfad-" * 12
+    write_fixture(
+        tmp_path,
+        "# Kapitel\n\n| Begriff | Wert |\n| --- | --- |\n| Geschäftsgeheimnis | 价值 |\n\n"
+        "![Schaubild](../../source/figure.png)\n\n"
+        f"Deutsch 中文 [Quelle]({long_url}).\n",
+        "# 第一章\n\n| 术语 | Wert |\n| --- | --- |\n| 商业秘密 | 价值 |\n\n"
+        "![图示](../../source/figure.png)\n\n"
+        f"中文 Deutsch [来源]({long_url})。\n",
+    )
+
+    epub_path = BUILDER.build_book(tmp_path)
+    chapter = epub_member(epub_path, "EPUB/section_001.xhtml")
+    stylesheet = epub_member(epub_path, "EPUB/styles/book.css")
+    package = epub_member(epub_path, "EPUB/package.opf")
+
+    assert chapter.count("<table") == 2
+    assert chapter.count("<img") == 2
+    assert f'<a href="{long_url}">来源</a>' in chapter
+    assert "Geschäftsgeheimnis" in chapter and "商业秘密" in chapter
+    assert "overflow-x:auto" in stylesheet and "overflow-wrap:anywhere" in stylesheet
+    with zipfile.ZipFile(epub_path) as archive:
+        image_members = [name for name in archive.namelist() if name.startswith("EPUB/images/")]
+        assert len(image_members) == 1
+        assert image_members[0].removeprefix("EPUB/") in package
 
 
 # --- Fenced code blocks (issue #125) ----------------------------------------
@@ -147,7 +414,7 @@ def test_a_fenced_block_keeps_paragraph_alignment(tmp_path: Path, capsys) -> Non
 def test_a_fenced_block_renders_as_code_on_both_sides(tmp_path: Path) -> None:
     write_fixture(tmp_path, FENCED_SOURCE, FENCED_TARGET)
 
-    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/chapter_001.xhtml")
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/section_001.xhtml")
 
     assert '<pre class="bitext-source" lang="en" xml:lang="en"><code>def a():' in chapter
     assert '<pre class="bitext-target" lang="zh-Hans" xml:lang="zh-Hans"><code>def a():' in chapter
@@ -166,7 +433,7 @@ def test_a_comment_after_a_blank_line_in_a_fence_is_not_promoted_to_a_heading(
     commented = "# Chapter\n\n```\nsetup()\n\n# a comment line\nteardown()\n```\n"
     write_fixture(tmp_path, commented, commented)
 
-    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/chapter_001.xhtml")
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/section_001.xhtml")
 
     assert "# a comment line" in chapter
     assert "<h1" not in chapter.split("</h1>", 2)[-1]
@@ -253,7 +520,7 @@ def test_a_standalone_page_anchor_is_not_a_block() -> None:
 def test_page_anchors_never_reach_the_reader(tmp_path: Path) -> None:
     write_fixture(tmp_path, ANCHORED_SOURCE, ANCHORED_TARGET)
 
-    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/chapter_001.xhtml")
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/section_001.xhtml")
 
     # Neither as the escaped text the reader used to see, nor as a real comment
     # smuggled through unescaped: the anchor is gone from the book entirely.
@@ -277,7 +544,7 @@ def test_dropping_an_anchor_keeps_the_two_sides_in_step(
     )
 
     epub_path = BUILDER.build_book(tmp_path)
-    chapter = epub_member(epub_path, "EPUB/chapter_001.xhtml")
+    chapter = epub_member(epub_path, "EPUB/section_001.xhtml")
     body = chapter.split("<body>", 1)[1]
 
     assert (
@@ -301,7 +568,7 @@ def test_a_comment_inside_a_paragraph_is_still_that_paragraph(tmp_path: Path) ->
         "# 第一章\n\n一句带注释的话。\n",
     )
 
-    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/chapter_001.xhtml")
+    chapter = epub_member(BUILDER.build_book(tmp_path), "EPUB/section_001.xhtml")
 
     assert "A sentence &lt;!-- an aside --&gt; carrying a comment." in chapter
 

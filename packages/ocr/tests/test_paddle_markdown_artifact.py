@@ -12,6 +12,7 @@ Every remote call is stubbed, so these tests never touch the Baidu API.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -124,10 +125,34 @@ def test_process_book_writes_markdown_next_to_html(tmp_path: Path) -> None:
     assert md_path == output_dir / "Sample_Book" / "Sample_Book.md"
 
     body = md_path.read_text(encoding="utf-8")
-    assert body.startswith("# Sample Book\n")
+    assert body.startswith("<!-- page: 1 -->\n")
+    assert "# Sample Book" not in body
     assert "Chapter One" in body
     # The Markdown is the assembled source, not the rendered HTML.
     assert "<html" not in body
+    evidence = json.loads(md_path.with_suffix(".publication.json").read_text(encoding="utf-8"))
+    assert evidence["sourceDocuments"]
+    for document in evidence["sourceDocuments"]:
+        persisted = md_path.parent / document["path"]
+        assert persisted.is_file()
+        assert hashlib.sha256(persisted.read_bytes()).hexdigest() == document["sha256"]
+
+
+def test_real_paddle_route_emits_a_stable_semantic_note_contract(tmp_path: Path) -> None:
+    html_path, _, _ = run_process_book(
+        tmp_path,
+        pages=1,
+        page_text="# Chapter\n\nClaim[^ocr-1].\n\n[^ocr-1]: OCR note.",
+    )
+
+    evidence = json.loads(
+        html_path.with_suffix(".publication.json").read_text(encoding="utf-8")
+    )
+    assert evidence["sourceFormat"] == "ocr"
+    assert evidence["notes"][0]["id"] == "note_001"
+    assert evidence["notes"][0]["sourceLabel"] == "ocr-1"
+    assert evidence["notes"][0]["referenceIds"] == ["noteref_note_001_001"]
+    assert evidence["notes"][0]["anomalies"] == []
 
 
 def test_resumed_run_rewrites_the_same_markdown_file(tmp_path: Path) -> None:

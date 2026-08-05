@@ -36,7 +36,7 @@ def run_sample_manifest(
     source_map = _read_json(
         _project_path(project_root, _required_string(manifest, "sourceMapPath"))
     )
-    if source_map.get("schema") != "local-reading-source-map-v1":
+    if source_map.get("schema") != "local-reading-source-map-v2":
         raise EngineError("unsupported_source_map_schema")
 
     target_language = _required_string(manifest, "targetLanguage")

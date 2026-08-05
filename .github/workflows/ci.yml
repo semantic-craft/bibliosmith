@@ -94,6 +94,8 @@ jobs:
       # case in this step's environment.
       - name: Repository suites
         run: |
+          npm ci --prefix books
+          PLAYWRIGHT_BROWSERS_PATH=0 node books/node_modules/playwright-core/cli.js install chromium-headless-shell
           uv run --package digest pytest \
             tests \
             tools/git \
@@ -198,6 +200,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      # The producer-to-split contract test runs the real Python EPUB, PDF,
+      # PaddleOCR, and MinerU assemblers before handing their sidecars to Rust.
+      # Keep that cross-runtime test in cargo test instead of replacing the
+      # producers with Rust-built JSON fixtures, so this job needs the same
+      # pinned uv entry point as the Python job.
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: false
+
+      - name: Install pinned reading-validation runtime
+        run: |
+          npm ci --prefix ../../../../books
+          PLAYWRIGHT_BROWSERS_PATH=0 node ../../../../books/node_modules/playwright-core/cli.js install chromium-headless-shell
 
       # Formatting drift used to be caught by hand, and had accumulated again by
       # the time this step was added: four files were out of shape. Cheapest

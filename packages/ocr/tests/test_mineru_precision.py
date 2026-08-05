@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 from io import BytesIO, StringIO
 import json
 import os
@@ -365,6 +366,7 @@ class MinerUPrecisionCliTests(unittest.TestCase):
             del kwargs
             part_number = int(Path(url).stem)
             markdown = (
+                "# Chapter\n\nClaim[^mineru-1].\n\n[^mineru-1]: MinerU note.\n\n"
                 "![figure](images/figure.png)\n\nchunk-1"
                 if part_number == 1
                 else "chunk-2"
@@ -411,6 +413,24 @@ class MinerUPrecisionCliTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["source_pages"], 201)
             self.assertEqual([part["page_count"] for part in manifest["parts"]], [200, 1])
+            evidence_path = full_markdown[0].with_suffix(".publication.json")
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["schema"], "publication-extraction-evidence-v2")
+            self.assertEqual(len(evidence["sourceDocuments"]), 2)
+            self.assertEqual(evidence["notes"][0]["id"], "note_001")
+            self.assertEqual(evidence["notes"][0]["sourceLabel"], "mineru-1")
+            self.assertEqual(
+                evidence["notes"][0]["referenceIds"],
+                ["noteref_note_001_001"],
+            )
+            self.assertEqual(evidence["notes"][0]["anomalies"], [])
+            for document in evidence["sourceDocuments"]:
+                persisted = full_markdown[0].parent / document["path"]
+                self.assertTrue(persisted.is_file())
+                self.assertEqual(
+                    hashlib.sha256(persisted.read_bytes()).hexdigest(),
+                    document["sha256"],
+                )
 
     def test_batch_poll_waits_until_every_submitted_file_has_a_terminal_result(self) -> None:
         from tempfile import TemporaryDirectory

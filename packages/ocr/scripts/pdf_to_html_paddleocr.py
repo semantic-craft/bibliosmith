@@ -79,6 +79,12 @@ if str(APP_ROOT) not in sys.path:
 # rather than reimplemented: one routing decision and one extraction engine
 # across both entry points is the whole point of #137.
 import pdf_text  # noqa: E402
+from publication_evidence import (  # noqa: E402
+    normalize_extracted_markdown_notes,
+    persist_source_document,
+    source_documents_for_page_groups,
+    write_markdown_evidence,
+)
 import zotero_llm_worker  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -758,8 +764,33 @@ def extract_book_text(
     elif assets_dir.is_dir():
         shutil.rmtree(assets_dir)
 
-    full_md = f"# {book_name}\n\n{extracted.markdown}".rstrip() + "\n"
+    # The attachment file stem is metadata, not an observed publication
+    # heading.  Preserve only headings recovered from the PDF itself.
+    full_md = normalize_extracted_markdown_notes(extracted.markdown).rstrip() + "\n"
     md_path.write_text(full_md, encoding="utf-8")
+    assembled_source = persist_source_document(
+        md_path,
+        md_path,
+        "assembled.md",
+        start_line=1,
+        end_line=max(1, len(full_md.splitlines())),
+        pages=tuple(page for page, _ in extracted.page_chars),
+        kind="assembled_markdown",
+    )
+    write_markdown_evidence(
+        md_path,
+        source_format="pdf",
+        extraction_engine=extracted.engine,
+        source_documents=[assembled_source],
+        title=book_name,
+        removed_furniture=extracted.running_heads,
+        extraction_facts={
+            "route": ROUTE_DIRECT_TEXT,
+            "pageCount": extracted.page_count,
+            "pageCharacterCounts": [list(item) for item in extracted.page_chars],
+            "fallbackReason": extracted.fallback_reason,
+        },
+    )
     html_path.write_text(
         build_html(title=book_name, body_html=md_to_html(full_md)), encoding="utf-8"
     )
@@ -986,10 +1017,54 @@ def process_book(
             md_sections.append(f"\n{page_anchor(page_no)}\n\n{text}")
             html_sections.append(f"\n{page_separator(page_no)}\n\n{text}")
 
-    full_md = f"# {book_name}\n\n" + "\n\n".join(md_sections)
+    full_md = normalize_extracted_markdown_notes("\n\n".join(md_sections).lstrip())
     # The translation handoff reads this file, so it has to land on disk
     md_path.write_text(full_md, encoding="utf-8")
-    body_html = md_to_html(f"# {book_name}\n\n" + "\n\n".join(html_sections))
+    source_documents = source_documents_for_page_groups(
+        full_md,
+        [
+            (
+                f"paddleocr/{chunk_path.stem}.jsonl",
+                pages,
+                "paddleocr_jsonl",
+                hashlib.sha256(
+                    (chunk_dir / f"{chunk_path.stem}.jsonl").read_bytes()
+                ).hexdigest(),
+            )
+            for pages, chunk_path in chunk_specs
+        ],
+    )
+    chunk_sources = {
+        f"paddleocr/{chunk_path.stem}.jsonl": chunk_dir / f"{chunk_path.stem}.jsonl"
+        for _, chunk_path in chunk_specs
+    }
+    source_documents = [
+        persist_source_document(
+            md_path,
+            chunk_sources[document.path],
+            document.path,
+            start_line=document.start_line,
+            end_line=document.end_line,
+            pages=document.pages,
+            kind=document.kind,
+            anomalies=document.anomalies,
+        )
+        for document in source_documents
+    ]
+    write_markdown_evidence(
+        md_path,
+        source_format="ocr",
+        extraction_engine=config.baidu_model,
+        source_documents=source_documents,
+        title=book_name,
+        extraction_facts={
+            "route": ROUTE_REMOTE_PADDLEOCR,
+            "pageCount": page_count,
+            "imageCount": len(image_map),
+            "layoutModel": is_layout_model(config),
+        },
+    )
+    body_html = md_to_html("\n\n".join(html_sections))
     html = build_html(title=book_name, body_html=body_html)
     html_path.write_text(html, encoding="utf-8")
 

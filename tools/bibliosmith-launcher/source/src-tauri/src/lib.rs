@@ -2691,6 +2691,8 @@ pub fn run() {
             book_pipeline::preview_book_pipeline_route,
             book_pipeline::queue_book_pipeline_job,
             book_pipeline::save_book_pipeline_custom_instructions,
+            book_pipeline::get_book_pipeline_structure_correction_draft,
+            book_pipeline::save_book_pipeline_structure_correction,
             book_pipeline::run_book_pipeline_job,
             book_pipeline::retry_book_pipeline_job,
             book_pipeline::remove_books_from_shelf,

@@ -20,6 +20,8 @@ import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
+from test_support.epub_builder_contract import write_publication_contract
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_SCRIPTS = REPO_ROOT / "tools" / "bibliosmith-launcher" / "source" / "scripts"
@@ -55,6 +57,10 @@ def build_chapter(chapter_markdown: str) -> str:
         final.mkdir(parents=True)
         metadata.mkdir(parents=True)
         shutil.copy(SOURCE_SCRIPTS / "build_epub.cjs", scripts / "build_epub.cjs")
+        shutil.copy(
+            SOURCE_SCRIPTS / "compile_publication_structure.cjs",
+            scripts / "compile_publication_structure.cjs",
+        )
         shutil.copy(SOURCE_SCRIPTS / "run_python.cjs", scripts / "run_python.cjs")
         (final / "chapter_001.md").write_text(chapter_markdown, encoding="utf-8")
         metadata.joinpath("source_manifest.json").write_text(
@@ -63,6 +69,7 @@ def build_chapter(chapter_markdown: str) -> str:
             ),
             encoding="utf-8",
         )
+        write_publication_contract(book_root, title="Anchor Fixture")
 
         completed = subprocess.run(
             ["node", str(scripts / "build_epub.cjs")],
@@ -74,7 +81,7 @@ def build_chapter(chapter_markdown: str) -> str:
         assert completed.returncode == 0, completed.stderr
 
         with ZipFile(book_root / "output" / "reading" / "book.epub") as archive:
-            return archive.read("EPUB/chapter_001.xhtml").decode("utf-8")
+            return archive.read("EPUB/section_001.xhtml").decode("utf-8")
 
 
 def body_of(chapter: str) -> str:
@@ -167,7 +174,7 @@ class EpubBuilderPageAnchorTests(unittest.TestCase):
         body = body_of(chapter)
 
         self.assertNotIn("hidden", body)
-        self.assertEqual(body.count("<h1>"), 1)
+        self.assertEqual(body.count("<h1"), 1)
         self.assertNotIn("&lt;!--", body)
         self.assertIn("<p>正文。</p>", body)
 
@@ -214,15 +221,14 @@ class EpubBuilderPageAnchorTests(unittest.TestCase):
         )
 
         self.assertIn("<p>后面的正文。</p>", body)
-        self.assertIn("<h2>二级标题</h2>", body)
+        self.assertIn(">二级标题</h2>", body)
 
     def test_a_line_that_merely_ends_with_an_open_comment_is_unchanged(self) -> None:
-        # The run-on rule is deliberately narrow: the line has to *open* with
-        # the comment. A heading that trails one is still a heading, exactly as
-        # before -- widening this would quietly restructure real prose.
+        # The line still creates the same section, but reader-visible heading
+        # text is now canonicalized from the approved Publication Map.
         body = body_of(build_chapter("# 第一章\n\n## 标题 <!--\n注释\n-->\n"))
 
-        self.assertIn("<h2>标题 &lt;!--</h2>", body)
+        self.assertIn(">标题</h2>", body)
 
     def test_an_abrupt_closing_comment_is_left_alone(self) -> None:
         # `<!-->` carries its own `--` and `>`, so a closer searched for from
@@ -233,16 +239,16 @@ class EpubBuilderPageAnchorTests(unittest.TestCase):
 
         self.assertIn("&lt;!--&gt;", chapter)
 
-    def test_an_anchor_beside_a_raw_html_line_still_goes(self) -> None:
-        # The raw-HTML branch flushes the paragraph buffer itself, so an anchor
-        # butted straight against an `<aside>` is flushed by that branch rather
-        # than by a blank line -- and has to be dropped there too.
+    def test_an_anchor_beside_untrusted_html_still_goes(self) -> None:
+        # Source HTML is reader text, never executable container markup. The
+        # adjacent page anchor is still removed independently.
         body = body_of(
             build_chapter("# 第一章\n\n<!-- page: 42 -->\n<aside>边注</aside>\n")
         )
 
         self.assertNotIn("page:", body)
-        self.assertIn("<aside>边注</aside>", body)
+        self.assertIn("&lt;aside&gt;边注&lt;/aside&gt;", body)
+        self.assertNotIn("<aside>", body)
 
     def test_an_anchor_does_not_become_the_chapter_title(self) -> None:
         # A chapter file may open with an anchor, since the splitter cuts the

@@ -13,6 +13,7 @@ touched at all, so "no Baidu API call" is asserted rather than assumed.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -236,17 +237,31 @@ def test_a_direct_text_book_converts_with_no_remote_call_at_all(tmp_path: Path) 
     assert md_path.is_file(), "the translation handoff reads this file"
 
     body = md_path.read_text(encoding="utf-8")
-    assert body.startswith("# Born Digital\n")
+    assert body.startswith("# Chapter One\n")
+    assert "# Born Digital" not in body, "the PDF file stem is not a publication node"
     assert "Chapter One" in body
     assert "<html" not in body
     assert "Chapter One" in html_path.read_text(encoding="utf-8")
+    evidence = json.loads(md_path.with_suffix(".publication.json").read_text(encoding="utf-8"))
+    assert evidence["schema"] == "publication-extraction-evidence-v2"
+    assert evidence["sourceFormat"] == "pdf"
+    assert [section["title"] for section in evidence["sections"]] == ["Chapter One"]
 
 
-def test_the_direct_route_leaves_no_empty_assets_sidecar(tmp_path: Path) -> None:
-    """A text layer has no images, and the sidecar travels into every project."""
+def test_the_direct_route_keeps_only_auditable_source_evidence_in_its_sidecar(
+    tmp_path: Path,
+) -> None:
+    """A text layer has no images, but its source evidence must survive handoff."""
     _, output_dir = run_direct(tmp_path)
 
-    assert not (output_dir / "Born_Digital" / "Born_Digital_assets").exists()
+    book_dir = output_dir / "Born_Digital"
+    evidence = json.loads(
+        (book_dir / "Born_Digital.publication.json").read_text(encoding="utf-8")
+    )
+    source_document = evidence["sourceDocuments"][0]
+    persisted = book_dir / source_document["path"]
+    assert persisted.is_file()
+    assert hashlib.sha256(persisted.read_bytes()).hexdigest() == source_document["sha256"]
 
 
 def test_the_direct_route_removes_assets_left_by_an_earlier_ocr_run(
@@ -260,7 +275,8 @@ def test_the_direct_route_removes_assets_left_by_an_earlier_ocr_run(
 
     run_direct(tmp_path)
 
-    assert not stale_assets.exists()
+    assert not (stale_assets / "stale-figure.png").exists()
+    assert (stale_assets / "source_documents/assembled.md").is_file()
 
 
 def test_the_direct_route_records_the_engine_it_used(tmp_path: Path) -> None:
