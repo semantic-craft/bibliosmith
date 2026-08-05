@@ -13266,6 +13266,31 @@ fn artifact_sha(job: &BookPipelineJob, kind: &str) -> Option<String> {
         .clone()
 }
 
+fn mutate_durable_structure_map(job: &BookPipelineJob, kind: &str) {
+    let path = job.children[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == kind)
+        .map(|artifact| PathBuf::from(&artifact.path))
+        .expect("durable structure artifact");
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    match kind {
+        "publication_map" => {
+            document["sections"][0]["role"] = serde_json::json!("frontmatter");
+        }
+        "source_map" => {
+            document["translationUnits"][0]["sourceStartLine"] = serde_json::json!(2);
+        }
+        other => panic!("unsupported structure map: {other}"),
+    }
+    fs::write(
+        path,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
 fn chapter_source_count(job: &BookPipelineJob) -> usize {
     job.children[0]
         .artifacts
@@ -13333,6 +13358,179 @@ fn source_change_before_prepare_reruns_split_without_blocking() {
     assert_eq!(stage_attempt(&resplit, "split"), 2);
     assert_eq!(chapter_source_count(&resplit), 2);
     assert_ne!(artifact_sha(&resplit, "source_map"), first_map);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn structure_map_drift_before_prepare_never_reaches_prepare() {
+    for kind in ["publication_map", "source_map"] {
+        let root = temp_root(&format!("{kind}-drift-before-prepare"));
+        let repo = handoff_repo_fixture(&root);
+        let source_path = root.join("source.md");
+        let store = BookPipelineStore::for_test(&root);
+        let job_id = handoff_ready_child_job(
+            &store,
+            &repo,
+            &source_path,
+            "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+        );
+
+        let split = advance_job(&store, &job_id, None, false).unwrap();
+        mutate_durable_structure_map(&split, kind);
+        let advanced = advance_job(&store, &job_id, None, false).unwrap();
+
+        assert_ne!(
+            child_stage_status(&advanced, "prepare"),
+            STATUS_COMPLETED,
+            "{kind} drift must not be accepted as prepared input"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn structure_map_drift_after_translation_approval_invalidates_the_gate() {
+    let root = temp_root("publication-map-drift-after-translation-approval");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# One\n\nBody one.\n\n# Two\n\nBody two.\n",
+    );
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    approve_ready_translation_for_test(&store, &job_id);
+    let approved = store.load().unwrap().jobs.remove(0);
+    let approval_id = approved.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .and_then(|stage| stage.approval_id.clone())
+        .expect("translation approval ID");
+    mutate_durable_structure_map(&approved, "publication_map");
+
+    let invalidated = advance_job(&store, &job_id, None, false).unwrap();
+
+    assert_ne!(
+        child_stage_status(&invalidated, "approve_translation"),
+        STATUS_COMPLETED
+    );
+    assert_eq!(child_stage_status(&invalidated, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&invalidated, "prepare"), STATUS_PENDING);
+    assert_eq!(
+        child_stage_status(&invalidated, "translate"),
+        STATUS_PENDING
+    );
+    assert!(!invalidated
+        .approval_references
+        .iter()
+        .any(|approval| approval.approval_id == approval_id));
+
+    let resplit = advance_job(&store, &job_id, None, true).unwrap();
+    assert_eq!(child_stage_status(&resplit, "split"), STATUS_COMPLETED);
+    assert_eq!(child_stage_status(&resplit, "prepare"), STATUS_PENDING);
+    let rereadied = advance_job(&store, &job_id, None, false).unwrap();
+    assert_eq!(child_stage_status(&rereadied, "prepare"), STATUS_COMPLETED);
+    assert_eq!(
+        child_stage_status(&rereadied, "approve_translation"),
+        STATUS_READY
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn structure_map_drift_after_promotion_approval_cannot_be_promoted() {
+    let root = temp_root("source-map-drift-after-promotion-approval");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let executor = TranslationEngineFixtureExecutor::succeeding();
+    let job_id = fake_handoff_ready_job(&store, &repo);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let waiting = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    satisfy_qa_handoff(&waiting);
+    let ready = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let approval_id = approve_ready_promotion_for_test(&store, &job_id);
+    mutate_durable_structure_map(&ready, "source_map");
+
+    let invalidated = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    assert_ne!(
+        child_stage_status(&invalidated, "promote"),
+        STATUS_COMPLETED
+    );
+    assert_eq!(child_stage_status(&invalidated, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&invalidated, "prepare"), STATUS_PENDING);
+    assert!(!invalidated
+        .approval_references
+        .iter()
+        .any(|approval| approval.approval_id == approval_id));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn promoted_publication_map_drift_cannot_reach_the_reading_builder() {
+    let root = temp_root("promoted-publication-map-drift-before-build");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let executor = ReadingPipelineFixtureExecutor::passing();
+    let (job_id, waiting) = fake_job_waiting_for_expert_qa(&store, &repo, &executor);
+    satisfy_qa_handoff(&waiting);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    approve_ready_promotion_for_test(&store, &job_id);
+    let promoted = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    assert_eq!(child_stage_status(&promoted, "promote"), STATUS_COMPLETED);
+    mutate_durable_structure_map(&promoted, "publication_map");
+    let command_count_before_build = executor.command_labels().len();
+
+    let blocked = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    assert_ne!(
+        child_stage_status(&blocked, "build_reading"),
+        STATUS_COMPLETED
+    );
+    assert_eq!(executor.command_labels().len(), command_count_before_build);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn source_map_drift_after_build_rolls_back_before_validation() {
+    let root = temp_root("source-map-drift-after-build");
+    let repo = handoff_repo_fixture(&root);
+    let store = BookPipelineStore::for_test(&root);
+    let executor = ReadingPipelineFixtureExecutor::passing();
+    let (job_id, waiting) = fake_job_waiting_for_expert_qa(&store, &repo, &executor);
+    satisfy_qa_handoff(&waiting);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let approval_id = approve_ready_promotion_for_test(&store, &job_id);
+    advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    let built = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+    assert_eq!(
+        child_stage_status(&built, "build_reading"),
+        STATUS_COMPLETED
+    );
+    mutate_durable_structure_map(&built, "source_map");
+    let command_count_before_validation = executor.command_labels().len();
+
+    let invalidated = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
+
+    assert_eq!(child_stage_status(&invalidated, "split"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&invalidated, "prepare"), STATUS_PENDING);
+    assert_eq!(
+        child_stage_status(&invalidated, "validate_reading"),
+        STATUS_PENDING
+    );
+    assert!(!invalidated
+        .approval_references
+        .iter()
+        .any(|approval| approval.approval_id == approval_id));
+    assert_eq!(
+        executor.command_labels().len(),
+        command_count_before_validation
+    );
     let _ = fs::remove_dir_all(root);
 }
 

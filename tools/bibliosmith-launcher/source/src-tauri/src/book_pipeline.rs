@@ -12724,6 +12724,57 @@ fn load_validated_publication_map(
     Ok((publication_map, publication_map_json))
 }
 
+struct ValidatedStructureMaps {
+    source_map: SourceMapDocument,
+    publication_map: PublicationMapDocument,
+    source_map_sha256: String,
+    publication_map_sha256: String,
+}
+
+/// Load both durable structure contracts only through their registered stage
+/// artifacts. Shape validation alone is insufficient: a locally edited map can
+/// remain valid JSON while no longer being the map that split, approval, or
+/// promotion reviewed.
+fn validated_structure_maps(
+    child: &BookPipelineChildJob,
+    publication_producer_stage: &str,
+) -> Result<ValidatedStructureMaps, String> {
+    let project_root = project_root_from_child(child)?;
+    let (source_map_path, source_map_sha256) =
+        validated_stage_artifact(child, "source_map", "split")?;
+    let (publication_map_path, publication_map_sha256) =
+        validated_stage_artifact(child, "publication_map", publication_producer_stage)?;
+    let expected_source_map_path = project_root.join("metadata/source_map.json");
+    let expected_publication_map_path = project_root.join("metadata/publication_map.json");
+    if source_map_path != expected_source_map_path
+        || publication_map_path != expected_publication_map_path
+    {
+        return Err(
+            "Durable structure artifact path no longer matches the local project contract.".into(),
+        );
+    }
+    let source_map_json = fs::read_to_string(&source_map_path).map_err(|err| err.to_string())?;
+    let source_map: SourceMapDocument = serde_json::from_str(&source_map_json)
+        .map_err(|err| format!("Source map is invalid: {err}"))?;
+    let source_markdown = fs::read_to_string(project_root.join("source/source.md"))
+        .map_err(|_| "Source Markdown is missing; rerun handoff.".to_string())?;
+    if source_map.schema != SOURCE_MAP_SCHEMA
+        || source_map.source_markdown_sha256 != sha256_str(&source_markdown)
+    {
+        return Err("Source Map no longer binds the current source Markdown.".into());
+    }
+    let (publication_map, publication_map_json) = load_validated_publication_map(&project_root)?;
+    if sha256_str(&publication_map_json) != publication_map_sha256 {
+        return Err("Publication Map bytes differ from the registered stage artifact.".into());
+    }
+    Ok(ValidatedStructureMaps {
+        source_map,
+        publication_map,
+        source_map_sha256,
+        publication_map_sha256,
+    })
+}
+
 /// Prepare stage (order 5): seed glossary/style, per-chapter controls, and
 /// provider-independent task manifests, registering the `glossary`,
 /// `style_profile`, `chapter_control`, and `translation_task_manifest`
@@ -12731,14 +12782,10 @@ fn load_validated_publication_map(
 /// plus the task policy version. No private source text enters these records.
 fn run_prepare_stage(child: &BookPipelineChildJob) -> Result<StageRunOutput, String> {
     let project_root = project_root_from_child(child)?;
-    let map_path = project_root.join("metadata").join("source_map.json");
-    let map_json = fs::read_to_string(&map_path)
-        .map_err(|_| "Source map is missing; run the split stage first.".to_string())?;
-    let source_map_sha256 = sha256_str(&map_json);
-    let document: SourceMapDocument =
-        serde_json::from_str(&map_json).map_err(|err| err.to_string())?;
-    let (_, publication_map_json) = load_validated_publication_map(&project_root)?;
-    let publication_map_sha256 = sha256_str(&publication_map_json);
+    let structure = validated_structure_maps(child, "split")?;
+    let source_map_sha256 = structure.source_map_sha256;
+    let publication_map_sha256 = structure.publication_map_sha256;
+    let document = structure.source_map;
 
     let glossary_path = project_root.join("glossary").join("terms.csv");
     if !glossary_path.is_file() {
@@ -15744,16 +15791,14 @@ fn translation_approval_binding(
         .stages
         .iter()
         .find(|stage| stage.stage_id == "split")?;
+    let structure = validated_structure_maps(child, "split").ok()?;
     let mut bound_artifact_hashes = BTreeMap::new();
     bound_artifact_hashes.insert(
         "source_markdown".into(),
         split.input_hashes.get("sourceMarkdownSha256")?.clone(),
     );
-    let source_map = child
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "source_map")?;
-    bound_artifact_hashes.insert("source_map".into(), source_map.sha256.clone()?);
+    bound_artifact_hashes.insert("source_map".into(), structure.source_map_sha256);
+    bound_artifact_hashes.insert("publication_map".into(), structure.publication_map_sha256);
 
     let mut task_count = 0;
     for artifact in child
@@ -16153,6 +16198,7 @@ fn promotion_approval_binding(
     }
     let policy = qa_policy(job).ok()?;
     let project_root = project_root_from_child(child).ok()?;
+    let structure = validated_structure_maps(child, "split").ok()?;
     let units = expert_qa_units(child, &project_root).ok()?;
     let handoff_artifact = child
         .artifacts
@@ -16173,6 +16219,8 @@ fn promotion_approval_binding(
     let mut sample_evidence = BTreeMap::new();
     bound_artifact_hashes.insert("qa_policy".into(), sha256_str(policy));
     bound_artifact_hashes.insert("expert_qa_handoff".into(), handoff_sha256.clone());
+    bound_artifact_hashes.insert("source_map".into(), structure.source_map_sha256);
+    bound_artifact_hashes.insert("publication_map".into(), structure.publication_map_sha256);
     sample_evidence.insert("expert_qa_handoff".into(), handoff_sha256);
     for unit in &units {
         let translation_artifact = child.artifacts.iter().find(|artifact| {
@@ -16442,6 +16490,7 @@ fn run_promote_stage(
 ) -> Result<StageRunOutput, String> {
     let project_root = project_root_from_child(child)?;
     let (approval_id, request, mut input_hashes) = promotion_approval_input_hashes(job, child)?;
+    let structure = validated_structure_maps(child, "split")?;
     let units = expert_qa_units(child, &project_root)?;
     let approved_unit_ids = request
         .bound_artifact_hashes
@@ -16496,18 +16545,13 @@ fn run_promote_stage(
     }
 
     let publication_map_path = project_root.join("metadata/publication_map.json");
-    let source_map_path = project_root.join("metadata/source_map.json");
-    let source_publication_map_text =
-        fs::read_to_string(&publication_map_path).map_err(|err| err.to_string())?;
-    let mut publication_map: PublicationMapDocument =
-        serde_json::from_str(&source_publication_map_text).map_err(|err| err.to_string())?;
-    let source_map: SourceMapDocument =
-        serde_json::from_str(&fs::read_to_string(&source_map_path).map_err(|err| err.to_string())?)
-            .map_err(|err| err.to_string())?;
+    let mut publication_map = structure.publication_map;
+    let source_map = structure.source_map;
     input_hashes.insert(
         "sourcePublicationMapSha256".into(),
-        sha256_str(&source_publication_map_text),
+        structure.publication_map_sha256,
     );
+    input_hashes.insert("sourceMapSha256".into(), structure.source_map_sha256);
 
     let mut reader_titles = BTreeMap::new();
     let mut artifacts = Vec::new();
@@ -16612,7 +16656,7 @@ fn run_promote_stage(
         path: display_path(&publication_map_path),
         sha256: Some(localized_publication_map_sha256),
         zotero_key: None,
-        producer_stage: Some("split".into()),
+        producer_stage: Some("promote".into()),
         ..BookPipelineArtifact::default()
     });
 
@@ -16839,8 +16883,19 @@ fn run_build_reading_stage(
     executor: &dyn RunnerCommandExecutor,
 ) -> Result<StageRunOutput, String> {
     let project_root = project_root_from_child(child)?;
-    let _ = load_validated_publication_map(&project_root)?;
-    let (_, _, mut input_hashes) = promotion_approval_input_hashes(job, child)?;
+    let structure = validated_structure_maps(child, "promote")?;
+    let (_, promotion_manifest_sha256) =
+        validated_stage_artifact(child, "promotion_manifest", "promote")?;
+    let mut input_hashes = BTreeMap::new();
+    input_hashes.insert(
+        "publicationMapSha256".into(),
+        structure.publication_map_sha256.clone(),
+    );
+    input_hashes.insert(
+        "sourceMapSha256".into(),
+        structure.source_map_sha256.clone(),
+    );
+    input_hashes.insert("promotionManifestSha256".into(), promotion_manifest_sha256);
     input_hashes.insert(
         "outputFormatsSha256".into(),
         sha256_str(&serde_json::to_string(&job.output_formats).map_err(|err| err.to_string())?),
@@ -16984,17 +17039,10 @@ fn run_build_reading_stage(
 
     let bilingual_epub_path = reading_dir.join("book_bilingual.epub");
     if wants_bilingual {
-        let source_map = child
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.kind == "source_map")
-            .ok_or_else(|| "Bilingual build requires the source_map artifact.".to_string())?;
-        let source_map_path = PathBuf::from(&source_map.path);
-        let source_map_sha256 = sha256_file(&source_map_path)?;
-        if source_map.sha256.as_ref() != Some(&source_map_sha256) {
-            return Err("Source map changed before bilingual build.".into());
-        }
-        input_hashes.insert("bilingualSourceMapSha256".into(), source_map_sha256);
+        input_hashes.insert(
+            "bilingualSourceMapSha256".into(),
+            structure.source_map_sha256,
+        );
         let mut source_chapters = child
             .artifacts
             .iter()
@@ -17922,9 +17970,13 @@ fn run_validate_reading_stage(
     let validates_epub = output_format_enabled(job, OUTPUT_FORMAT_EPUB)
         || output_format_enabled(job, OUTPUT_FORMAT_BILINGUAL);
     let (publication_map_path, browser_runtime) = if validates_epub {
-        let (publication_map_path, publication_map_sha256) =
-            validated_stage_artifact(child, "publication_map", "split")?;
-        input_hashes.insert("publicationMapSha256".into(), publication_map_sha256);
+        let structure = validated_structure_maps(child, "promote")?;
+        let publication_map_path = project_root.join("metadata/publication_map.json");
+        input_hashes.insert(
+            "publicationMapSha256".into(),
+            structure.publication_map_sha256,
+        );
+        input_hashes.insert("sourceMapSha256".into(), structure.source_map_sha256);
         let structural_script = structural_readability_auditor_path()?;
         input_hashes.insert(
             "structuralReadabilityScriptSha256".into(),
@@ -18144,7 +18196,7 @@ fn validated_stage_artifact(
     let actual_sha256 = sha256_file(&path)?;
     if &actual_sha256 != expected_sha256 {
         return Err(format!(
-            "{kind} artifact changed before Digest build: {}",
+            "{kind} artifact changed after {producer_stage} registration: {}",
             artifact.path
         ));
     }
@@ -18725,6 +18777,63 @@ fn invalidate_all_downstream(child: &mut BookPipelineChildJob, after_stage: &str
     }
 }
 
+fn invalidate_drifted_structure_maps(
+    job: &mut BookPipelineJob,
+    child_index: usize,
+    allow_rerun: bool,
+) -> bool {
+    let child = &job.children[child_index];
+    let split_completed =
+        stage_ref(child, "split").is_some_and(|stage| stage.status == STATUS_COMPLETED);
+    let promotion_completed =
+        stage_ref(child, "promote").is_some_and(|stage| stage.status == STATUS_COMPLETED);
+    let publication_producer_stage = if promotion_completed {
+        "promote"
+    } else {
+        "split"
+    };
+    if !split_completed || validated_structure_maps(child, publication_producer_stage).is_ok() {
+        return false;
+    }
+
+    let child_id = child.id.clone();
+    let drift_evidence = child
+        .artifacts
+        .iter()
+        .filter(|artifact| matches!(artifact.kind.as_str(), "publication_map" | "source_map"))
+        .map(|artifact| {
+            let actual =
+                sha256_file(Path::new(&artifact.path)).unwrap_or_else(|_| "missing".into());
+            format!(
+                "{}:{}:{}",
+                artifact.kind,
+                artifact.sha256.as_deref().unwrap_or("missing"),
+                actual
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    invalidate_all_downstream(&mut job.children[child_index], "split");
+    job.approval_references
+        .retain(|approval| approval.child_job_id != child_id);
+    let child = &mut job.children[child_index];
+    if let Some(split) = stage_mut(child, "split") {
+        split.input_hashes.insert(
+            "structureMapDriftSha256".into(),
+            sha256_str(&drift_evidence),
+        );
+    }
+    if allow_rerun {
+        set_stage_status(child, "split", STATUS_READY, None);
+        child.last_error = None;
+    } else {
+        const ERROR: &str = "structure_map_changed_downstream_exists";
+        set_stage_status(child, "split", STATUS_BLOCKED, Some(ERROR.into()));
+        child.last_error = Some(ERROR.into());
+    }
+    true
+}
+
 /// Repair state written before downstream invalidation cleared unit-scoped
 /// evidence. The prepared task manifests are the active chapter set; records
 /// for any other unit belong to an older split and must not reach QA or build.
@@ -18987,6 +19096,39 @@ fn advance_job_stage(
             let job = state.jobs[job_index].clone();
             store.save(&state)?;
             if stop_after {
+                return Ok(job);
+            }
+        }
+    }
+
+    // Phase 0.0625: Source Map and Publication Map are durable split outputs,
+    // not editable scratch JSON. Any byte drift rolls the pipeline back to the
+    // split boundary and removes approvals; only an explicit invalidating
+    // advance may regenerate them.
+    if !retrying_stage {
+        let mut state = store.load()?;
+        let job_index = find_job_index(&state, job_id)?;
+        let child_index = locate_child_index(&state.jobs[job_index], child_id)?;
+        if invalidate_drifted_structure_maps(
+            &mut state.jobs[job_index],
+            child_index,
+            invalidate_downstream,
+        ) {
+            state.jobs[job_index].current_step = if invalidate_downstream {
+                "Regenerating drifted structure maps".into()
+            } else {
+                "Structure map binding invalidated".into()
+            };
+            state.jobs[job_index]
+                .log_summary
+                .push("Structure map binding invalidated by artifact hash change".into());
+            state.jobs[job_index].log_summary =
+                trim_log_summary(&state.jobs[job_index].log_summary);
+            state.jobs[job_index].updated_at = now_label();
+            derive_job(&mut state.jobs[job_index]);
+            let job = state.jobs[job_index].clone();
+            store.save(&state)?;
+            if !invalidate_downstream {
                 return Ok(job);
             }
         }

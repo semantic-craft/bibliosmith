@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { ChevronLeft, ChevronRight, FolderOpen, Trash2, X } from "lucide-react";
 import { inspectBookPipelineProjectMigration, readBookPipelineArtifactExcerpt, readBookPipelineTranslationSample } from "../api";
 import type {
@@ -48,6 +48,8 @@ import { OperationProgressBar } from "./OperationProgress";
 type ProviderChoice = { basis: string; profileId: string; configId: string };
 type SampleReportState = { version: string; report: BookPipelineTranslationSampleReport };
 type SampleState = { id: string; text: string; truncated: boolean };
+type PromptPreviewState = { basis: string; preview: TranslationPromptPreview };
+type PromptPreviewErrorState = { basis: string; message: string };
 
 export type BookDrawerProps = {
   copy: PipelineCopy;
@@ -82,21 +84,55 @@ function PromptPackCard({ unit, busy, promptPackCatalog, onSelectPromptPack, onP
   const selectedPack = packs.find((pack) => pack.packId === selectedReference?.packId);
   const selectedRevision = selectedPack?.revisions.find((revision) => revision.revisionId === selectedReference?.revisionId)
     ?? selectedPack?.revisions.at(-1);
+  const inputEvidence = child ? JSON.stringify({
+    stages: child.stages
+      .map((stage) => [stage.stageId, Object.entries(stage.inputHashes).sort()] as const)
+      .sort(([left], [right]) => left.localeCompare(right)),
+    artifacts: child.artifacts
+      .filter((artifact) => artifact.sha256)
+      .map((artifact) => [artifact.artifactId ?? artifact.path, artifact.kind, artifact.sha256, artifact.supersededBy ?? null] as const)
+      .sort(([left], [right]) => left.localeCompare(right)),
+  }) : "";
+  const previewBasis = child && selectedReference
+    ? JSON.stringify([
+      unit.job.id,
+      child.id,
+      selectedReference.packId,
+      selectedReference.revisionId,
+      selectedReference.contentSha256,
+      inputEvidence,
+    ])
+    : "";
   const [tab, setTab] = useState<"template" | "actual">("template");
-  const [preview, setPreview] = useState<TranslationPromptPreview | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [previewing, setPreviewing] = useState(false);
+  const [previewState, setPreviewState] = useState<PromptPreviewState | null>(null);
+  const [previewErrorState, setPreviewErrorState] = useState<PromptPreviewErrorState | null>(null);
+  const [previewingBasis, setPreviewingBasis] = useState<string | null>(null);
+  const previewRequest = useRef(0);
+  const preview = previewState?.basis === previewBasis ? previewState.preview : null;
+  const previewError = previewErrorState?.basis === previewBasis ? previewErrorState.message : null;
+  const previewing = previewingBasis === previewBasis;
 
   const loadPreview = async () => {
-    if (!child || previewing) return;
-    setPreviewing(true);
-    setPreviewError(null);
+    if (!child || !selectedReference || !previewBasis || previewing) return;
+    const requestId = ++previewRequest.current;
+    const requestBasis = previewBasis;
+    const requestReference = selectedReference;
+    setPreviewingBasis(requestBasis);
+    setPreviewErrorState(null);
     try {
-      setPreview(await onPreviewPrompt(unit.job.id, child.id));
+      const result = await onPreviewPrompt(unit.job.id, child.id);
+      const referenceMatches = result.promptPackReference.packId === requestReference.packId
+        && result.promptPackReference.revisionId === requestReference.revisionId
+        && result.promptPackReference.contentSha256 === requestReference.contentSha256;
+      if (previewRequest.current === requestId && referenceMatches) {
+        setPreviewState({ basis: requestBasis, preview: result });
+      }
     } catch (error) {
-      setPreviewError(String(error));
+      if (previewRequest.current === requestId) {
+        setPreviewErrorState({ basis: requestBasis, message: String(error) });
+      }
     } finally {
-      setPreviewing(false);
+      setPreviewingBasis((current) => current === requestBasis ? null : current);
     }
   };
 
@@ -119,7 +155,10 @@ function PromptPackCard({ unit, busy, promptPackCatalog, onSelectPromptPack, onP
             const [packId, revisionId] = event.currentTarget.value.split(":");
             const revision = packs.find((pack) => pack.packId === packId)?.revisions.find((item) => item.revisionId === revisionId);
             if (!revision) return;
-            setPreview(null);
+            previewRequest.current += 1;
+            setPreviewState(null);
+            setPreviewErrorState(null);
+            setPreviewingBasis(null);
             setTab("template");
             onSelectPromptPack(unit.job.id, child.id, {
               packId: revision.packId,
