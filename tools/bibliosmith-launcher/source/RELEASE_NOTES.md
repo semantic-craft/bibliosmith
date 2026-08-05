@@ -1,8 +1,8 @@
-# BiblioSmith Launcher 1.16.0
+# BiblioSmith Launcher 1.16.1
 
 ## ZH
 
-BiblioSmith Launcher 1.16.0 将翻译提示词、出版结构和独立运行环境三条链路合并为一套可复核的本地成书流程。本版同时纳入最新安全依赖更新。
+BiblioSmith Launcher 1.16.1 将翻译提示词、出版结构和独立运行环境三条链路合并为一套可复核的本地成书流程。本版同时纳入最新安全依赖更新和 macOS 随包运行时签名修复。
 
 ### 翻译提示词方案
 
@@ -25,11 +25,12 @@ BiblioSmith Launcher 1.16.0 将翻译提示词、出版结构和独立运行环�
 - 修复阅读输出打开流程；书架可批量移除条目而保留本地项目文件。
 - 翻译模型和 OCR 模型设置恢复为下拉选择器，一次只显示当前配置；OCR 凭据继续只存于 macOS Keychain。
 - 将 `cryptography` 升级到 50.0.0，纳入上游安全修复。
+- 随包的 Playwright Chromium、FFmpeg 与动态库现在逐一使用 Developer ID 和 Hardened Runtime 签名，仅浏览器主程序获得最小 JIT 权限；发布验收会启动包内 Chromium 并实际执行 JavaScript。
 - 本版仍仅提供 macOS Apple Silicon DMG。安装包使用 Developer ID 签名、Apple 公证与 stapling，并通过 Gatekeeper 验证；请从本 Release 手动下载升级。
 
 ## EN
 
-BiblioSmith Launcher 1.16.0 brings prompt management, publication structure, and a self-contained runtime into one auditable local book-production workflow. It also includes the latest security dependency update.
+BiblioSmith Launcher 1.16.1 brings prompt management, publication structure, and a self-contained runtime into one auditable local book-production workflow. It also includes the latest security dependency update and a macOS bundled-runtime signing fix.
 
 ### Translation prompt packs
 
@@ -52,11 +53,12 @@ BiblioSmith Launcher 1.16.0 brings prompt management, publication structure, and
 - Fixed opening reading outputs and added bulk shelf removal without deleting local project files.
 - Restored translation-model and OCR-model dropdowns with one active configuration at a time. OCR credentials remain stored only in the macOS Keychain.
 - Upgraded `cryptography` to 50.0.0, incorporating upstream security fixes.
+- Bundled Playwright Chromium, FFmpeg, and dynamic libraries are now individually Developer ID signed with Hardened Runtime. Only the browser executable receives the minimum JIT entitlement, and release acceptance launches the packaged Chromium to execute real JavaScript.
 - This release remains a macOS Apple Silicon DMG. It is Developer ID signed, Apple notarized and stapled, and Gatekeeper verified. Download the DMG from this Release to upgrade manually.
 
 ## JA
 
-BiblioSmith Launcher 1.16.0 は、翻訳プロンプト管理、出版構造、自己完結型ランタイムを、一つの監査可能なローカル製本フローへ統合します。最新のセキュリティ依存関係更新も含みます。
+BiblioSmith Launcher 1.16.1 は、翻訳プロンプト管理、出版構造、自己完結型ランタイムを、一つの監査可能なローカル製本フローへ統合します。最新のセキュリティ依存関係更新と macOS 同梱ランタイム署名の修正も含みます。
 
 ### 翻訳プロンプトパック
 
@@ -79,4 +81,5 @@ BiblioSmith Launcher 1.16.0 は、翻訳プロンプト管理、出版構造、�
 - 読書成果物を開く処理を修正し、ローカルのプロジェクトファイルを残したまま書棚から一括削除できるようにしました。
 - 翻訳モデルと OCR モデルの設定をドロップダウンへ戻し、一度に一つの設定だけを表示します。OCR 認証情報は引き続き macOS Keychain のみに保存します。
 - `cryptography` を 50.0.0 へ更新し、上流のセキュリティ修正を取り込みました。
+- 同梱する Playwright Chromium、FFmpeg、動的ライブラリを Developer ID と Hardened Runtime で個別に署名します。JIT 権限はブラウザー本体だけに最小限付与し、リリース受入れでは同梱 Chromium を起動して実際に JavaScript を実行します。
 - 本リリースも macOS Apple Silicon 向け DMG のみです。Developer ID 署名、Apple 公証、stapling、Gatekeeper 検証を行います。この Release から DMG を手動でダウンロードして更新してください。
