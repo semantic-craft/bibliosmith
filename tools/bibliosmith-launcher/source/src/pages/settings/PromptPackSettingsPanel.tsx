@@ -133,10 +133,14 @@ function PromptPackDetail({
   const readOnly = pack.kind === "builtin" || selectedRevision !== revision;
   const [displayName, setDisplayName] = useState(revision.displayName);
   const [templates, setTemplates] = useState(() => revision.stages.map((stage) => stage.template));
+  const [styleGuidance, setStyleGuidance] = useState(revision.parameters?.styleGuidance ?? "");
+  const [qualityFocus, setQualityFocus] = useState(revision.parameters?.qualityFocus ?? "");
   const [diff, setDiff] = useState<TranslationPromptPackRevisionDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const dirty = displayName.trim() !== revision.displayName
-    || templates.some((template, index) => template !== revision.stages[index]?.template);
+    || templates.some((template, index) => template !== revision.stages[index]?.template)
+    || styleGuidance !== (revision.parameters?.styleGuidance ?? "")
+    || qualityFocus !== (revision.parameters?.qualityFocus ?? "");
   const isDefault = sameReference(defaults[selectedRevision.executor], packReference);
   const sourceLabel = useMemo(() => {
     const source = selectedRevision.source;
@@ -190,6 +194,43 @@ function PromptPackDetail({
           };
           return [<div key={key}><strong>{labels[key]}</strong><span>{value}</span></div>];
         })}
+        {Array.isArray(selectedRevision.source.referenceFiles) && (
+          <div><strong>{zh ? "机制参考文件" : "Mechanism reference files"}</strong><span>{selectedRevision.source.referenceFiles.join(" · ")}</span></div>
+        )}
+        {(selectedRevision.requiredSkillIds?.length ?? 0) > 0 && (
+          <div>
+            <strong>{zh ? "固定技能依赖" : "Pinned skill dependencies"}</strong>
+            <span>{selectedRevision.requiredSkillIds!.map((skillId) => {
+              const versions = selectedRevision.source.skillVersions as Record<string, unknown> | undefined;
+              return `${skillId}@${String(versions?.[skillId] ?? "未固定")}`;
+            }).join(" · ")}</span>
+          </div>
+        )}
+        {(selectedRevision.excludedResponsibilities?.length ?? 0) > 0 && (
+          <div><strong>{zh ? "明确排除的职责" : "Excluded responsibilities"}</strong><span>{selectedRevision.excludedResponsibilities!.join(" · ")}</span></div>
+        )}
+      </div>
+      <div className="st-pp-stages">
+        <label className="st-pp-stage">
+          <span>{zh ? "风格指导参数" : "Style guidance parameter"} <code>styleGuidance</code></span>
+          <textarea
+            aria-label={zh ? "风格指导参数" : "Style guidance parameter"}
+            value={readOnly ? (selectedRevision.parameters?.styleGuidance ?? "") : styleGuidance}
+            readOnly={readOnly}
+            placeholder={zh ? "可选；作为开放参数注入，不能覆盖执行器安全层。" : "Optional; injected without overriding executor safety."}
+            onChange={(event) => setStyleGuidance(event.currentTarget.value)}
+          />
+        </label>
+        <label className="st-pp-stage">
+          <span>{zh ? "质量侧重参数" : "Quality focus parameter"} <code>qualityFocus</code></span>
+          <textarea
+            aria-label={zh ? "质量侧重参数" : "Quality focus parameter"}
+            value={readOnly ? (selectedRevision.parameters?.qualityFocus ?? "") : qualityFocus}
+            readOnly={readOnly}
+            placeholder={zh ? "可选；例如更重视术语一致性。" : "Optional; for example, emphasize terminology consistency."}
+            onChange={(event) => setQualityFocus(event.currentTarget.value)}
+          />
+        </label>
       </div>
       <div className="st-pp-stages">
         {selectedRevision.stages.map((stage, index) => (
@@ -244,6 +285,10 @@ function PromptPackDetail({
               onClick={() => void onSaveRevision({
                 packId: pack.packId,
                 displayName,
+                parameters: Object.fromEntries([
+                  ["styleGuidance", styleGuidance.trim()],
+                  ["qualityFocus", qualityFocus.trim()],
+                ].filter(([, value]) => value)),
                 stages: selectedRevision.stages.map((stage, index) => ({ ...stage, template: templates[index] })),
               })}
             >
@@ -258,7 +303,35 @@ function PromptPackDetail({
       {diff && (
         <div className="st-pp-diff" aria-label={zh ? "修订差异" : "Revision diff"}>
           <strong>{diff.before.revisionId} → {diff.after.revisionId}</strong>
-          {diff.sourceChanged && <span>{zh ? "来源或改编说明已变化" : "Source or adaptation changed"}</span>}
+          {diff.beforeMetadata.displayName !== diff.afterMetadata.displayName && (
+            <div><code>{zh ? "方案名称" : "Display name"}</code><del>{diff.beforeMetadata.displayName}</del><ins>{diff.afterMetadata.displayName}</ins></div>
+          )}
+          {([
+            ["executor", diff.beforeMetadata.executor, diff.afterMetadata.executor],
+            ["sourceLanguage", diff.beforeMetadata.sourceLanguage, diff.afterMetadata.sourceLanguage],
+            ["targetLanguage", diff.beforeMetadata.targetLanguage, diff.afterMetadata.targetLanguage],
+            ["costHint", diff.beforeMetadata.costHint, diff.afterMetadata.costHint],
+            ["contextPolicy", diff.beforeMetadata.contextPolicy ?? "∅", diff.afterMetadata.contextPolicy ?? "∅"],
+            ["requiredSkillIds", diff.beforeMetadata.requiredSkillIds.join(" · ") || "∅", diff.afterMetadata.requiredSkillIds.join(" · ") || "∅"],
+            ["requiredEvidence", diff.beforeMetadata.requiredEvidence.join(" · ") || "∅", diff.afterMetadata.requiredEvidence.join(" · ") || "∅"],
+            ["excludedResponsibilities", diff.beforeMetadata.excludedResponsibilities.join(" · ") || "∅", diff.afterMetadata.excludedResponsibilities.join(" · ") || "∅"],
+            ["evidencePolicy", JSON.stringify(diff.beforeMetadata.evidencePolicy ?? null), JSON.stringify(diff.afterMetadata.evidencePolicy ?? null)],
+          ] as const).map(([key, beforeValue, afterValue]) => beforeValue === afterValue ? null : (
+            <div key={key}><code>{key}</code><del>{beforeValue}</del><ins>{afterValue}</ins></div>
+          ))}
+          {[...new Set([
+            ...Object.keys(diff.beforeMetadata.source),
+            ...Object.keys(diff.afterMetadata.source),
+          ])].sort().map((key) => {
+            const beforeValue = JSON.stringify(diff.beforeMetadata.source[key] ?? null);
+            const afterValue = JSON.stringify(diff.afterMetadata.source[key] ?? null);
+            return beforeValue === afterValue ? null : <div key={key}><code>{key}</code><del>{beforeValue}</del><ins>{afterValue}</ins></div>;
+          })}
+          {(["styleGuidance", "qualityFocus"] as const).map((key) => {
+            const beforeValue = diff.beforeMetadata.parameters[key] ?? "∅";
+            const afterValue = diff.afterMetadata.parameters[key] ?? "∅";
+            return beforeValue === afterValue ? null : <div key={key}><code>{key}</code><del>{beforeValue}</del><ins>{afterValue}</ins></div>;
+          })}
           {diff.stages.map((stage) => (
             <div key={stage.stageId}>
               <code>{stage.stageId}</code>

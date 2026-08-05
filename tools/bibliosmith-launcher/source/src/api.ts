@@ -68,6 +68,7 @@ let previewBookPipelineRevision = 0;
 let previewTranslationPromptCatalog = structuredClone(
   builtinTranslationPromptPacks,
 ) as TranslationPromptPackCatalog;
+const previewDeletedTranslationPromptPacks: TranslationPromptPackDefinition[] = [];
 const previewTranslationPromptDefaults = new Map<string, TranslationPromptPackReference>();
 export const BOOK_PIPELINE_STATE_SCHEMA_VERSION = "book-pipeline-state-v5";
 const BOOK_PIPELINE_JOB_SCHEMA_VERSION = "book-pipeline-job-v5";
@@ -877,10 +878,45 @@ function promptPackReference(revision: TranslationPromptPackRevision): Translati
   };
 }
 
+function canonicalPromptPackJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
+  if (typeof value === "string") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalPromptPackJson).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalPromptPackJson(record[key])}`)
+      .join(",")}}`;
+  }
+  throw new Error("Prompt pack revision contains a non-JSON value.");
+}
+
+async function previewPromptPackContentSha256(revision: TranslationPromptPackRevision): Promise<string> {
+  const snapshot: Record<string, unknown> = structuredClone(revision);
+  Reflect.deleteProperty(snapshot, "contentSha256");
+  const bytes = new TextEncoder().encode(canonicalPromptPackJson(snapshot));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function previewPromptPackRevision(reference: TranslationPromptPackReference) {
-  return previewTranslationPromptCatalog.packs
+  return [...previewTranslationPromptCatalog.packs, ...previewDeletedTranslationPromptPacks]
     .find((pack) => pack.packId === reference.packId)
     ?.revisions.find((revision) => revision.revisionId === reference.revisionId && revision.contentSha256 === reference.contentSha256);
+}
+
+function previewStringRecord(value: unknown, field: string): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Prompt pack ${field} must be a string map.`);
+  }
+  const entries = Object.entries(value);
+  if (entries.some(([, item]) => typeof item !== "string")) {
+    throw new Error(`Prompt pack ${field} must be a string map.`);
+  }
+  return Object.fromEntries(entries) as Record<string, string>;
 }
 
 function previewPromptPackDefaultKey(executor: string, sourceLanguage: string, targetLanguage: string) {
@@ -913,21 +949,29 @@ export function getTranslationPromptPackDefault(
   });
 }
 
-export function copyTranslationPromptPack(sourceReference: TranslationPromptPackReference, displayName: string) {
+export async function copyTranslationPromptPack(sourceReference: TranslationPromptPackReference, displayName: string) {
   if (!isTauriRuntime()) {
     const source = previewPromptPackRevision(sourceReference);
-    if (!source) return Promise.reject(new Error("Preview prompt pack revision not found."));
-    const packId = `local.preview-${Date.now()}`;
+    if (!source) throw new Error("Preview prompt pack revision not found.");
+    const packId = `local.preview-${crypto.randomUUID()}`;
     const revision: TranslationPromptPackRevision = {
       ...structuredClone(source),
       packId,
       revisionId: "local-1",
+      contentSha256: "",
       displayName: displayName.trim(),
-      source: { kind: "local-copy", sourceReference },
+      source: {
+        ...structuredClone(source.source),
+        kind: "local-copy",
+        sourcePackId: sourceReference.packId,
+        sourceRevisionId: sourceReference.revisionId,
+        sourceContentSha256: sourceReference.contentSha256,
+      },
     };
+    revision.contentSha256 = await previewPromptPackContentSha256(revision);
     const pack: TranslationPromptPackDefinition = {
       packId,
-      kind: "local",
+      kind: "custom",
       summary: `“${source.displayName}”的本地副本`,
       revisions: [revision],
     };
@@ -935,25 +979,27 @@ export function copyTranslationPromptPack(sourceReference: TranslationPromptPack
       ...previewTranslationPromptCatalog,
       packs: [...previewTranslationPromptCatalog.packs, pack],
     };
-    return Promise.resolve(structuredClone(pack));
+    return structuredClone(pack);
   }
   return invoke<TranslationPromptPackDefinition>("copy_translation_prompt_pack", { sourceReference, displayName });
 }
 
-export function saveTranslationPromptPackRevision(draft: TranslationPromptPackRevisionDraft) {
+export async function saveTranslationPromptPackRevision(draft: TranslationPromptPackRevisionDraft) {
   if (!isTauriRuntime()) {
     const pack = previewTranslationPromptCatalog.packs.find((item) => item.packId === draft.packId);
     const previous = pack?.revisions.at(-1);
-    if (!pack || pack.kind === "builtin" || !previous) return Promise.reject(new Error("Only local prompt packs can be edited."));
+    if (!pack || pack.kind === "builtin" || !previous) throw new Error("Only local prompt packs can be edited.");
     const revision: TranslationPromptPackRevision = {
       ...structuredClone(previous),
       revisionId: `local-${pack.revisions.length + 1}`,
-      contentSha256: `preview-${Date.now()}`,
+      contentSha256: "",
       displayName: draft.displayName.trim(),
+      parameters: structuredClone(draft.parameters),
       stages: structuredClone(draft.stages),
     };
+    revision.contentSha256 = await previewPromptPackContentSha256(revision);
     pack.revisions.push(revision);
-    return Promise.resolve(structuredClone(revision));
+    return structuredClone(revision);
   }
   return invoke<TranslationPromptPackRevision>("save_translation_prompt_pack_revision", { draft });
 }
@@ -962,6 +1008,13 @@ export function deleteTranslationPromptPack(packId: string) {
   if (!isTauriRuntime()) {
     const pack = previewTranslationPromptCatalog.packs.find((item) => item.packId === packId);
     if (!pack || pack.kind === "builtin") return Promise.reject(new Error("Only local prompt packs can be deleted."));
+    if ([...previewTranslationPromptDefaults.values()].some((reference) => reference.packId === packId)) {
+      return Promise.reject(new Error("The current default prompt pack cannot be deleted."));
+    }
+    previewDeletedTranslationPromptPacks.push({
+      ...structuredClone(pack),
+      deletedAt: new Date().toISOString(),
+    });
     previewTranslationPromptCatalog = {
       ...previewTranslationPromptCatalog,
       packs: previewTranslationPromptCatalog.packs.filter((item) => item.packId !== packId),
@@ -1011,8 +1064,34 @@ export function diffTranslationPromptPackRevisions(
     const diff: TranslationPromptPackRevisionDiff = {
       before,
       after,
-      displayNameChanged: left.displayName !== right.displayName,
-      sourceChanged: JSON.stringify(left.source) !== JSON.stringify(right.source),
+      beforeMetadata: {
+        displayName: left.displayName,
+        executor: left.executor,
+        sourceLanguage: left.sourceLanguage,
+        targetLanguage: left.targetLanguage,
+        costHint: left.costHint,
+        source: structuredClone(left.source),
+        contextPolicy: left.contextPolicy,
+        requiredSkillIds: structuredClone(left.requiredSkillIds ?? []),
+        requiredEvidence: structuredClone(left.requiredEvidence ?? []),
+        excludedResponsibilities: structuredClone(left.excludedResponsibilities ?? []),
+        parameters: structuredClone(left.parameters ?? {}),
+        evidencePolicy: structuredClone(left.evidencePolicy),
+      },
+      afterMetadata: {
+        displayName: right.displayName,
+        executor: right.executor,
+        sourceLanguage: right.sourceLanguage,
+        targetLanguage: right.targetLanguage,
+        costHint: right.costHint,
+        source: structuredClone(right.source),
+        contextPolicy: right.contextPolicy,
+        requiredSkillIds: structuredClone(right.requiredSkillIds ?? []),
+        requiredEvidence: structuredClone(right.requiredEvidence ?? []),
+        excludedResponsibilities: structuredClone(right.excludedResponsibilities ?? []),
+        parameters: structuredClone(right.parameters ?? {}),
+        evidencePolicy: structuredClone(right.evidencePolicy),
+      },
       stages,
     };
     return Promise.resolve(diff);
@@ -1103,14 +1182,23 @@ export function previewBookTranslationPrompt(jobId: string, childId: string | nu
     if (!job || !child) return Promise.reject(new Error("Preview job not found."));
     const revision = previewPromptPackRevision(child.promptPackReference);
     if (!revision) return Promise.reject(new Error("Prompt pack revision not found."));
+    const parameterBlock = Object.entries(revision.parameters ?? {})
+      .map(([key, value]) => `${key}: ${value}`)
+      .join("\n");
     return Promise.resolve({
       promptPackReference: child.promptPackReference,
       stages: revision.stages.map((stage) => ({
         stageId: stage.stageId,
         label: stage.label,
-        actualPrompt: `${stage.template}\n\n[执行器保护约束]\n结构、术语、占位符与私人文本边界由 BiblioSmith 执行器拥有。`,
+        actualPrompt: `${stage.template}${parameterBlock ? `\n\n[开放方案参数]\n${parameterBlock}` : ""}\n\n[执行器保护约束]\n结构、术语、占位符与私人文本边界由 BiblioSmith 执行器拥有。`,
         injections: ["template", "current-source", "neighbor-context:none-for-first-segment", "glossary", "executor-safety"],
       })),
+      contextPolicy: revision.contextPolicy,
+      requiredSkillIds: revision.requiredSkillIds,
+      skillDependencyVersions: previewStringRecord(revision.source.skillVersions, "source.skillVersions"),
+      requiredEvidence: revision.requiredEvidence,
+      excludedResponsibilities: revision.excludedResponsibilities,
+      parameters: revision.parameters,
     });
   }
   return invoke<TranslationPromptPreview>("preview_book_translation_prompt", { jobId, childId });

@@ -2447,7 +2447,9 @@ pub async fn queue_book_pipeline_job(
         } else {
             "programmatic"
         };
-        prompt_store.resolve_revision(&translation_intent.prompt_pack_reference, executor)?;
+        let revision =
+            prompt_store.resolve_revision(&translation_intent.prompt_pack_reference, executor)?;
+        validate_prompt_pack_skill_dependencies(&translation_intent.skill_ids, &revision)?;
         let current_default = prompt_store.resolve_default(executor, "auto", "zh-Hans")?;
         if translation_intent.prompt_pack_reference != current_default {
             return Err(
@@ -2592,6 +2594,15 @@ fn select_book_prompt_pack(
         state.jobs[job_index].prompt_pack_reference = prompt_pack_reference;
         state.jobs[job_index].prompt_pack_selection_source = "book-override".into();
     }
+    if executor == "expert-agent" {
+        let mut required_skill_ids = BTreeSet::new();
+        for child in &state.jobs[job_index].children {
+            let revision =
+                prompt_store.resolve_revision(&child.prompt_pack_reference, "expert-agent")?;
+            required_skill_ids.extend(revision.required_skill_ids);
+        }
+        state.jobs[job_index].translation_skill_ids = required_skill_ids.into_iter().collect();
+    }
     ready_translation_approval_gate(&mut state.jobs[job_index], child_index);
     state.jobs[job_index].updated_at = now_label();
     derive_job(&mut state.jobs[job_index]);
@@ -2654,6 +2665,10 @@ fn preview_book_prompt_with_executor(
             "skillDependencyVersions": handoff.skill_dependency_versions,
             "requiredEvidence": handoff.required_evidence,
             "excludedResponsibilities": handoff.excluded_responsibilities,
+            "parameters": handoff.parameters,
+            "promptPackProvenance": handoff.prompt_pack_provenance,
+            "stageInstructions": handoff.stage_instructions,
+            "evidencePolicy": handoff.evidence_policy,
         }))
         .map_err(|err| err.to_string());
     }
@@ -4119,14 +4134,7 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
         if revision.executor != expected_executor {
             return Err("prompt_pack_executor_mismatch".into());
         }
-        let uses_reflection = revision
-            .stages
-            .iter()
-            .any(|stage| stage.stage_id == "reflect")
-            && revision
-                .stages
-                .iter()
-                .any(|stage| stage.stage_id == "improve");
+        let uses_reflection = prompt_pack_revision_uses_reflection(revision);
         if intent.translation_mode == TRANSLATION_MODE_FAST
             && intent.second_pass_enabled != uses_reflection
         {
@@ -4163,6 +4171,32 @@ fn validate_translation_intent(intent: &BookPipelineTranslationIntent) -> Result
         return Err("digestMode requires epub in outputFormats.".into());
     }
     Ok(())
+}
+
+fn validate_prompt_pack_skill_dependencies(
+    selected_skill_ids: &[String],
+    revision: &PromptPackRevision,
+) -> Result<(), String> {
+    if revision.executor == "expert-agent"
+        && revision
+            .required_skill_ids
+            .iter()
+            .any(|required| !selected_skill_ids.contains(required))
+    {
+        return Err("prompt_pack_required_skill_missing".into());
+    }
+    Ok(())
+}
+
+fn prompt_pack_revision_uses_reflection(revision: &PromptPackRevision) -> bool {
+    revision
+        .stages
+        .iter()
+        .any(|stage| stage.stage_id == "reflect")
+        && revision
+            .stages
+            .iter()
+            .any(|stage| stage.stage_id == "improve")
 }
 
 /// Guards the queue boundary. An unknown mode is refused instead of being given
@@ -13761,6 +13795,7 @@ fn run_translate_stage(
     let mut input_hashes = translation_approval_input_hashes(job, child)?;
     let prompt_pack = PromptPackStore::default()?
         .resolve_revision(&child.prompt_pack_reference, "programmatic")?;
+    let second_pass_enabled = prompt_pack_revision_uses_reflection(&prompt_pack);
     let all_units = translation_task_units(child, &project_root)?;
     let retry_unit_ids = failed_translation_unit_ids(child);
     let requested_units = if retry_unit_ids.is_empty() {
@@ -13785,7 +13820,7 @@ fn run_translate_stage(
         "targetLanguage": "zh-Hans",
         "providerProfileId": job.translation_profile_id.as_str(),
         "providerConfigId": job.translation_config_id.as_str(),
-        "secondPassEnabled": job.second_pass_enabled,
+        "secondPassEnabled": second_pass_enabled,
         "textCleanup": job.text_cleanup,
         "promptPack": prompt_pack,
         "translationPolicyVersion": TRANSLATION_POLICY_VERSION,
@@ -13951,22 +13986,28 @@ fn run_expert_translate_stage(
     let mut input_hashes = translation_approval_input_hashes(job, child)?;
     let units = translation_task_units(child, &project_root)?;
     let prompt_store = PromptPackStore::default()?;
-    let prompt_pack =
-        prompt_store.resolve_revision(&child.prompt_pack_reference, "expert-agent")?;
+    let (source_sample, glossary_entries) = expert_prompt_preview_inputs(child)?;
+    let compiled_handoff = prompt_store.compile_expert_handoff(
+        &child.prompt_pack_reference,
+        &source_sample,
+        &glossary_entries,
+    )?;
     let handoff = serde_json::json!({
         "schema": TRANSLATION_HANDOFF_SCHEMA,
         "agentProfileId": job.translation_profile_id.as_str(),
-        "skillIds": job.translation_skill_ids.as_slice(),
-        "promptPackReference": &child.prompt_pack_reference,
-        "sourceLanguage": prompt_pack.source_language.as_str(),
-        "targetLanguage": prompt_pack.target_language.as_str(),
-        "contextPolicy": &prompt_pack.context_policy,
-        "requiredSkillIds": &prompt_pack.required_skill_ids,
-        "skillDependencyVersions": prompt_pack.source.get("skillVersions").cloned().unwrap_or_else(|| serde_json::json!({})),
-        "requiredEvidence": &prompt_pack.required_evidence,
-        "excludedResponsibilities": &prompt_pack.excluded_responsibilities,
-        "promptPackProvenance": &prompt_pack.source,
-        "stageInstructions": &prompt_pack.stages,
+        "skillIds": &compiled_handoff.required_skill_ids,
+        "promptPackReference": &compiled_handoff.prompt_pack_reference,
+        "sourceLanguage": compiled_handoff.source_language.as_str(),
+        "targetLanguage": compiled_handoff.target_language.as_str(),
+        "contextPolicy": compiled_handoff.context_policy.as_str(),
+        "requiredSkillIds": &compiled_handoff.required_skill_ids,
+        "skillDependencyVersions": &compiled_handoff.skill_dependency_versions,
+        "requiredEvidence": &compiled_handoff.required_evidence,
+        "excludedResponsibilities": &compiled_handoff.excluded_responsibilities,
+        "parameters": &compiled_handoff.parameters,
+        "promptPackProvenance": &compiled_handoff.prompt_pack_provenance,
+        "stageInstructions": &compiled_handoff.stage_instructions,
+        "evidencePolicy": &compiled_handoff.evidence_policy,
         "executorSafety": {
             "owner": "bibliosmith",
             "locked": ["placeholders", "headings", "paragraph-boundaries", "glossary", "privacy"]
@@ -14017,7 +14058,12 @@ fn run_expert_translate_stage(
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .filter(|receipt| {
             prompt_store
-                .validate_expert_receipt(&child.prompt_pack_reference, receipt, &handoff_sha256)
+                .validate_expert_receipt(
+                    &child.prompt_pack_reference,
+                    receipt,
+                    &handoff_sha256,
+                    &project_root,
+                )
                 .is_ok()
         });
     if let Some(receipt) = &receipt {
@@ -15011,6 +15057,15 @@ fn translation_approval_binding(
     job: &BookPipelineJob,
     child: &BookPipelineChildJob,
 ) -> Option<(BookPipelineApprovalRequest, BTreeMap<String, String>)> {
+    let executor = if job.translation_mode == TRANSLATION_MODE_EXPERT {
+        "expert-agent"
+    } else {
+        "programmatic"
+    };
+    let prompt_pack = PromptPackStore::default()
+        .ok()?
+        .resolve_revision(&child.prompt_pack_reference, executor)
+        .ok()?;
     if !["split", "prepare"].iter().all(|stage_id| {
         child
             .stages
@@ -15066,12 +15121,12 @@ fn translation_approval_binding(
     let agent_profile_id = (job.translation_mode == TRANSLATION_MODE_EXPERT)
         .then(|| job.translation_profile_id.clone());
     let skill_ids = if job.translation_mode == TRANSLATION_MODE_EXPERT {
-        job.translation_skill_ids.clone()
+        prompt_pack.required_skill_ids.clone()
     } else {
         Vec::new()
     };
-    let second_pass_enabled =
-        job.translation_mode == TRANSLATION_MODE_FAST && job.second_pass_enabled;
+    let second_pass_enabled = job.translation_mode == TRANSLATION_MODE_FAST
+        && prompt_pack_revision_uses_reflection(&prompt_pack);
     let mut sample_evidence = BTreeMap::new();
     if let Some(report_sha256) = child
         .artifacts

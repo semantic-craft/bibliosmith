@@ -28,6 +28,7 @@ class PromptPackRevision:
     executor: str
     source_language: str
     target_language: str
+    parameters: Mapping[str, str]
     stages: tuple[PromptStageTemplate, ...]
 
     def template_for(self, stage_id: str) -> str:
@@ -38,6 +39,15 @@ class PromptPackRevision:
 
     def has_stage(self, stage_id: str) -> bool:
         return any(stage.stage_id == stage_id for stage in self.stages)
+
+    def compiled_template_for(self, stage_id: str) -> str:
+        template = self.template_for(stage_id)
+        if not self.parameters:
+            return template
+        parameter_block = "\n".join(
+            f"- {key}: {value}" for key, value in sorted(self.parameters.items())
+        )
+        return f"{template}\n\n# OPEN SCHEME PARAMETERS\n{parameter_block}"
 
     @property
     def uses_reflection(self) -> bool:
@@ -76,7 +86,7 @@ def compile_translation_prompt(
     text_cleanup: bool = False,
     previous_translation_tail: str | None = None,
 ) -> CompiledPrompt:
-    template = revision.template_for("translate")
+    template = revision.compiled_template_for("translate")
     system_instruction = target_profile.build_system_instruction(
         source_text=source_text,
         task_manifest=task_manifest,
@@ -171,6 +181,16 @@ def parse_prompt_pack_revision(
         stage_ids.add(stage_id)
         stages.append(PromptStageTemplate(stage_id, template))
 
+    raw_parameters = value.get("parameters", {})
+    if not isinstance(raw_parameters, dict) or any(
+        key not in {"qualityFocus", "styleGuidance"}
+        or not isinstance(parameter, str)
+        or not parameter.strip()
+        or len(parameter) > 2_000
+        for key, parameter in raw_parameters.items()
+    ):
+        raise PromptPackError("invalid_prompt_pack_parameters")
+
     return PromptPackRevision(
         pack_id=pack_id,
         revision_id=revision_id,
@@ -179,6 +199,7 @@ def parse_prompt_pack_revision(
         executor=declared_executor,
         source_language=declared_source,
         target_language=declared_target,
+        parameters=dict(raw_parameters),
         stages=tuple(stages),
     )
 

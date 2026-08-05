@@ -857,8 +857,8 @@ def _translate_unit(
                         source_text=source_chunk,
                         task_manifest=profile_task,
                     ),
-                    reflection_template=prompt_pack.template_for("reflect"),
-                    improve_template=prompt_pack.template_for("improve"),
+                    reflection_template=prompt_pack.compiled_template_for("reflect"),
+                    improve_template=prompt_pack.compiled_template_for("improve"),
                 ),
                 candidate_retries=placeholder_retries,
                 candidate_normalizer=lambda candidate, protected=protected_chunks[index]: (

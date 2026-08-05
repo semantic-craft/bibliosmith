@@ -144,6 +144,9 @@ class PromptPackRunTests(unittest.TestCase):
         local_revision["stages"][0]["template"] = (
             "LOCAL_EDIT_SENTINEL 按本书语体完整翻译当前块。"
         )
+        local_revision["parameters"] = {
+            "styleGuidance": "PARAMETER_SENTINEL 使用克制的现代汉语。"
+        }
         local_revision["contentSha256"] = revision_content_sha256(local_revision)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -162,6 +165,7 @@ class PromptPackRunTests(unittest.TestCase):
             )
 
             self.assertIn("LOCAL_EDIT_SENTINEL", provider.requests[0].system_instruction)
+            self.assertIn("PARAMETER_SENTINEL", provider.requests[0].system_instruction)
             self.assertEqual(
                 (root / "chapters" / "translated" / "chapter_001.md").read_text(
                     encoding="utf-8"
@@ -221,6 +225,35 @@ class PromptPackRunTests(unittest.TestCase):
                 actual["systemInstruction"], provider.requests[0].system_instruction
             )
             self.assertEqual(actual["currentSource"], provider.requests[0].text)
+
+    def test_four_dimension_preview_compiles_all_three_runtime_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manifest_path = build_run_fixture(
+                Path(temporary_directory),
+                source_text="Private source sample.\n",
+                max_tokens=100,
+                second_pass_enabled=True,
+                prompt_pack=FOUR_DIMENSION_PROMPT_PACK,
+            )
+
+            preview = run_prompt_preview_manifest(manifest_path)
+
+            self.assertEqual(
+                [stage["stageId"] for stage in preview["stages"]],
+                ["translate", "reflect", "improve"],
+            )
+            self.assertIn(
+                "${INITIAL_TRANSLATION_RESULT}",
+                preview["stages"][1]["actualPrompt"]["currentSource"],
+            )
+            self.assertIn(
+                "${FOUR_DIMENSION_REFLECTION_RESULT}",
+                preview["stages"][2]["actualPrompt"]["currentSource"],
+            )
+            self.assertIn(
+                "Reflect on accuracy, fluency, style, and terminology.",
+                preview["stages"][1]["actualPrompt"]["systemInstruction"],
+            )
 
 
 if __name__ == "__main__":

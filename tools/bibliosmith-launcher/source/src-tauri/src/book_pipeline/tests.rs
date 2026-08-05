@@ -1,5 +1,36 @@
 use super::*;
 
+fn write_translation_stage_evidence(
+    project_root: &Path,
+    evidence_type: &str,
+    reference: &PromptPackReference,
+    handoff_sha256: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut document = serde_json::json!({
+        "schema": "translation-stage-evidence-v1",
+        "evidenceType": evidence_type,
+        "promptPackReference": reference,
+        "translationHandoffSha256": handoff_sha256,
+        "status": "passed",
+    });
+    if let (Some(document), Some(extra)) = (document.as_object_mut(), extra.as_object()) {
+        document.extend(extra.clone());
+    }
+    let relative = format!("qa/evidence/{evidence_type}.json");
+    let path = project_root.join(&relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&document).unwrap() + "\n",
+    )
+    .unwrap();
+    serde_json::json!({
+        "path": relative,
+        "sha256": sha256_file(&path).unwrap(),
+    })
+}
+
 #[test]
 fn stderr_tail_surfaces_the_last_lines_of_a_python_traceback() {
     let stderr = "Traceback (most recent call last):\n  File \"x.py\", line 1\nRuntimeError: GOOGLE_API_KEY or GEMINI_API_KEY not set.\n";
@@ -42,6 +73,20 @@ fn prompt_pack_catalog_exposes_four_functional_packs_with_valid_revisions() {
 }
 
 #[test]
+fn prompt_pack_revision_rejects_non_string_skill_dependency_versions() {
+    let mut revision = builtin_prompt_pack_catalog().unwrap().packs[2]
+        .latest_revision()
+        .unwrap()
+        .clone();
+    revision.source["skillVersions"]["expert-translation-quality"] = serde_json::json!(42);
+
+    assert_eq!(
+        validate_prompt_pack_revision(&revision).unwrap_err(),
+        "invalid_prompt_pack_skill_versions"
+    );
+}
+
+#[test]
 fn custom_prompt_pack_revisions_are_append_only_and_deletion_keeps_history() {
     let root = temp_root("prompt-pack-custom-revisions");
     let store = PromptPackStore::for_test(&root);
@@ -60,6 +105,10 @@ fn custom_prompt_pack_revisions_are_append_only_and_deletion_keeps_history() {
         .save_custom_revision(PromptPackRevisionDraft {
             pack_id: copied.pack_id.clone(),
             display_name: "我的克制译法（二版）".into(),
+            parameters: BTreeMap::from([
+                ("styleGuidance".into(), "克制的现代汉语".into()),
+                ("qualityFocus".into(), "术语一致性".into()),
+            ]),
             stages: vec![PromptStageTemplate {
                 stage_id: "translate".into(),
                 label: "结构保真初译".into(),
@@ -70,6 +119,7 @@ fn custom_prompt_pack_revisions_are_append_only_and_deletion_keeps_history() {
 
     assert_ne!(edited.revision_id, first.revision_id);
     assert_ne!(edited.content_sha256, first.content_sha256);
+    assert_eq!(edited.parameters["styleGuidance"], "克制的现代汉语");
     assert_eq!(
         store
             .resolve_revision(&PromptPackReference::from_revision(&first), "programmatic")
@@ -111,6 +161,41 @@ fn custom_prompt_pack_revisions_are_append_only_and_deletion_keeps_history() {
 }
 
 #[test]
+fn concurrent_prompt_pack_updates_do_not_lose_local_copies() {
+    let root = temp_root("prompt-pack-concurrent-updates");
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let source = PromptPackReference::new(
+        "builtin.structure-fidelity",
+        "2026.08.05-1",
+        "fb5dae8c498d46a1a3501acd0d6b00645b7dfe4c5c797e8e71732482c5a0c26f",
+    );
+    std::thread::scope(|scope| {
+        for index in 0..4 {
+            let barrier = barrier.clone();
+            let root = root.clone();
+            let source = source.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                PromptPackStore::for_test(&root)
+                    .copy_builtin(&source, &format!("并发副本 {index}"))
+                    .unwrap();
+            });
+        }
+    });
+
+    assert_eq!(
+        PromptPackStore::for_test(&root)
+            .list()
+            .unwrap()
+            .packs
+            .iter()
+            .filter(|pack| pack.kind == "custom")
+            .count(),
+        4
+    );
+}
+
+#[test]
 fn prompt_pack_defaults_are_executor_scoped_and_updates_are_opt_in() {
     let root = temp_root("prompt-pack-defaults");
     let store = PromptPackStore::for_test(&root);
@@ -141,7 +226,7 @@ fn prompt_pack_defaults_are_executor_scoped_and_updates_are_opt_in() {
             PromptPackReference::new(
                 "builtin.context-backtracking",
                 "2026.08.05-1",
-                "48c5907dda2fe67c29bfb84ea8690a64a9986d5a9f06a6b4fe42d08b92bd8833",
+                "13d0d89ed81c8572311c31dbb8be56c95b583a9a0a86f779ad7ae8b1ec1e5fc7",
             ),
         )
         .unwrap_err()
@@ -176,7 +261,11 @@ fn new_builtin_revision_is_visible_diffable_and_never_silently_adopted() {
         .unwrap();
     let copied = store.copy_builtin(&before, "旧版独立副本").unwrap();
     let diff = store.diff_revisions(&before, &after).unwrap();
-    assert!(diff.source_changed);
+    assert_ne!(diff.before_metadata.source, diff.after_metadata.source);
+    assert_eq!(
+        diff.after_metadata.source["license"],
+        serde_json::json!("MIT")
+    );
     assert_eq!(
         diff.stages
             .iter()
@@ -224,8 +313,9 @@ fn expert_handoff_uses_the_selected_revision_without_persisting_private_prompt_t
     assert_eq!(handoff.target_language, "zh-Hans");
     assert_eq!(
         handoff.skill_dependency_versions["expert-translation-quality"],
-        "sha256:project-whitelist"
+        "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47"
     );
+    assert_eq!(handoff.stage_instructions[0].stage_id, "context_plan");
     assert!(handoff.actual_prompt.contains("Private source sample"));
     assert!(handoff.actual_prompt.contains("语境计划"));
     let persisted = fs::read_to_string(store.path()).unwrap_or_default();
@@ -235,16 +325,49 @@ fn expert_handoff_uses_the_selected_revision_without_persisting_private_prompt_t
     let full_loop = PromptPackReference::new(
         "builtin.full-quality-loop",
         "2026.08.05-1",
-        "9d35dd17e71b08845fdce4c30031df6bdb73b6ec2b45124e1523d0fa37afe1f8",
+        "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74",
     );
     let full_handoff = store
         .compile_expert_handoff(&full_loop, "Private source sample", &[])
         .unwrap();
     assert_ne!(handoff.actual_prompt, full_handoff.actual_prompt);
     assert!(full_handoff.actual_prompt.contains("独立复核"));
+    assert!(full_handoff.evidence_policy.unwrap().independent_review);
     assert!(full_handoff
         .excluded_responsibilities
         .contains(&"publication".into()));
+
+    let local = store.copy_builtin(&reference, "我的语境方案").unwrap();
+    let local_revision = local.latest_revision().unwrap();
+    let edited = store
+        .save_custom_revision(PromptPackRevisionDraft {
+            pack_id: local.pack_id.clone(),
+            display_name: "我的语境方案（二版）".into(),
+            parameters: BTreeMap::from([(
+                "styleGuidance".into(),
+                "LOCAL_EXPERT_PARAMETER 使用克制的现代汉语".into(),
+            )]),
+            stages: local_revision.stages.clone(),
+        })
+        .unwrap();
+    let local_handoff = store
+        .compile_expert_handoff(
+            &PromptPackReference::from_revision(&edited),
+            "Private source sample",
+            &[],
+        )
+        .unwrap();
+    assert!(local_handoff
+        .actual_prompt
+        .contains("LOCAL_EXPERT_PARAMETER"));
+    assert_eq!(
+        local_handoff.parameters["styleGuidance"],
+        "LOCAL_EXPERT_PARAMETER 使用克制的现代汉语"
+    );
+    assert_eq!(
+        local_handoff.skill_dependency_versions["expert-translation-quality"],
+        "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47"
+    );
 }
 
 #[test]
@@ -294,6 +417,8 @@ fn changing_a_books_prompt_pack_rebinds_translation_approval_to_the_new_hash() {
         "book-override"
     );
     assert!(gate.approval_id.is_none());
+    assert!(gate.approval_request.as_ref().unwrap().second_pass_enabled);
+    assert!(!changed.second_pass_enabled);
     assert_eq!(
         gate.input_hashes["promptPackContentSha256"],
         four_dimension_prompt_pack_reference().content_sha256
@@ -308,56 +433,212 @@ fn changing_a_books_prompt_pack_rebinds_translation_approval_to_the_new_hash() {
 }
 
 #[test]
+fn selecting_an_expert_pack_adopts_its_exact_skill_contract() {
+    let root = temp_root("prompt-pack-expert-skill-switch");
+    let repo = handoff_repo_fixture(&root);
+    let source_path = root.join("source.md");
+    let store = BookPipelineStore::for_test(&root);
+    let prompt_store = PromptPackStore::for_test(&root);
+    let job_id = handoff_ready_child_job(
+        &store,
+        &repo,
+        &source_path,
+        "# Chapter\n\nPrivate paragraph.\n",
+    );
+    configure_expert_job(&store, &job_id);
+    advance_job(&store, &job_id, None, false).unwrap();
+    advance_job(&store, &job_id, None, false).unwrap();
+    let full_loop = PromptPackReference::new(
+        "builtin.full-quality-loop",
+        "2026.08.05-1",
+        "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74",
+    );
+
+    let changed = select_book_prompt_pack(&store, &prompt_store, &job_id, None, full_loop).unwrap();
+
+    assert_eq!(
+        changed.translation_skill_ids,
+        vec![
+            "expert-translation-quality".to_string(),
+            "translation-quality-defect-families".to_string(),
+        ]
+    );
+    let request = changed.children[0]
+        .stages
+        .iter()
+        .find(|stage| stage.stage_id == "approve_translation")
+        .unwrap()
+        .approval_request
+        .as_ref()
+        .unwrap();
+    assert_eq!(request.skill_ids, changed.translation_skill_ids);
+}
+
+#[test]
 fn full_quality_loop_rejects_open_issues_and_accepts_closed_defect_families() {
     let root = temp_root("full-quality-loop-gate");
     let store = PromptPackStore::for_test(&root);
     let reference = PromptPackReference::new(
         "builtin.full-quality-loop",
         "2026.08.05-1",
-        "9d35dd17e71b08845fdce4c30031df6bdb73b6ec2b45124e1523d0fa37afe1f8",
+        "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74",
     );
     let revision = store.resolve_revision(&reference, "expert-agent").unwrap();
+    let handoff_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let stage_evidence = revision
         .required_evidence
         .iter()
-        .map(|kind| (kind.clone(), serde_json::Value::String(sha256_str(kind))))
+        .map(|kind| {
+            (
+                kind.clone(),
+                write_translation_stage_evidence(
+                    &root,
+                    kind,
+                    &reference,
+                    handoff_sha256,
+                    if kind == "independent-review" {
+                        serde_json::json!({
+                            "translatorId": "translator-a",
+                            "independentReviewerId": "reviewer-b",
+                            "latestReviewOpenIssueCount": 1,
+                        })
+                    } else {
+                        serde_json::json!({})
+                    },
+                ),
+            )
+        })
         .collect::<serde_json::Map<_, _>>();
     let mut receipt = serde_json::json!({
         "schema": "translation-prompt-pack-receipt-v1",
-        "translationHandoffSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "translationHandoffSha256": handoff_sha256,
         "promptPackReference": &reference,
         "stageEvidence": stage_evidence,
-        "translatorId": "translator-a",
-        "independentReviewerId": "reviewer-b",
-        "latestReviewOpenIssueCount": 1,
-        "defectFamilies": [],
     });
 
     assert!(store
         .validate_expert_receipt(
             &reference,
             &receipt,
-            receipt["translationHandoffSha256"].as_str().unwrap()
+            receipt["translationHandoffSha256"].as_str().unwrap(),
+            &root,
         )
         .unwrap_err()
         .contains("expert_gate_open_issues"));
 
-    receipt["latestReviewOpenIssueCount"] = serde_json::json!(0);
-    receipt["defectFamilies"] = serde_json::json!([{
+    let defect_evidence = ["candidate-scan", "repair", "recheck"].map(|name| {
+        let relative = format!("qa/evidence/{name}.json");
+        let path = root.join(&relative);
+        fs::write(&path, format!("{{\"evidence\":\"{name}\"}}\n")).unwrap();
+        serde_json::json!({
+            "path": relative,
+            "sha256": sha256_file(&path).unwrap(),
+        })
+    });
+    let defect_families = serde_json::json!([{
         "familyId": "omitted-honorific",
-        "candidateScanSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "repairSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        "recheckSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "candidateCount": 4,
+        "repairedCount": 4,
+        "openCount": 0,
+        "candidateScanEvidence": defect_evidence[0],
+        "repairEvidence": defect_evidence[1],
+        "recheckEvidence": defect_evidence[2],
         "status": "closed"
     }]);
+    receipt["stageEvidence"]["independent-review"] = write_translation_stage_evidence(
+        &root,
+        "independent-review",
+        &reference,
+        handoff_sha256,
+        serde_json::json!({
+            "translatorId": "translator-a",
+            "independentReviewerId": "reviewer-b",
+            "latestReviewOpenIssueCount": 0,
+        }),
+    );
+    receipt["stageEvidence"]["defect-family-closure"] = write_translation_stage_evidence(
+        &root,
+        "defect-family-closure",
+        &reference,
+        handoff_sha256,
+        serde_json::json!({"defectFamilies": defect_families.clone()}),
+    );
 
     store
         .validate_expert_receipt(
             &reference,
             &receipt,
             receipt["translationHandoffSha256"].as_str().unwrap(),
+            &root,
         )
         .unwrap();
+
+    let research_path = root.join(
+        receipt["stageEvidence"]["research-brief"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let research_evidence = fs::read(&research_path).unwrap();
+    fs::write(&research_path, b"tampered evidence\n").unwrap();
+    assert_eq!(
+        store
+            .validate_expert_receipt(
+                &reference,
+                &receipt,
+                receipt["translationHandoffSha256"].as_str().unwrap(),
+                &root,
+            )
+            .unwrap_err(),
+        "invalid_translation_stage_evidence:research-brief"
+    );
+    fs::write(&research_path, research_evidence).unwrap();
+
+    let copied = store.copy_builtin(&reference, "本地全流程闭环").unwrap();
+    let copied_reference = PromptPackReference::from_revision(copied.latest_revision().unwrap());
+    assert!(copied.latest_revision().unwrap().evidence_policy.is_some());
+    receipt["promptPackReference"] = serde_json::to_value(&copied_reference).unwrap();
+    receipt["stageEvidence"] = serde_json::Value::Object(
+        copied
+            .latest_revision()
+            .unwrap()
+            .required_evidence
+            .iter()
+            .map(|kind| {
+                let extra = match kind.as_str() {
+                    "independent-review" => serde_json::json!({
+                        "translatorId": "translator-a",
+                        "independentReviewerId": "reviewer-b",
+                        "latestReviewOpenIssueCount": 1,
+                    }),
+                    "defect-family-closure" => {
+                        serde_json::json!({"defectFamilies": defect_families.clone()})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                (
+                    kind.clone(),
+                    write_translation_stage_evidence(
+                        &root,
+                        kind,
+                        &copied_reference,
+                        handoff_sha256,
+                        extra,
+                    ),
+                )
+            })
+            .collect(),
+    );
+    assert_eq!(
+        store
+            .validate_expert_receipt(
+                &copied_reference,
+                &receipt,
+                receipt["translationHandoffSha256"].as_str().unwrap(),
+                &root,
+            )
+            .unwrap_err(),
+        "expert_gate_open_issues"
+    );
 }
 
 #[test]
@@ -9913,6 +10194,9 @@ fn satisfy_translation_handoff(job: &BookPipelineJob) {
         fs::write(output_path, fixture_translation(&source, unit_id)).unwrap();
     }
     let handoff_path = project_root.join("qa/handoffs/translate.json");
+    let handoff_sha256 = sha256_file(&handoff_path).unwrap();
+    let reference: PromptPackReference =
+        serde_json::from_value(handoff["promptPackReference"].clone()).unwrap();
     let stage_evidence = handoff["requiredEvidence"]
         .as_array()
         .unwrap()
@@ -9921,13 +10205,19 @@ fn satisfy_translation_handoff(job: &BookPipelineJob) {
             let kind = kind.as_str().unwrap();
             (
                 kind.to_string(),
-                serde_json::Value::String(sha256_str(kind)),
+                write_translation_stage_evidence(
+                    &project_root,
+                    kind,
+                    &reference,
+                    &handoff_sha256,
+                    serde_json::json!({}),
+                ),
             )
         })
         .collect::<serde_json::Map<_, _>>();
     let receipt = serde_json::json!({
         "schema": "translation-prompt-pack-receipt-v1",
-        "translationHandoffSha256": sha256_file(&handoff_path).unwrap(),
+        "translationHandoffSha256": handoff_sha256,
         "promptPackReference": handoff["promptPackReference"].clone(),
         "stageEvidence": stage_evidence,
     });
@@ -10242,20 +10532,20 @@ fn advance_runs_prepare_and_parks_before_translation_gate() {
         .clone();
     let mut toggled = advanced.clone();
     toggled.second_pass_enabled = true;
-    assert!(ready_translation_approval_gate(&mut toggled, 0));
+    assert!(!ready_translation_approval_gate(&mut toggled, 0));
     let toggled_gate = toggled.children[0]
         .stages
         .iter()
         .find(|stage| stage.stage_id == "approve_translation")
         .unwrap();
     assert!(
-        toggled_gate
+        !toggled_gate
             .approval_request
             .as_ref()
             .unwrap()
             .second_pass_enabled
     );
-    assert_ne!(
+    assert_eq!(
         toggled_gate.input_hashes["approvalBindingSha256"],
         original_binding
     );
@@ -10697,17 +10987,21 @@ fn output_formats_change_reopens_completed_translation_approval() {
 }
 
 #[test]
-fn fast_book_passes_enabled_second_pass_to_translation_manifest() {
+fn four_dimension_pack_drives_second_pass_even_when_job_flag_is_stale() {
     let root = temp_root("fake-translate-second-pass");
     let repo = handoff_repo_fixture(&root);
     let store = BookPipelineStore::for_test(&root);
     let job_id = fake_handoff_ready_job_with_second_pass(&store, &repo, true);
+    let mut stale = store.load().unwrap();
+    stale.jobs[0].second_pass_enabled = false;
+    stale.revision = stale.revision.saturating_add(1);
+    store.write_state_unlocked(&stale).unwrap();
     let executor = TranslationEngineFixtureExecutor::with_second_pass_enabled();
 
     advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
     let advanced = advance_job_with_executor(&store, &job_id, None, false, &executor).unwrap();
 
-    assert!(advanced.second_pass_enabled);
+    assert!(!advanced.second_pass_enabled);
     assert_eq!(child_stage_status(&advanced, "translate"), STATUS_COMPLETED);
     assert_eq!(
         executor.requested_units(),

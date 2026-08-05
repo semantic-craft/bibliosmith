@@ -1,5 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { previewBookPipelineRoute, queueBookPipelineJob } from "./api";
+import { describe, expect, it, vi } from "vitest";
+import {
+  copyTranslationPromptPack,
+  deleteTranslationPromptPack,
+  diffTranslationPromptPackRevisions,
+  listTranslationPromptPacks,
+  previewBookTranslationPrompt,
+  previewBookPipelineRoute,
+  queueBookPipelineJob,
+  saveTranslationPromptPackRevision,
+} from "./api";
 import type { BookPipelineSource, BookPipelineTranslationIntent } from "./types";
 
 // Every test here runs under jsdom with no __TAURI_INTERNALS__, so `api.ts`
@@ -92,5 +101,82 @@ describe("previewBookPipelineRoute in the browser preview", () => {
     // only the route preview can show that they share this answer.
     expect(handoffs(await previewBookPipelineRoute(source, "conversion_only"))).toHaveLength(0);
     expect(handoffs(await previewBookPipelineRoute(source, "layout_preserving"))).toHaveLength(0);
+  });
+});
+
+describe("prompt-pack management in the browser preview", () => {
+  it("assigns distinct identities to copies created in the same millisecond", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_786_000_000_000);
+    try {
+      const catalog = await listTranslationPromptPacks();
+      const sourceRevision = catalog.packs
+        .find((pack) => pack.packId === "builtin.structure-fidelity")!
+        .revisions.at(-1)!;
+      const reference = {
+        packId: sourceRevision.packId,
+        revisionId: sourceRevision.revisionId,
+        contentSha256: sourceRevision.contentSha256,
+      };
+
+      const [first, second] = await Promise.all([
+        copyTranslationPromptPack(reference, "同毫秒副本一"),
+        copyTranslationPromptPack(reference, "同毫秒副本二"),
+      ]);
+
+      expect(first.packId).not.toBe(second.packId);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("normalizes expert skill dependency versions into the public preview contract", async () => {
+    const expertIntent: BookPipelineTranslationIntent = {
+      ...intent,
+      translationMode: "expert",
+      skillIds: ["expert-translation-quality"],
+      promptPackReference: {
+        packId: "builtin.context-backtracking",
+        revisionId: "2026.08.05-1",
+        contentSha256: "13d0d89ed81c8572311c31dbb8be56c95b583a9a0a86f779ad7ae8b1ec1e5fc7",
+      },
+    };
+    const job = await queueBookPipelineJob(source, "translate_only", expertIntent);
+
+    const preview = await previewBookTranslationPrompt(job.id, job.children[0].id);
+
+    expect(preview.skillDependencyVersions?.["expert-translation-quality"]).toMatch(
+      /^sha256:[0-9a-f]{64}$/,
+    );
+  });
+
+  it("uses content hashes and retains tombstoned revisions for historical resolution", async () => {
+    const catalog = await listTranslationPromptPacks();
+    const sourceRevision = catalog.packs
+      .find((pack) => pack.packId === "builtin.context-backtracking")!
+      .revisions.at(-1)!;
+    const copied = await copyTranslationPromptPack({
+      packId: sourceRevision.packId,
+      revisionId: sourceRevision.revisionId,
+      contentSha256: sourceRevision.contentSha256,
+    }, "本地语境方案");
+    const first = copied.revisions[0];
+    expect(first.contentSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect((first.source.skillVersions as Record<string, string>)["expert-translation-quality"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+    const second = await saveTranslationPromptPackRevision({
+      packId: copied.packId,
+      displayName: "本地语境方案（二版）",
+      parameters: { styleGuidance: "克制的现代汉语" },
+      stages: first.stages,
+    });
+    expect(second.contentSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(second.contentSha256).not.toBe(first.contentSha256);
+
+    await deleteTranslationPromptPack(copied.packId);
+    const diff = await diffTranslationPromptPackRevisions(
+      { packId: first.packId, revisionId: first.revisionId, contentSha256: first.contentSha256 },
+      { packId: second.packId, revisionId: second.revisionId, contentSha256: second.contentSha256 },
+    );
+    expect(diff.afterMetadata.parameters.styleGuidance).toBe("克制的现代汉语");
   });
 });

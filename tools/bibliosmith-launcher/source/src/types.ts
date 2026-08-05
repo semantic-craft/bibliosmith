@@ -382,6 +382,12 @@ export type TranslationPromptPackRevision = {
   requiredSkillIds?: string[];
   requiredEvidence?: string[];
   excludedResponsibilities?: string[];
+  parameters?: Record<string, string>;
+  evidencePolicy?: {
+    independentReview?: boolean;
+    requireZeroOpenIssues?: boolean;
+    requireDefectFamilyClosure?: boolean;
+  };
   stages: TranslationPromptStageTemplate[];
 };
 
@@ -401,14 +407,34 @@ export type TranslationPromptPackCatalog = {
 export type TranslationPromptPackRevisionDraft = {
   packId: string;
   displayName: string;
+  parameters: Record<string, string>;
   stages: TranslationPromptStageTemplate[];
+};
+
+export type TranslationPromptPackRevisionMetadata = {
+  displayName: string;
+  executor: "programmatic" | "expert-agent";
+  sourceLanguage: string;
+  targetLanguage: string;
+  costHint: string;
+  source: Record<string, unknown>;
+  contextPolicy?: string;
+  requiredSkillIds: string[];
+  requiredEvidence: string[];
+  excludedResponsibilities: string[];
+  parameters: Record<string, string>;
+  evidencePolicy?: {
+    independentReview?: boolean;
+    requireZeroOpenIssues?: boolean;
+    requireDefectFamilyClosure?: boolean;
+  };
 };
 
 export type TranslationPromptPackRevisionDiff = {
   before: TranslationPromptPackReference;
   after: TranslationPromptPackReference;
-  displayNameChanged: boolean;
-  sourceChanged: boolean;
+  beforeMetadata: TranslationPromptPackRevisionMetadata;
+  afterMetadata: TranslationPromptPackRevisionMetadata;
   stages: Array<{
     stageId: string;
     beforeTemplate?: string;
@@ -434,6 +460,7 @@ export type TranslationPromptPreview = {
   skillDependencyVersions?: Record<string, string>;
   requiredEvidence?: string[];
   excludedResponsibilities?: string[];
+  parameters?: Record<string, string>;
 };
 
 export type BookPipelineTranslationIntent = {

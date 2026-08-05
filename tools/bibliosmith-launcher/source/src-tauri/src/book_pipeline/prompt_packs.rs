@@ -4,6 +4,9 @@
 
 use super::*;
 
+mod compiler;
+mod evidence;
+
 const BUILTIN_CATALOG_JSON: &str = include_str!("../../resources/translation-prompt-packs.json");
 const PROMPT_PACK_STORE_SCHEMA: &str = "translation-prompt-pack-store-v1";
 
@@ -62,7 +65,22 @@ pub struct PromptPackRevision {
     pub required_evidence: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_responsibilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_policy: Option<ExpertEvidencePolicy>,
     pub stages: Vec<PromptStageTemplate>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExpertEvidencePolicy {
+    #[serde(default)]
+    pub independent_review: bool,
+    #[serde(default)]
+    pub require_zero_open_issues: bool,
+    #[serde(default)]
+    pub require_defect_family_closure: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -94,6 +112,8 @@ pub struct PromptPackCatalog {
 pub struct PromptPackRevisionDraft {
     pub pack_id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
     pub stages: Vec<PromptStageTemplate>,
 }
 
@@ -105,9 +125,13 @@ pub struct ExpertPromptHandoff {
     pub target_language: String,
     pub context_policy: String,
     pub required_skill_ids: Vec<String>,
-    pub skill_dependency_versions: serde_json::Value,
+    pub skill_dependency_versions: BTreeMap<String, String>,
     pub required_evidence: Vec<String>,
     pub excluded_responsibilities: Vec<String>,
+    pub parameters: BTreeMap<String, String>,
+    pub prompt_pack_provenance: serde_json::Value,
+    pub stage_instructions: Vec<PromptStageTemplate>,
+    pub evidence_policy: Option<ExpertEvidencePolicy>,
     pub actual_prompt: String,
 }
 
@@ -119,13 +143,49 @@ pub struct PromptPackStageDiff {
     pub after_template: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPackRevisionMetadata {
+    pub display_name: String,
+    pub executor: String,
+    pub source_language: String,
+    pub target_language: String,
+    pub cost_hint: String,
+    pub source: serde_json::Value,
+    pub context_policy: Option<String>,
+    pub required_skill_ids: Vec<String>,
+    pub required_evidence: Vec<String>,
+    pub excluded_responsibilities: Vec<String>,
+    pub parameters: BTreeMap<String, String>,
+    pub evidence_policy: Option<ExpertEvidencePolicy>,
+}
+
+impl From<&PromptPackRevision> for PromptPackRevisionMetadata {
+    fn from(revision: &PromptPackRevision) -> Self {
+        Self {
+            display_name: revision.display_name.clone(),
+            executor: revision.executor.clone(),
+            source_language: revision.source_language.clone(),
+            target_language: revision.target_language.clone(),
+            cost_hint: revision.cost_hint.clone(),
+            source: revision.source.clone(),
+            context_policy: revision.context_policy.clone(),
+            required_skill_ids: revision.required_skill_ids.clone(),
+            required_evidence: revision.required_evidence.clone(),
+            excluded_responsibilities: revision.excluded_responsibilities.clone(),
+            parameters: revision.parameters.clone(),
+            evidence_policy: revision.evidence_policy.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptPackRevisionDiff {
     pub before: PromptPackReference,
     pub after: PromptPackReference,
-    pub display_name_changed: bool,
-    pub source_changed: bool,
+    pub before_metadata: PromptPackRevisionMetadata,
+    pub after_metadata: PromptPackRevisionMetadata,
     pub stages: Vec<PromptPackStageDiff>,
 }
 
@@ -152,6 +212,16 @@ impl Default for PromptPackStoreState {
 #[derive(Debug, Clone)]
 pub struct PromptPackStore {
     path: PathBuf,
+}
+
+struct PromptPackStoreLock {
+    path: PathBuf,
+}
+
+impl Drop for PromptPackStoreLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 impl PromptPackStore {
@@ -188,27 +258,8 @@ impl PromptPackStore {
         reference: &PromptPackReference,
         executor: &str,
     ) -> Result<PromptPackRevision, String> {
-        let builtins = builtin_prompt_pack_catalog()?;
         let state = self.load()?;
-        let revision = builtins
-            .packs
-            .iter()
-            .chain(state.custom_packs.iter())
-            .find(|pack| pack.pack_id == reference.pack_id)
-            .and_then(|pack| {
-                pack.revisions
-                    .iter()
-                    .find(|revision| revision.revision_id == reference.revision_id)
-            })
-            .ok_or_else(|| "prompt_pack_revision_not_found".to_string())?;
-        validate_prompt_pack_revision(revision)?;
-        if revision.content_sha256 != reference.content_sha256 {
-            return Err("prompt_pack_content_hash_mismatch".into());
-        }
-        if revision.executor != executor {
-            return Err("prompt_pack_executor_mismatch".into());
-        }
-        Ok(revision.clone())
+        resolve_revision_in_state(&state, reference, Some(executor))
     }
 
     pub fn copy_builtin(
@@ -218,6 +269,7 @@ impl PromptPackStore {
     ) -> Result<PromptPackDefinition, String> {
         let source = resolve_builtin_revision(source_reference)?;
         let display_name = required_trimmed(display_name, "displayName")?;
+        let _lock = self.acquire_lock()?;
         let mut state = self.load()?;
         let identity = sha256_str(&format!(
             "{}:{}:{}:{}",
@@ -234,12 +286,20 @@ impl PromptPackStore {
         revision.pack_id = pack_id.clone();
         revision.revision_id = next_local_revision_id();
         revision.display_name = display_name.into();
-        revision.source = serde_json::json!({
-            "kind": "local-copy",
-            "sourcePackId": source.pack_id,
-            "sourceRevisionId": source.revision_id,
-            "sourceContentSha256": source.content_sha256,
-        });
+        let source_metadata = revision
+            .source
+            .as_object_mut()
+            .ok_or_else(|| "prompt_pack_source_metadata_invalid".to_string())?;
+        source_metadata.insert("kind".into(), serde_json::json!("local-copy"));
+        source_metadata.insert("sourcePackId".into(), serde_json::json!(source.pack_id));
+        source_metadata.insert(
+            "sourceRevisionId".into(),
+            serde_json::json!(source.revision_id),
+        );
+        source_metadata.insert(
+            "sourceContentSha256".into(),
+            serde_json::json!(source.content_sha256),
+        );
         revision.content_sha256 = prompt_pack_content_sha256(&revision)?;
         let definition = PromptPackDefinition {
             pack_id: pack_id.clone(),
@@ -257,6 +317,7 @@ impl PromptPackStore {
         &self,
         draft: PromptPackRevisionDraft,
     ) -> Result<PromptPackRevision, String> {
+        let _lock = self.acquire_lock()?;
         let mut state = self.load()?;
         let pack = state
             .custom_packs
@@ -269,9 +330,11 @@ impl PromptPackStore {
             .ok_or_else(|| "custom_prompt_pack_has_no_revision".to_string())?;
         let display_name = required_trimmed(&draft.display_name, "displayName")?;
         validate_editable_stages(&current.stages, &draft.stages)?;
+        validate_editable_parameters(&draft.parameters)?;
         let mut revision = current;
         revision.revision_id = next_local_revision_id();
         revision.display_name = display_name.into();
+        revision.parameters = draft.parameters;
         revision.stages = draft.stages;
         revision.content_sha256 = prompt_pack_content_sha256(&revision)?;
         validate_prompt_pack_revision(&revision)?;
@@ -284,6 +347,7 @@ impl PromptPackStore {
         if pack_id.starts_with("builtin.") {
             return Err("builtin_prompt_pack_is_read_only".into());
         }
+        let _lock = self.acquire_lock()?;
         let mut state = self.load()?;
         if state
             .defaults
@@ -325,138 +389,19 @@ impl PromptPackStore {
         target_language: &str,
         reference: PromptPackReference,
     ) -> Result<(), String> {
-        let revision = self.resolve_revision(&reference, executor)?;
+        let _lock = self.acquire_lock()?;
+        let mut state = self.load()?;
+        let revision = resolve_revision_in_state(&state, &reference, Some(executor))?;
         if revision.source_language != source_language
             || revision.target_language != target_language
         {
             return Err("prompt_pack_language_mismatch".into());
         }
-        let mut state = self.load()?;
         state.defaults.insert(
             default_key(executor, source_language, target_language),
             reference,
         );
         self.save(&state)
-    }
-
-    pub fn compile_expert_handoff(
-        &self,
-        reference: &PromptPackReference,
-        source_sample: &str,
-        glossary_entries: &[String],
-    ) -> Result<ExpertPromptHandoff, String> {
-        let revision = self.resolve_revision(reference, "expert-agent")?;
-        let stages = revision
-            .stages
-            .iter()
-            .map(|stage| format!("## {}\n{}", stage.label, stage.template))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let glossary = if glossary_entries.is_empty() {
-            "（本次没有术语注入）".into()
-        } else {
-            glossary_entries.join("\n")
-        };
-        let actual_prompt = format!(
-            "# TRANSLATION PROMPT PACK\n{}\n\n# STAGES\n{}\n\n# CONTEXT POLICY\n{}\n\n# CURRENT SOURCE SAMPLE\n{}\n\n# GLOSSARY\n{}\n\n# EXECUTOR SAFETY\n占位符、标题、段落边界、术语约束和私人文本边界由 BiblioSmith 执行器拥有，任何阶段不得覆盖。",
-            revision.display_name,
-            stages,
-            revision.context_policy.as_deref().unwrap_or("仅使用最小必要上下文。"),
-            source_sample,
-            glossary,
-        );
-        Ok(ExpertPromptHandoff {
-            prompt_pack_reference: reference.clone(),
-            source_language: revision.source_language,
-            target_language: revision.target_language,
-            context_policy: revision.context_policy.unwrap_or_default(),
-            required_skill_ids: revision.required_skill_ids,
-            skill_dependency_versions: revision
-                .source
-                .get("skillVersions")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({})),
-            required_evidence: revision.required_evidence,
-            excluded_responsibilities: revision.excluded_responsibilities,
-            actual_prompt,
-        })
-    }
-
-    pub fn validate_expert_receipt(
-        &self,
-        reference: &PromptPackReference,
-        receipt: &serde_json::Value,
-        handoff_sha256: &str,
-    ) -> Result<(), String> {
-        let revision = self.resolve_revision(reference, "expert-agent")?;
-        if receipt.get("schema").and_then(serde_json::Value::as_str)
-            != Some("translation-prompt-pack-receipt-v1")
-            || receipt
-                .get("translationHandoffSha256")
-                .and_then(serde_json::Value::as_str)
-                != Some(handoff_sha256)
-            || receipt.get("promptPackReference") != serde_json::to_value(reference).ok().as_ref()
-        {
-            return Err("invalid_translation_prompt_pack_receipt".into());
-        }
-        let stage_evidence = receipt
-            .get("stageEvidence")
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| "missing_translation_stage_evidence".to_string())?;
-        for evidence_type in &revision.required_evidence {
-            let digest = stage_evidence
-                .get(evidence_type)
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| format!("missing_translation_stage_evidence:{evidence_type}"))?;
-            if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(format!(
-                    "invalid_translation_stage_evidence:{evidence_type}"
-                ));
-            }
-        }
-        if revision.pack_id == "builtin.full-quality-loop" {
-            let translator = receipt
-                .get("translatorId")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let reviewer = receipt
-                .get("independentReviewerId")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            if translator.is_empty() || reviewer.is_empty() || translator == reviewer {
-                return Err("independent_review_not_isolated".into());
-            }
-            if receipt
-                .get("latestReviewOpenIssueCount")
-                .and_then(serde_json::Value::as_u64)
-                .is_none_or(|count| count != 0)
-            {
-                return Err("expert_gate_open_issues".into());
-            }
-            let families = receipt
-                .get("defectFamilies")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| "defect_family_evidence_missing".to_string())?;
-            for family in families {
-                let complete = family.get("status").and_then(serde_json::Value::as_str)
-                    == Some("closed")
-                    && ["candidateScanSha256", "repairSha256", "recheckSha256"]
-                        .iter()
-                        .all(|key| {
-                            family
-                                .get(*key)
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|digest| {
-                                    digest.len() == 64
-                                        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-                                })
-                        });
-                if !complete {
-                    return Err("defect_family_not_closed".into());
-                }
-            }
-        }
-        Ok(())
     }
 
     pub fn diff_revisions(
@@ -484,23 +429,24 @@ impl PromptPackStore {
             .chain(after_stages.keys())
             .copied()
             .collect::<BTreeSet<_>>();
+        let stages = stage_ids
+            .into_iter()
+            .filter_map(|stage_id| {
+                let before_template = before_stages.get(stage_id).map(|value| (*value).into());
+                let after_template = after_stages.get(stage_id).map(|value| (*value).into());
+                (before_template != after_template).then_some(PromptPackStageDiff {
+                    stage_id: stage_id.into(),
+                    before_template,
+                    after_template,
+                })
+            })
+            .collect();
         Ok(PromptPackRevisionDiff {
             before: before.clone(),
             after: after.clone(),
-            display_name_changed: before_revision.display_name != after_revision.display_name,
-            source_changed: before_revision.source != after_revision.source,
-            stages: stage_ids
-                .into_iter()
-                .filter_map(|stage_id| {
-                    let before_template = before_stages.get(stage_id).map(|value| (*value).into());
-                    let after_template = after_stages.get(stage_id).map(|value| (*value).into());
-                    (before_template != after_template).then_some(PromptPackStageDiff {
-                        stage_id: stage_id.into(),
-                        before_template,
-                        after_template,
-                    })
-                })
-                .collect(),
+            before_metadata: PromptPackRevisionMetadata::from(&before_revision),
+            after_metadata: PromptPackRevisionMetadata::from(&after_revision),
+            stages,
         })
     }
 
@@ -508,24 +454,46 @@ impl PromptPackStore {
         &self,
         reference: &PromptPackReference,
     ) -> Result<PromptPackRevision, String> {
-        let builtins = builtin_prompt_pack_catalog()?;
         let state = self.load()?;
-        let revision = builtins
-            .packs
-            .iter()
-            .chain(state.custom_packs.iter())
-            .find(|pack| pack.pack_id == reference.pack_id)
-            .and_then(|pack| {
-                pack.revisions
-                    .iter()
-                    .find(|revision| revision.revision_id == reference.revision_id)
-            })
-            .ok_or_else(|| "prompt_pack_revision_not_found".to_string())?;
-        validate_prompt_pack_revision(revision)?;
-        if revision.content_sha256 != reference.content_sha256 {
-            return Err("prompt_pack_content_hash_mismatch".into());
+        resolve_revision_in_state(&state, reference, None)
+    }
+
+    fn acquire_lock(&self) -> Result<PromptPackStoreLock, String> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "Prompt Pack store path has no parent".to_string())?;
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        let lock_path = self.path.with_extension("json.lock");
+        for _ in 0..200 {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut lock_file) => {
+                    let guard = PromptPackStoreLock {
+                        path: lock_path.clone(),
+                    };
+                    writeln!(lock_file, "{}", std::process::id()).map_err(|err| err.to_string())?;
+                    return Ok(guard);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&lock_path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .is_some_and(|age| age > Duration::from_secs(30));
+                    if stale {
+                        let _ = fs::remove_file(&lock_path);
+                    } else {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                Err(error) => return Err(error.to_string()),
+            }
         }
-        Ok(revision.clone())
+        Err("Prompt Pack store is busy".into())
     }
 
     fn load(&self) -> Result<PromptPackStoreState, String> {
@@ -560,8 +528,39 @@ impl PromptPackStore {
         temporary
             .persist(&self.path)
             .map_err(|err| err.error.to_string())?;
+        #[cfg(unix)]
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|err| err.to_string())?;
         Ok(())
     }
+}
+
+fn resolve_revision_in_state(
+    state: &PromptPackStoreState,
+    reference: &PromptPackReference,
+    executor: Option<&str>,
+) -> Result<PromptPackRevision, String> {
+    let builtins = builtin_prompt_pack_catalog()?;
+    let revision = builtins
+        .packs
+        .iter()
+        .chain(state.custom_packs.iter())
+        .find(|pack| pack.pack_id == reference.pack_id)
+        .and_then(|pack| {
+            pack.revisions
+                .iter()
+                .find(|revision| revision.revision_id == reference.revision_id)
+        })
+        .ok_or_else(|| "prompt_pack_revision_not_found".to_string())?;
+    validate_prompt_pack_revision(revision)?;
+    if revision.content_sha256 != reference.content_sha256 {
+        return Err("prompt_pack_content_hash_mismatch".into());
+    }
+    if executor.is_some_and(|executor| revision.executor != executor) {
+        return Err("prompt_pack_executor_mismatch".into());
+    }
+    Ok(revision.clone())
 }
 
 pub fn builtin_prompt_pack_catalog() -> Result<PromptPackCatalog, String> {
@@ -603,6 +602,8 @@ pub fn validate_prompt_pack_revision(revision: &PromptPackRevision) -> Result<()
             return Err("invalid_prompt_pack_stages".into());
         }
     }
+    validate_editable_parameters(&revision.parameters)?;
+    prompt_pack_skill_dependency_versions(revision)?;
     let computed_content_sha256 = prompt_pack_content_sha256(revision)?;
     if computed_content_sha256 != revision.content_sha256 {
         return Err(format!(
@@ -611,6 +612,39 @@ pub fn validate_prompt_pack_revision(revision: &PromptPackRevision) -> Result<()
         ));
     }
     Ok(())
+}
+
+fn prompt_pack_skill_dependency_versions(
+    revision: &PromptPackRevision,
+) -> Result<BTreeMap<String, String>, String> {
+    let Some(value) = revision.source.get("skillVersions") else {
+        return if revision.required_skill_ids.is_empty() {
+            Ok(BTreeMap::new())
+        } else {
+            Err("invalid_prompt_pack_skill_versions".into())
+        };
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| "invalid_prompt_pack_skill_versions".to_string())?;
+    let versions = object
+        .iter()
+        .map(|(skill_id, version)| {
+            let version = version
+                .as_str()
+                .filter(|version| !skill_id.trim().is_empty() && !version.trim().is_empty())
+                .ok_or_else(|| "invalid_prompt_pack_skill_versions".to_string())?;
+            Ok((skill_id.clone(), version.to_string()))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    if revision
+        .required_skill_ids
+        .iter()
+        .any(|skill_id| !versions.contains_key(skill_id))
+    {
+        return Err("invalid_prompt_pack_skill_versions".into());
+    }
+    Ok(versions)
 }
 
 fn resolve_builtin_revision(reference: &PromptPackReference) -> Result<PromptPackRevision, String> {
@@ -694,6 +728,18 @@ fn validate_editable_stages(
     Ok(())
 }
 
+fn validate_editable_parameters(parameters: &BTreeMap<String, String>) -> Result<(), String> {
+    const EDITABLE_KEYS: [&str; 2] = ["qualityFocus", "styleGuidance"];
+    if parameters.iter().any(|(key, value)| {
+        !EDITABLE_KEYS.contains(&key.as_str())
+            || value.trim().is_empty()
+            || value.chars().count() > 2_000
+    }) {
+        return Err("prompt_pack_parameter_not_editable".into());
+    }
+    Ok(())
+}
+
 fn required_trimmed<'a>(value: &'a str, key: &str) -> Result<&'a str, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -716,7 +762,7 @@ fn builtin_default(executor: &str) -> PromptPackReference {
         "expert-agent" => PromptPackReference::new(
             "builtin.context-backtracking",
             "2026.08.05-1",
-            "48c5907dda2fe67c29bfb84ea8690a64a9986d5a9f06a6b4fe42d08b92bd8833",
+            "13d0d89ed81c8572311c31dbb8be56c95b583a9a0a86f779ad7ae8b1ec1e5fc7",
         ),
         _ => PromptPackReference::new("", "", ""),
     }

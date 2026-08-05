@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from tests.fixtures import (
+    FOUR_DIMENSION_PROMPT_PACK,
     STRUCTURE_FIDELITY_PROMPT_PACK,
     build_run_fixture,
     build_sample_fixture,
@@ -29,6 +30,19 @@ class CapturingProvider:
         return request.text
 
 
+class FourDimensionSampleProvider(CapturingProvider):
+    def translate(self, request: TranslationRequest) -> str:
+        self.instructions.append(request.system_instruction)
+        if "Output only the suggestions" in request.system_instruction:
+            return "SAMPLE_REFLECTION_EVIDENCE"
+        if "translation editing" in request.system_instruction:
+            payload = json.loads(request.text)
+            if payload["reflection"] != "SAMPLE_REFLECTION_EVIDENCE":
+                raise AssertionError("sample reflection did not reach improvement")
+            return payload["draft"].replace("DRAFT", "FINAL")
+        return "DRAFT"
+
+
 # Three chapters and sample_count=1 puts exactly one block in the sample: the
 # selector treats the first and last as front and back matter.
 SAMPLE_TEXTS = ["Front matter.", "Body sentence.", "Back matter."]
@@ -36,6 +50,25 @@ RUN_TEXT = "Body sentence.\n"
 
 
 class SampleTranslationTests(unittest.TestCase):
+    def test_four_dimension_sample_runs_translate_reflect_and_improve(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manifest_path = build_sample_fixture(
+                Path(temporary_directory),
+                source_texts=SAMPLE_TEXTS,
+                sample_count=1,
+                character_budget=64,
+                prompt_pack=FOUR_DIMENSION_PROMPT_PACK,
+            )
+            provider = FourDimensionSampleProvider()
+
+            report = run_sample_manifest(
+                manifest_path,
+                provider_factory=lambda profile_id, *, config_id: provider,
+            )
+
+            self.assertEqual(len(provider.instructions), 3)
+            self.assertEqual(report["samples"][0]["translatedExcerpt"], "FINAL")
+
     def test_fake_provider_returns_stable_comparison_report_without_translation_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project_root = Path(temporary_directory)

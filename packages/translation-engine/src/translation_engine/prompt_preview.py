@@ -13,6 +13,7 @@ from .engine import (
     load_translation_unit,
 )
 from .placeholders import protect_chunk_structure, protect_markdown_for_chunking
+from .pipeline import SecondPassRequest, WindowedReflectionSecondPass
 from .profiles import get_target_profile
 from .prompt_packs import (
     PromptPackError,
@@ -78,6 +79,61 @@ def run_prompt_preview_manifest(manifest_path: Path) -> dict[str, Any]:
         task_manifest=unit.profile_task,
         text_cleanup=_parse_text_cleanup(manifest),
     )
+    stages = [compiled.preview()]
+    if prompt_pack.uses_reflection:
+        recorder = _PromptRecorder()
+        second_pass = WindowedReflectionSecondPass(recorder)
+        second_pass_request = SecondPassRequest(
+            source_text=protected.text,
+            draft_text="${INITIAL_TRANSLATION_RESULT}",
+            previous_source_text=None,
+            previous_draft_text=None,
+            next_source_text=None,
+            next_draft_text=None,
+            source_language=source_language,
+            target_language=target_language,
+            terminology_criteria=target_profile.build_system_instruction(
+                source_text=protected.text,
+                task_manifest=unit.profile_task,
+            ),
+            reflection_template=prompt_pack.compiled_template_for("reflect"),
+            improve_template=prompt_pack.compiled_template_for("improve"),
+        )
+        reflection = second_pass.reflect(request=second_pass_request)
+        second_pass.improve(
+            request=second_pass_request,
+            reflection_text=reflection,
+        )
+        stages.extend(
+            [
+                _request_preview(
+                    stage_id="reflect",
+                    template=prompt_pack.template_for("reflect"),
+                    request=recorder.requests[0],
+                    injections=[
+                        "template",
+                        "current-source",
+                        "initial-translation:runtime-result",
+                        "glossary",
+                        "executor-safety",
+                        "neighbor-context:none-for-preview-sample",
+                    ],
+                ),
+                _request_preview(
+                    stage_id="improve",
+                    template=prompt_pack.template_for("improve"),
+                    request=recorder.requests[1],
+                    injections=[
+                        "template",
+                        "current-source",
+                        "initial-translation:runtime-result",
+                        "reflection:runtime-result",
+                        "glossary",
+                        "executor-safety",
+                    ],
+                ),
+            ]
+        )
     return {
         "schema": "translation-engine-prompt-preview-report-v1",
         "promptPackReference": {
@@ -85,5 +141,28 @@ def run_prompt_preview_manifest(manifest_path: Path) -> dict[str, Any]:
             "revisionId": prompt_pack.revision_id,
             "contentSha256": prompt_pack.content_sha256,
         },
-        "stages": [compiled.preview()],
+        "stages": stages,
+    }
+
+
+class _PromptRecorder:
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+
+    def translate(self, request: Any) -> str:
+        self.requests.append(request)
+        return "${FOUR_DIMENSION_REFLECTION_RESULT}"
+
+
+def _request_preview(
+    *, stage_id: str, template: str, request: Any, injections: list[str]
+) -> dict[str, object]:
+    return {
+        "stageId": stage_id,
+        "template": template,
+        "actualPrompt": {
+            "systemInstruction": request.system_instruction,
+            "currentSource": request.text,
+        },
+        "injections": injections,
     }

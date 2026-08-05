@@ -15,7 +15,12 @@ from .engine import (
     apply_model_override,
     load_translation_unit,
 )
-from .pipeline import translate_chunk_with_fallback
+from .pipeline import (
+    SecondPassRequest,
+    WindowedReflectionSecondPass,
+    run_second_pass_chunk,
+    translate_chunk_with_fallback,
+)
 from .placeholders import protect_chunk_structure, protect_markdown_for_chunking
 from .profiles import get_target_profile
 from .prompt_packs import (
@@ -124,11 +129,40 @@ def run_sample_manifest(
                 _candidate_preserves_structure(current, candidate)
             ),
         )
+        translated_text = result.text
+        if prompt_pack.uses_reflection and result.degradation != "source":
+            second_pass_result = run_second_pass_chunk(
+                WindowedReflectionSecondPass(provider),
+                SecondPassRequest(
+                    source_text=protected.text,
+                    draft_text=result.text,
+                    previous_source_text=None,
+                    previous_draft_text=None,
+                    next_source_text=None,
+                    next_draft_text=None,
+                    source_language=source_language,
+                    target_language=target_language,
+                    terminology_criteria=target_profile.build_system_instruction(
+                        source_text=protected.text,
+                        task_manifest=unit.profile_task,
+                    ),
+                    reflection_template=prompt_pack.compiled_template_for("reflect"),
+                    improve_template=prompt_pack.compiled_template_for("improve"),
+                ),
+                candidate_retries=placeholder_retries,
+                candidate_validator=lambda candidate, current=protected: (
+                    _candidate_preserves_structure(current, candidate)
+                ),
+                draft_fallback_validator=lambda candidate, current=protected: (
+                    _candidate_preserves_structure(current, candidate)
+                ),
+            )
+            translated_text = second_pass_result.revised_text
         samples.append(
             {
                 "chunkRef": unit.unit_id,
                 "sourceExcerpt": source_excerpt,
-                "translatedExcerpt": protected.restore(result.text),
+                "translatedExcerpt": protected.restore(translated_text),
                 "degradation": result.degradation,
             }
         )

@@ -53,6 +53,7 @@ describe("PromptPackSettingsPanel", () => {
     const diff = await screen.findByLabelText("修订差异");
     expect(within(diff).getByText("2026.08.05-1 → 2026.08.05-2")).toBeTruthy();
     expect(within(diff).getByText("reflect")).toBeTruthy();
+    expect(within(diff).getByText("adaptation")).toBeTruthy();
     expect(onSetDefault).not.toHaveBeenCalled();
     expect((screen.getByRole("button", { name: "设为该执行方式的默认方案" }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -70,13 +71,31 @@ describe("PromptPackSettingsPanel", () => {
     await user.click(screen.getByRole("button", { name: /我的结构译法/ }));
 
     const template = screen.getByRole("textbox", { name: "结构保真初译 模板" });
+    const styleGuidance = screen.getByRole("textbox", { name: "风格指导参数" });
     await user.clear(template);
     await user.type(template, "按本书语体完整翻译当前块。");
+    await user.type(styleGuidance, "克制的现代汉语");
     await user.click(screen.getByRole("button", { name: "保存为新版本" }));
 
     expect(onSaveRevision).toHaveBeenCalledWith(expect.objectContaining({
       packId: "local.test",
+      parameters: { styleGuidance: "克制的现代汉语" },
       stages: [expect.objectContaining({ template: "按本书语体完整翻译当前块。" })],
     }));
+  });
+
+  it("shows pinned expert skills, mechanism references, and excluded responsibilities", async () => {
+    const user = userEvent.setup();
+    render(<PromptPackSettingsPanel {...props()} />);
+
+    await user.click(screen.getByRole("button", { name: /语境回溯精译/ }));
+    expect(screen.getByText("固定技能依赖")).toBeTruthy();
+    expect(screen.getByText(/expert-translation-quality@sha256:b97f2eaa/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /全流程审校闭环/ }));
+    expect(screen.getByText("机制参考文件")).toBeTruthy();
+    expect(screen.getByText(/book-runner\.md/)).toBeTruthy();
+    expect(screen.getByText("明确排除的职责")).toBeTruthy();
+    expect(screen.getByText(/copyright-decision/)).toBeTruthy();
   });
 });

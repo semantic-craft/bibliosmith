@@ -118,7 +118,7 @@
           "schema": "translation-prompt-pack-revision-v1",
           "packId": "builtin.context-backtracking",
           "revisionId": "2026.08.05-1",
-          "contentSha256": "48c5907dda2fe67c29bfb84ea8690a64a9986d5a9f06a6b4fe42d08b92bd8833",
+          "contentSha256": "13d0d89ed81c8572311c31dbb8be56c95b583a9a0a86f779ad7ae8b1ec1e5fc7",
           "displayName": "语境回溯精译",
           "executor": "expert-agent",
           "sourceLanguage": "auto",
@@ -128,8 +128,8 @@
             "kind": "bibliosmith-skill",
             "label": "expert-translation-quality",
             "skillId": "expert-translation-quality",
-            "skillVersion": "sha256:project-whitelist",
-            "skillVersions": {"expert-translation-quality": "sha256:project-whitelist"},
+            "skillVersion": "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47",
+            "skillVersions": {"expert-translation-quality": "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47"},
             "license": "Project license",
             "adaptation": "把语境依赖判断、回溯和证据要求固化为专家交接契约。"
           },
@@ -170,7 +170,7 @@
           "schema": "translation-prompt-pack-revision-v1",
           "packId": "builtin.full-quality-loop",
           "revisionId": "2026.08.05-1",
-          "contentSha256": "9d35dd17e71b08845fdce4c30031df6bdb73b6ec2b45124e1523d0fa37afe1f8",
+          "contentSha256": "ef0db7091a5231e6653e6d017f2478758aa4c02073f107fb470ccac52bd9ce74",
           "displayName": "全流程审校闭环",
           "executor": "expert-agent",
           "sourceLanguage": "auto",
@@ -181,15 +181,23 @@
             "repository": "https://github.com/SaberOnGo/public-domain-books-translation",
             "commit": "219f452311817a09cfbe59d7e345a1ac2a81faa8",
             "referenceFiles": ["AGENTS.md", ".opencode/agents/book-runner.md", ".opencode/agents/book-reviewer.md", ".opencode/commands/run-gates.md", ".opencode/commands/random-spotcheck.md"],
-            "skillVersions": {"expert-translation-quality": "sha256:project-whitelist"},
+            "skillVersions": {
+              "expert-translation-quality": "sha256:b97f2eaa7e128f78d27564bf722217500b776c52238fb68a17528ab42d841a47",
+              "translation-quality-defect-families": "sha256:74663d622043bf80096a8188e402112dec7ad5d112e1ae8429561fa4379994af"
+            },
             "license": "Mechanism reference only; BiblioSmith wording is original",
             "commercialUse": "No upstream text is bundled; no upstream endorsement implied",
             "adaptation": "提炼阶段机制并用 BiblioSmith 原创措辞实现；不纳入版权判断、在线找书、出版或 release。"
           },
           "contextPolicy": "阶段输入按最小必要范围提供；独立复核不得读取译者的自评结论；发现问题族后扩展到全书候选并用新证据关闭。",
-          "requiredSkillIds": ["expert-translation-quality"],
+          "requiredSkillIds": ["expert-translation-quality", "translation-quality-defect-families"],
           "requiredEvidence": ["research-brief", "calibration-result", "chapter-control", "multidimensional-review", "independent-review", "defect-family-closure", "rollback-receipt", "final-gate"],
           "excludedResponsibilities": ["copyright-decision", "online-source-acquisition", "cover-or-epub-production", "publication", "commercial-licensing", "release", "global-template-backfill"],
+          "evidencePolicy": {
+            "independentReview": true,
+            "requireZeroOpenIssues": true,
+            "requireDefectFamilyClosure": true
+          },
           "stages": [
             {
               "stageId": "research",
