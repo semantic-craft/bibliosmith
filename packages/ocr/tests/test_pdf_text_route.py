@@ -25,10 +25,9 @@ from zotero_llm_worker import (  # noqa: E402
     Attachment,
     StateDB,
     get_config,
-    markdown_page_numbers,
     md5_file,
     process_text_route,
-    sidecar_page_numbers,
+    reconcile_staged_conversion,
 )
 
 
@@ -65,16 +64,20 @@ class TextRouteMarkdownTests(unittest.TestCase):
     def run_route(self):  # type: ignore[no-untyped-def]
         config = dataclasses.replace(get_config(), output_root=self.root / "out")
         state = StateDB(self.root / "state.sqlite3")
+        with fitz.open(self.pdf) as document:
+            page_count = document.page_count
         status = process_text_route(
             attachment=self.attachment,
             config=config,
             state=state,
             source_md5=md5_file(self.pdf),
-            page_count=4,
-            pages=[1, 2, 3, 4],
+            page_count=page_count,
+            pages=list(range(1, page_count + 1)),
             route_reason="test",
             no_upload=True,
         )
+        self.state = state
+        self.page_count = page_count
         staging = config.output_root / ".state" / "staging" / self.attachment.key
         markdown = next(staging.glob("*.md"))
         return status, markdown, markdown.with_suffix(".jsonl")
@@ -94,7 +97,6 @@ class TextRouteMarkdownTests(unittest.TestCase):
 
         self.assertTrue(text.startswith("---"))
         self.assertNotIn("\n# Example.pdf\n", text)
-        self.assertEqual([1, 2, 3, 4], markdown_page_numbers(markdown_path))
         self.assertIn("of the body", text)
 
     def test_the_sidecar_keeps_its_per_page_character_counts(self) -> None:
@@ -115,19 +117,44 @@ class TextRouteMarkdownTests(unittest.TestCase):
         self.assertIn(sidecar["engine"], {"pdf-inspector", "pdf-inspector-repaired", "pymupdf"})
         self.assertIn("running_heads_removed", sidecar)
 
-    def test_the_page_list_survives_for_the_upload_status(self) -> None:
-        """The sidecar answers whichever engine won.
-
-        Structured Markdown carries no page markers at all — page breaks are
-        not part of what pdf-inspector reconstructs — and the PyMuPDF fallback
-        carries them only as comments. Neither is a heading any more, so the
-        page list has to come from the sidecar to survive.
-        """
+    def test_the_adapter_commits_page_coverage_to_the_reconciliation_seam(self) -> None:
         _, markdown_path, sidecar_path = self.run_route()
 
-        self.assertEqual([1, 2, 3, 4], sidecar_page_numbers(sidecar_path))
+        outcome = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=self.page_count,
+        )
+
+        self.assertTrue(outcome.accepted)
+        self.assertEqual(tuple(range(1, self.page_count + 1)), outcome.selected_pages)
         self.assertNotIn("## Page ", markdown_path.read_text(encoding="utf-8"))
-        self.assertIn(markdown_page_numbers(markdown_path), ([], [1, 2, 3, 4]))
+        self.assertTrue(sidecar_path.is_file())
+
+    def test_a_strict_page_subset_reconciles_as_local_partial(self) -> None:
+        config = dataclasses.replace(get_config(), output_root=self.root / "partial-out")
+        state = StateDB(self.root / "partial.sqlite3")
+
+        status = process_text_route(
+            attachment=self.attachment,
+            config=config,
+            state=state,
+            source_md5=md5_file(self.pdf),
+            page_count=4,
+            pages=[1, 3],
+            route_reason="partial test",
+            no_upload=True,
+        )
+        outcome = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=state,
+            page_count=4,
+        )
+
+        self.assertEqual("local_partial", status)
+        self.assertTrue(outcome.accepted)
+        self.assertEqual("local_partial", outcome.status)
+        self.assertEqual((1, 3), outcome.selected_pages)
 
     def test_real_pdf_route_emits_a_stable_semantic_note_contract(self) -> None:
         self.pdf = write_pdf(
@@ -152,115 +179,6 @@ class TextRouteMarkdownTests(unittest.TestCase):
             ["noteref_note_001_001"], evidence["notes"][0]["referenceIds"]
         )
         self.assertEqual([], evidence["notes"][0]["anomalies"])
-
-
-class PageNumberReaderTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-
-    def write(self, text: str) -> Path:
-        path = self.root / "book.md"
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def write_sidecar(self, text: str) -> Path:
-        path = self.root / "book.jsonl"
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def test_a_file_converted_before_this_change_still_reads(self) -> None:
-        path = self.write("# Book\n\n## Page 1\n\nBody.\n\n## Page 2\n\nMore.\n")
-
-        self.assertEqual([1, 2], markdown_page_numbers(path))
-
-    def test_the_anchor_the_ocr_assembler_writes_reads_too(self) -> None:
-        path = self.write("# Book\n\n<!-- page: 1 -->\n\nBody.\n\n<!-- page: 2 -->\n\nMore.\n")
-
-        self.assertEqual([1, 2], markdown_page_numbers(path))
-
-    def test_an_anchor_quoted_inside_a_line_is_not_a_page(self) -> None:
-        path = self.write("# Book\n\nThe anchor <!-- page: 9 --> is written like this.\n")
-
-        self.assertEqual([], markdown_page_numbers(path))
-
-    def test_a_sidecar_that_is_not_json_is_not_an_error(self) -> None:
-        path = self.write_sidecar('{"raw": {}}\n{"raw": {}}\n')
-
-        self.assertEqual([], sidecar_page_numbers(path))
-
-    def test_the_pdf_text_sidecar_reads_from_its_pages_array(self) -> None:
-        path = self.write_sidecar(
-            json.dumps({"route": "pdf-text", "pages": [{"page": 1, "chars": 40}, {"page": 2, "chars": 12}]}, indent=2)
-        )
-
-        self.assertEqual([1, 2], sidecar_page_numbers(path))
-
-    def test_the_mineru_sidecar_reads_bare_integer_pages(self) -> None:
-        path = self.write_sidecar(
-            json.dumps({"route": "mineru", "pages": [1, 2, 3]}, indent=2)
-        )
-
-        self.assertEqual([1, 2, 3], sidecar_page_numbers(path))
-
-    def test_a_mixed_mineru_pages_array_is_not_accepted_as_a_page_list(self) -> None:
-        path = self.write_sidecar(
-            json.dumps(
-                {
-                    "route": "mineru",
-                    "pages": [{"page": 1}, {"page": 2}, "bad"],
-                },
-                indent=2,
-            )
-        )
-
-        self.assertEqual([], sidecar_page_numbers(path))
-
-    def test_the_ocr_sidecar_reads_line_by_line(self) -> None:
-        """What both paddle-ocr branches write: JSONL, one page per line.
-
-        `json.loads()` cannot read the file whole, and no OCR route puts a page
-        marker in the Markdown, so reading only the pdf-text shape left
-        `--upload-test` with no pages at all and it recorded a fully converted
-        book as `uploaded_partial`.
-        """
-        path = self.write_sidecar(
-            '{"page": 1, "raw": {"prunedResult": {"rec_texts": ["Chapter One"]}}}\n'
-            '{"page": 2, "raw": {"markdown": {"text": "More."}}}\n'
-        )
-
-        self.assertEqual([1, 2], sidecar_page_numbers(path))
-
-    def test_a_one_page_ocr_sidecar_reads_too(self) -> None:
-        """A single JSONL line is also valid JSON whole, so parsing in one
-        piece cannot be what decides the file is the pdf-text shape."""
-        path = self.write_sidecar('{"page": 1, "raw": {"markdown": {"text": "Only page."}}}\n')
-
-        self.assertEqual([1], sidecar_page_numbers(path))
-
-    def test_a_half_written_sidecar_reports_the_pages_it_has(self) -> None:
-        """A truncated last line is what an interrupted run leaves behind."""
-        path = self.write_sidecar(
-            '{"page": 1, "raw": {}}\n'
-            '{"page": 2, "raw": {}}\n'
-            '{"page": 3, "raw": {"markd'
-        )
-
-        self.assertEqual([1, 2], sidecar_page_numbers(path))
-
-    def test_a_sidecar_cut_mid_character_reports_the_pages_it_has(self) -> None:
-        """An interrupted UTF-8 write can leave the final character partial."""
-        path = self.root / "book.jsonl"
-        path.write_bytes(
-            b'{"page": 1, "raw": {}}\n'
-            b'{"page": 2, "raw": {}}\n'
-            b'{"page": 3, "raw": {"text": "\xe4\xb8'
-        )
-
-        self.assertEqual([1, 2], sidecar_page_numbers(path))
-
-    def test_a_missing_sidecar_is_not_an_error(self) -> None:
-        self.assertEqual([], sidecar_page_numbers(self.root / "absent.jsonl"))
-
 
 if __name__ == "__main__":
     unittest.main()

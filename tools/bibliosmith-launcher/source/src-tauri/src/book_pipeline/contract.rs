@@ -95,8 +95,9 @@ pub(crate) const EPUB_EXTRACT_COMMAND_LABEL: &str = "EPUB chapter extraction";
 /// project so the chapter rewrite can address them.
 pub(crate) const MARKDOWN_SIDECAR_SUFFIXES: [&str; 2] = [".mineru", "_assets"];
 pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_SCHEMA: &str =
-    "zotero-worker-attachment-evidence-v1";
-pub(crate) const ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION: &str = "zotero-worker-extraction-v1";
+    "zotero-worker-attachment-evidence-v2";
+pub(crate) const ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION: &str = "zotero-worker-extraction-v2";
+pub(crate) const OCR_CONVERSION_EVIDENCE_SCHEMA: &str = "ocr-conversion-evidence-v1";
 pub(crate) const ZOTERO_WORKER_ATTACHMENT_EVIDENCE_MARKER: &str =
     "BOOK_PIPELINE_ATTACHMENT_EVIDENCE ";
 /// The local PDF wrapper's routing plan, as it reports one line per book from

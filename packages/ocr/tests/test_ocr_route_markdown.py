@@ -35,9 +35,9 @@ from zotero_llm_worker import (  # noqa: E402
     Attachment,
     StateDB,
     get_config,
-    markdown_page_numbers,
     md5_file,
     process_ocr_route,
+    reconcile_staged_conversion,
     upload_test,
 )
 
@@ -93,6 +93,11 @@ class FakeLayoutClient(FakeBaiduOCRClient):
         return json.dumps({"result": {"layoutParsingResults": results}}, ensure_ascii=False) + "\n"
 
 
+class TruncatedBaiduOCRClient(FakeBaiduOCRClient):
+    def download_jsonl(self, url: str) -> str:
+        return super().download_jsonl(url) + '{"result":'
+
+
 def write_pdf(path: Path, page_count: int) -> Path:
     doc = fitz.open()
     for number in range(page_count):
@@ -123,6 +128,7 @@ class OcrRouteMarkdownTests(unittest.TestCase):
         *,
         baidu_model: str = "PP-OCRv5",
         baidu_client_class=FakeBaiduOCRClient,
+        selected_pages: list[int] | None = None,
     ):  # type: ignore[no-untyped-def]
         config = dataclasses.replace(
             get_config(),
@@ -133,6 +139,8 @@ class OcrRouteMarkdownTests(unittest.TestCase):
             baidu_max_upload_mb=64,
         )
         state = StateDB(self.root / "state.sqlite3")
+        self.state = state
+        pages = selected_pages or sorted(PAGE_TEXTS)
         with mock.patch("zotero_llm_worker.BaiduOCRClient", baidu_client_class):
             status, pages_used = process_ocr_route(
                 attachment=self.attachment,
@@ -140,11 +148,11 @@ class OcrRouteMarkdownTests(unittest.TestCase):
                 state=state,
                 source_md5=md5_file(self.pdf),
                 page_count=len(PAGE_TEXTS),
-                pages=sorted(PAGE_TEXTS),
+                pages=pages,
                 route_reason="test",
                 no_upload=True,
                 deadline=time.time() + 600,
-                ocr_pages_remaining=len(PAGE_TEXTS),
+                ocr_pages_remaining=len(pages),
             )
         staging = config.output_root / ".state" / "staging" / self.attachment.key
         markdown = next(staging.glob("*.md"))
@@ -201,17 +209,15 @@ class OcrRouteMarkdownTests(unittest.TestCase):
     def assert_upload_test_records_a_whole_book(self, markdown_path: Path) -> None:
         """The upload seam persists a completed row for a full OCR artifact.
 
-        Page anchors are structural evidence, while the raw sidecar remains the
-        authoritative record of attempted pages (including blank page 3).
+        Provider output is normalized by the adapter before callers see it.
         """
-        self.assertEqual([1, 2, 4], markdown_page_numbers(markdown_path))
         config = dataclasses.replace(get_config(), output_root=self.root / "out")
         state = StateDB(self.root / "state.sqlite3")
         local = mock.Mock()
         local.get_pdf_attachment.return_value = self.attachment
 
         with mock.patch("zotero_llm_worker.ZoteroWebClient") as web_client_class:
-            web_client_class.return_value.create_markdown_attachment.return_value = "MARKDOWNKEY"
+            web_client_class.return_value.create_markdown_attachment_item.return_value = "MARKDOWNKEY"
             upload_test(config, state, local, self.attachment.key)
 
         completed = state.completed(self.attachment.key, md5_file(self.pdf))
@@ -230,18 +236,38 @@ class OcrRouteMarkdownTests(unittest.TestCase):
         self.assertIn("Chapter One", markdown_path.read_text(encoding="utf-8"))
         self.assert_upload_test_records_a_whole_book(markdown_path)
 
+    def test_a_strict_page_subset_reconciles_as_local_partial(self) -> None:
+        status, _, _, _ = self.run_route(selected_pages=[1, 3])
+
+        outcome = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=len(PAGE_TEXTS),
+        )
+
+        self.assertEqual("local_partial", status)
+        self.assertTrue(outcome.accepted)
+        self.assertEqual((1, 3), outcome.selected_pages)
+
     def test_a_layout_model_still_takes_the_other_branch(self) -> None:
         """The fake answers `ocrResults`, which the layout branch cannot read.
 
         Without this the tests above would pass just as well if the route had
         stopped discriminating between the two model families.
         """
-        _, markdown_path, _, _ = self.run_route(baidu_model="PaddleOCR-VL-1.6")
+        with self.assertRaisesRegex(ValueError, "invalid_coverage"):
+            self.run_route(baidu_model="PaddleOCR-VL-1.6")
 
-        text = markdown_path.read_text(encoding="utf-8")
+    def test_truncated_provider_json_never_commits_conversion_evidence(self) -> None:
+        with self.assertRaises(json.JSONDecodeError):
+            self.run_route(baidu_client_class=TruncatedBaiduOCRClient)
 
-        self.assertNotIn("Chapter One", text)
-        self.assertNotIn("# Example.pdf", text)
+        self.assertIsNone(
+            self.state.conversion_evidence_json(
+                self.attachment.key,
+                md5_file(self.pdf),
+            )
+        )
 
 
 if __name__ == "__main__":

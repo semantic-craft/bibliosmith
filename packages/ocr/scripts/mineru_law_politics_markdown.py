@@ -504,13 +504,13 @@ def is_parent_markdown_present(local: ZoteroLocalClient, parent_key: str | None)
     return False
 
 
-def find_mineru_markdown(output_dir: Path) -> Path:
-    candidates = sorted(output_dir.glob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
-    if not candidates:
-        nested = sorted(output_dir.rglob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
-        candidates = nested
-    if not candidates:
-        raise WorkerError(f"MinerU produced no Markdown under {output_dir}")
+def require_single_mineru_markdown(output_dir: Path) -> Path:
+    candidates = list(output_dir.rglob("*.md"))
+    if len(candidates) != 1:
+        raise WorkerError(
+            f"MinerU must produce exactly one Markdown result under {output_dir}; "
+            f"observed {len(candidates)}"
+        )
     return candidates[0]
 
 
@@ -543,7 +543,7 @@ def run_mineru_extract(target: Target, attachment: Attachment, output_root: Path
     if result.returncode != 0:
         message = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
         raise WorkerError(f"MinerU extract failed with exit {result.returncode}: {message[:2000]}")
-    mineru_md = find_mineru_markdown(result_dir)
+    mineru_md = require_single_mineru_markdown(result_dir)
     staging_dir = output_root / ".state" / "staging" / target.pdf_key
     staging_dir.mkdir(parents=True, exist_ok=True)
     final_md = staging_dir / markdown_filename(attachment)

@@ -17,7 +17,7 @@ Known monorepo/package roots:
 - Scanned/non-extractable PDFs, including large scanned books: use Baidu AI Studio `PaddleOCR-VL-1.6` and preserve its structured Markdown output.
 - Scanned PDFs that need Markdown output: use the Baidu AI Studio OCR jobs API. The pipeline does not use local PaddlePaddle inference, local PaddleOCR inference, or `ocrmypdf-paddleocr`.
 - Finished Markdown is uploaded to Zotero as a child Markdown attachment under the same parent book/article item as the source PDF.
-- Uploaded attachments receive no Zotero tags by default. OCR provenance is stored in the attachment note plus the State DB/sidecar. A tag is written only when its exact name is passed with repeatable `--zotero-tag` options.
+- Uploaded attachments receive no Zotero tags by default. OCR provenance is stored in the attachment note plus reconciled State DB evidence. Route-native sidecars remain worker-owned staging artifacts. A tag is written only when its exact name is passed with repeatable `--zotero-tag` options.
 - Markdown attachment filenames follow `作者_年份_题名.md`, for example `申卫星_2025_个人信息的司法保护：理论学说与案例解析.md`.
 - Source PDF child attachments are normalized too: the PDF title, Zotero filename, and imported storage filename should follow `作者_年份_题名.pdf`, matching the Markdown basename. Do not leave processed PDFs displayed as `PDF`, numeric download names, SS-number names, or download-site tail names.
 - Local Markdown/JSONL files are internal staging artifacts under `$HOME/Zotero/OCR_OUTPUT/.state/staging/`; they are not the user-facing destination.
@@ -107,7 +107,9 @@ Generate local Markdown for one PDF without uploading:
 /opt/homebrew/bin/python3.11 scripts/zotero_llm_worker.py --attachment-key RJTL3RRZ --pages 1-1 --no-upload --force-text
 ```
 
-Upload the latest generated Markdown for one PDF:
+Upload the exact current-contract artifact committed for one Source PDF. This
+never selects by filename or modification time; legacy staging without evidence
+is blocked with a rerun instruction:
 
 ```bash
 /opt/homebrew/bin/python3.11 scripts/zotero_llm_worker.py --upload-test --attachment-key RJTL3RRZ
@@ -193,6 +195,20 @@ Test launchd without processing data:
 - User-facing exports: `./output/`
 
 The state key is Zotero PDF attachment key plus source PDF MD5. If a PDF changes, it is processed again; otherwise fully completed items are skipped. Partial page smoke tests are recorded as partial and do not block a later full-book run.
+
+Each successful adapter commit also writes `ocr-conversion-evidence-v1` in the
+State DB and an adjacent private evidence file. It binds the Source PDF identity
+and hashes, route, producer-observed page coverage, Markdown, route sidecar,
+publication evidence, and any route-owned artifact tree. Recovery verifies
+those exact bytes before any Zotero write. Zotero delivery uses a reclaimable
+lease and a provenance-keyed child lookup: a created child key is persisted
+before file upload, and a crash before that write can recover the unique remote
+child instead of creating a duplicate. `zotero-worker-attachment-evidence-v2`
+is emitted only after that evidence has reconciled and the Markdown child is
+bound. Its artifact locations are root-relative references plus SHA-256 values;
+absolute local paths never cross the launcher boundary. Once evidence is bound,
+a missing or mismatched remote child blocks reconciliation without creating a
+replacement attachment.
 
 ## API Notes
 

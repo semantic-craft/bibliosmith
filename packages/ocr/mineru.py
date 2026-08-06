@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -282,19 +282,27 @@ def prepare_local_items(
     prepared: list[WorkItem] = []
     for item in local_items:
         assert item.local_path is not None
+        selected_pages = (
+            parse_page_ranges(item.page_ranges, item.source_pages)
+            if item.local_path.suffix.lower() == ".pdf"
+            and item.page_ranges
+            and item.source_pages is not None
+            else list(range(1, item.source_pages + 1))
+            if item.local_path.suffix.lower() == ".pdf" and item.source_pages is not None
+            else []
+        )
         needs_split = (
             item.local_path.suffix.lower() == ".pdf"
             and item.source_pages is not None
             and (item.source_pages > MAX_PAGES or item.local_path.stat().st_size > MAX_FILE_BYTES)
         )
         if not needs_split:
-            prepared.append(item)
+            prepared.append(
+                replace(item, selected_pages=tuple(selected_pages))
+                if selected_pages
+                else item
+            )
             continue
-        selected_pages = (
-            parse_page_ranges(item.page_ranges, item.source_pages)
-            if item.page_ranges
-            else list(range(1, item.source_pages + 1))
-        )
         source_dir = temporary_dir / (item.source_data_id or item.data_id)
         source_dir.mkdir(parents=True, exist_ok=True)
         parts = split_pdf_groups(item.local_path, selected_pages, source_dir)

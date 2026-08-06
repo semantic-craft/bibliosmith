@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -48,6 +49,16 @@ if str(APP_ROOT) not in sys.path:
 # mojibake thresholds, so resolving the entry point at call time is what keeps
 # the pair importable in either order.
 import pdf_text  # noqa: E402
+from evidence_reconciliation import (  # noqa: E402
+    ConversionEvidence,
+    ReconciliationOutcome,
+    blocked,
+    build_conversion_evidence,
+    coverage_status,
+    digest_path,
+    reconcile_conversion_evidence,
+    resolve_artifact_reference,
+)
 from publication_evidence import (  # noqa: E402
     SourceDocument,
     normalize_extracted_markdown_notes,
@@ -65,8 +76,9 @@ LAYOUT_MODELS = {DEFAULT_BAIDU_MODEL, "PaddleOCR-VL-1.5", "PaddleOCR-VL", "PP-St
 NETWORK_RETRY_DELAYS = (3, 6, 12, 24, 30)
 ROUTE_NEEDS_MINERU = "needs-mineru"
 ROUTE_MINERU = "mineru"
-WORKER_ATTACHMENT_EVIDENCE_SCHEMA = "zotero-worker-attachment-evidence-v1"
-WORKER_EXTRACTION_CONTRACT_VERSION = "zotero-worker-extraction-v1"
+WORKER_ATTACHMENT_EVIDENCE_SCHEMA = "zotero-worker-attachment-evidence-v2"
+WORKER_EXTRACTION_CONTRACT_VERSION = "zotero-worker-extraction-v2"
+UPLOAD_LEASE_DURATION = dt.timedelta(minutes=10)
 
 
 class WorkerError(Exception):
@@ -83,6 +95,19 @@ class QuotaExhaustedError(WorkerError):
 
 class DeadlineReached(WorkerError):
     pass
+
+
+class DeliveryError(WorkerError):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(f"{code}: Zotero delivery is retryable with the same evidence.")
+
+
+class ReconciliationBlocked(WorkerError):
+    def __init__(self, code: str, guidance: str):
+        self.code = code
+        self.guidance = guidance
+        super().__init__(f"{code}: {guidance}")
 
 
 @dataclass
@@ -250,6 +275,30 @@ def now_utc() -> str:
     return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
 
 
+def write_private_json_record(path: Path, raw: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}-",
+        dir=path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(raw)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def private_json_record_bytes(raw: str) -> bytes:
+    """Return the canonical on-disk bytes written for a private JSON record."""
+    return f"{raw}\n".encode("utf-8")
+
+
 def safe_slug(value: str, max_len: int = 80) -> str:
     cleaned = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", " ", value)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -415,6 +464,10 @@ def render_extracted_markdown(*, title: str, metadata: dict[str, Any], body: str
 class StateDB:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
+        state_parent = path.parent
+        self.artifact_root = (
+            state_parent.parent if state_parent.name == ".state" else state_parent
+        ).resolve()
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.init_schema()
@@ -453,15 +506,22 @@ class StateDB:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (pdf_key, source_md5, start_page, end_page)
             );
+            CREATE TABLE IF NOT EXISTS conversion_evidence (
+                pdf_key TEXT NOT NULL,
+                source_md5 TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                evidence_reference TEXT NOT NULL,
+                upload_state TEXT NOT NULL,
+                pending_attachment_key TEXT,
+                upload_owner_token TEXT,
+                upload_lease_expires_at TEXT,
+                delivery_error_code TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (pdf_key, source_md5)
+            );
             """
         )
-        document_columns = {
-            row[1] for row in self.conn.execute("PRAGMA table_info(documents)").fetchall()
-        }
-        if "extraction_contract_version" not in document_columns:
-            self.conn.execute(
-                "ALTER TABLE documents ADD COLUMN extraction_contract_version TEXT"
-            )
         self.conn.commit()
 
     def completed(self, pdf_key: str, source_md5: str) -> sqlite3.Row | None:
@@ -520,6 +580,34 @@ class StateDB:
         error: str | None = None,
     ) -> None:
         ts = now_utc()
+        self._upsert_document_row(
+            attachment=attachment,
+            source_md5=source_md5,
+            route=route,
+            status=status,
+            page_count=page_count,
+            output_path=output_path,
+            sidecar_path=sidecar_path,
+            zotero_attachment_key=zotero_attachment_key,
+            error=error,
+            timestamp=ts,
+        )
+        self.conn.commit()
+
+    def _upsert_document_row(
+        self,
+        *,
+        attachment: Attachment,
+        source_md5: str,
+        route: str,
+        status: str,
+        page_count: int,
+        output_path: Path | None,
+        sidecar_path: Path | None,
+        zotero_attachment_key: str | None,
+        error: str | None,
+        timestamp: str,
+    ) -> None:
         self.conn.execute(
             """
             INSERT INTO documents (
@@ -555,11 +643,362 @@ class StateDB:
                 zotero_attachment_key,
                 WORKER_EXTRACTION_CONTRACT_VERSION,
                 error,
-                ts,
-                ts,
+                timestamp,
+                timestamp,
             ),
         )
-        self.conn.commit()
+
+    def commit_conversion_evidence(
+        self,
+        *,
+        attachment: Attachment,
+        source_md5: str,
+        route: str,
+        page_count: int,
+        selected_pages: Iterable[object],
+        markdown_path: Path,
+        sidecar_path: Path,
+        publication_evidence_path: Path,
+        additional_artifacts: Iterable[tuple[str, Path]] = (),
+    ) -> ConversionEvidence:
+        evidence = build_conversion_evidence(
+            extraction_contract_version=WORKER_EXTRACTION_CONTRACT_VERSION,
+            source_pdf_key=attachment.key,
+            source_md5=source_md5,
+            source_path=attachment.path,
+            parent_item_key=attachment.parent_key,
+            route=route,
+            page_count=page_count,
+            selected_pages=selected_pages,
+            artifacts=(
+                ("markdown", markdown_path),
+                ("route-sidecar", sidecar_path),
+                ("publication-evidence", publication_evidence_path),
+                *tuple(additional_artifacts),
+            ),
+            artifact_root=self.artifact_root,
+        )
+        status = coverage_status(evidence.selected_pages, page_count, uploaded=False)
+        evidence_path = markdown_path.with_suffix(".conversion-evidence.json")
+        try:
+            evidence_reference = evidence_path.resolve().relative_to(
+                self.artifact_root.resolve()
+            ).as_posix()
+        except ValueError as exc:
+            raise WorkerError(
+                "unsafe_artifact_reference: conversion evidence escaped the State DB root"
+            ) from exc
+        raw_evidence = evidence.to_json()
+        timestamp = now_utc()
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            active_upload = self.conn.execute(
+                """
+                SELECT upload_state, upload_lease_expires_at
+                FROM conversion_evidence
+                WHERE pdf_key=? AND source_md5=?
+                """,
+                (attachment.key, source_md5),
+            ).fetchone()
+            if (
+                active_upload is not None
+                and active_upload["upload_state"] == "uploading"
+                and active_upload["upload_lease_expires_at"]
+                and str(active_upload["upload_lease_expires_at"]) > timestamp
+            ):
+                raise WorkerError(
+                    "upload_in_progress: Conversion evidence is leased for delivery."
+                )
+            write_private_json_record(evidence_path, raw_evidence)
+            self._upsert_document_row(
+                attachment=attachment,
+                source_md5=source_md5,
+                route=route,
+                status=status,
+                page_count=page_count,
+                output_path=markdown_path,
+                sidecar_path=sidecar_path,
+                zotero_attachment_key=None,
+                error=None,
+                timestamp=timestamp,
+            )
+            self.conn.execute(
+                """
+                INSERT INTO conversion_evidence (
+                    pdf_key, source_md5, evidence_json, evidence_reference, upload_state,
+                    pending_attachment_key, upload_owner_token, upload_lease_expires_at,
+                    delivery_error_code, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'local', NULL, NULL, NULL, NULL, ?, ?)
+                ON CONFLICT(pdf_key, source_md5) DO UPDATE SET
+                    evidence_json=excluded.evidence_json,
+                    evidence_reference=excluded.evidence_reference,
+                    upload_state='local',
+                    pending_attachment_key=NULL,
+                    upload_owner_token=NULL,
+                    upload_lease_expires_at=NULL,
+                    delivery_error_code=NULL,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    attachment.key,
+                    source_md5,
+                    raw_evidence,
+                    evidence_reference,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        return evidence
+
+    def conversion_evidence_json(self, pdf_key: str, source_md5: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT evidence_json FROM conversion_evidence WHERE pdf_key=? AND source_md5=?",
+            (pdf_key, source_md5),
+        ).fetchone()
+        return str(row["evidence_json"]) if row else None
+
+    def conversion_evidence_record(
+        self,
+        pdf_key: str,
+        source_md5: str,
+    ) -> tuple[str, str] | None:
+        row = self.conn.execute(
+            """
+            SELECT evidence_json, evidence_reference FROM conversion_evidence
+            WHERE pdf_key=? AND source_md5=?
+            """,
+            (pdf_key, source_md5),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["evidence_json"]), str(row["evidence_reference"])
+
+    def conversion_evidence_record_for_source(
+        self,
+        pdf_key: str,
+        source_md5: str,
+    ) -> tuple[str, str] | None:
+        exact = self.conversion_evidence_record(pdf_key, source_md5)
+        if exact is not None:
+            return exact
+        row = self.conn.execute(
+            """
+            SELECT evidence_json, evidence_reference FROM conversion_evidence
+            WHERE pdf_key=?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (pdf_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["evidence_json"]), str(row["evidence_reference"])
+
+    def bind_markdown_attachment(
+        self,
+        *,
+        attachment: Attachment,
+        source_md5: str,
+        evidence: ConversionEvidence,
+        markdown_attachment_key: str,
+        status: str,
+        upload_owner_token: str,
+    ) -> ConversionEvidence:
+        bound = evidence.with_markdown_attachment(markdown_attachment_key)
+        raw_bound = bound.to_json()
+        timestamp = now_utc()
+        evidence_path: Path | None = None
+        previous_raw: str | None = None
+        mirror_written = False
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            current = self.conn.execute(
+                """
+                SELECT evidence_json, evidence_reference, upload_state, upload_owner_token
+                FROM conversion_evidence
+                WHERE pdf_key=? AND source_md5=?
+                """,
+                (attachment.key, source_md5),
+            ).fetchone()
+            if (
+                current is None
+                or current["upload_state"] != "uploading"
+                or current["upload_owner_token"] != upload_owner_token
+            ):
+                raise WorkerError(
+                    "upload_lease_lost: upload ownership changed before binding"
+                )
+            previous_raw = str(current["evidence_json"])
+            if previous_raw != evidence.to_json():
+                raise WorkerError(
+                    "evidence_changed: conversion evidence changed during upload"
+                )
+            evidence_path = resolve_artifact_reference(
+                self.artifact_root,
+                str(current["evidence_reference"]),
+            )
+            write_private_json_record(evidence_path, raw_bound)
+            mirror_written = True
+            cursor = self.conn.execute(
+                """
+                UPDATE conversion_evidence
+                SET evidence_json=?, upload_state='uploaded', pending_attachment_key=NULL,
+                    upload_owner_token=NULL, upload_lease_expires_at=NULL,
+                    delivery_error_code=NULL, updated_at=?
+                WHERE pdf_key=? AND source_md5=? AND upload_owner_token=?
+                  AND upload_state='uploading'
+                """,
+                (
+                    raw_bound,
+                    timestamp,
+                    attachment.key,
+                    source_md5,
+                    upload_owner_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise WorkerError("upload_lease_lost: upload ownership changed before binding")
+            self.conn.execute(
+                """
+                UPDATE documents
+                SET status=?, zotero_attachment_key=?, error=NULL, updated_at=?
+                WHERE pdf_key=? AND source_md5=?
+                """,
+                (
+                    status,
+                    markdown_attachment_key,
+                    timestamp,
+                    attachment.key,
+                    source_md5,
+                ),
+            )
+            self.conn.commit()
+        except BaseException:
+            if mirror_written and evidence_path is not None and previous_raw is not None:
+                try:
+                    write_private_json_record(evidence_path, previous_raw)
+                except BaseException:
+                    pass
+            self.conn.rollback()
+            raise
+        return bound
+
+    def claim_upload(
+        self,
+        *,
+        pdf_key: str,
+        source_md5: str,
+        evidence: ConversionEvidence,
+    ) -> str:
+        upload_owner_token = secrets.token_hex(16)
+        claimed_at = dt.datetime.now(dt.UTC).replace(microsecond=0)
+        lease_expires_at = (claimed_at + UPLOAD_LEASE_DURATION).isoformat()
+        claimed_at_label = claimed_at.isoformat()
+        with self.conn:
+            cursor = self.conn.execute(
+                """
+                UPDATE conversion_evidence
+                SET upload_state='uploading', upload_owner_token=?,
+                    upload_lease_expires_at=?, delivery_error_code=NULL, updated_at=?
+                WHERE pdf_key=? AND source_md5=? AND evidence_json=?
+                  AND (
+                    upload_state IN ('local', 'retryable')
+                    OR (
+                      upload_state='uploading'
+                      AND upload_lease_expires_at IS NOT NULL
+                      AND upload_lease_expires_at<=?
+                    )
+                  )
+                """,
+                (
+                    upload_owner_token,
+                    lease_expires_at,
+                    claimed_at_label,
+                    pdf_key,
+                    source_md5,
+                    evidence.to_json(),
+                    claimed_at_label,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise WorkerError(
+                    "upload_in_progress: This conversion is already being uploaded or changed."
+                )
+        return upload_owner_token
+
+    def pending_attachment_key(
+        self,
+        pdf_key: str,
+        source_md5: str,
+        upload_owner_token: str,
+    ) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT pending_attachment_key FROM conversion_evidence
+            WHERE pdf_key=? AND source_md5=? AND upload_owner_token=?
+            """,
+            (pdf_key, source_md5, upload_owner_token),
+        ).fetchone()
+        if row is None or not row["pending_attachment_key"]:
+            return None
+        return str(row["pending_attachment_key"])
+
+    def record_pending_attachment(
+        self,
+        *,
+        pdf_key: str,
+        source_md5: str,
+        markdown_attachment_key: str,
+        upload_owner_token: str,
+    ) -> None:
+        with self.conn:
+            cursor = self.conn.execute(
+                """
+                UPDATE conversion_evidence
+                SET pending_attachment_key=?, updated_at=?
+                WHERE pdf_key=? AND source_md5=? AND upload_state='uploading'
+                  AND upload_owner_token=?
+                  AND pending_attachment_key IS NULL
+                """,
+                (
+                    markdown_attachment_key,
+                    now_utc(),
+                    pdf_key,
+                    source_md5,
+                    upload_owner_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise WorkerError(
+                    "attachment_binding_conflict: Pending attachment identity changed."
+                )
+
+    def record_delivery_error(
+        self,
+        pdf_key: str,
+        source_md5: str,
+        code: str,
+        upload_owner_token: str,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE conversion_evidence
+                SET upload_state='retryable', upload_owner_token=NULL,
+                    upload_lease_expires_at=NULL,
+                    pending_attachment_key=CASE
+                      WHEN ?='attachment_mismatch' THEN NULL
+                      ELSE pending_attachment_key
+                    END,
+                    delivery_error_code=?, updated_at=?
+                WHERE pdf_key=? AND source_md5=? AND upload_owner_token=?
+                """,
+                (code, code, now_utc(), pdf_key, source_md5, upload_owner_token),
+            )
 
     def chunk(self, pdf_key: str, source_md5: str, start: int, end: int) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -819,6 +1258,25 @@ class ZoteroWebClient:
         tags: Iterable[str] = (),
         note: str = "",
     ) -> str:
+        attachment_key = self.create_markdown_attachment_item(
+            parent_key=parent_key,
+            title=title,
+            markdown_path=markdown_path,
+            tags=tags,
+            note=note,
+        )
+        self.upload_file(attachment_key, markdown_path)
+        return attachment_key
+
+    def create_markdown_attachment_item(
+        self,
+        *,
+        parent_key: str | None,
+        title: str,
+        markdown_path: Path,
+        tags: Iterable[str] = (),
+        note: str = "",
+    ) -> str:
         item: dict[str, Any] = {
             "itemType": "attachment",
             "linkMode": "imported_file",
@@ -844,9 +1302,96 @@ class ZoteroWebClient:
         successful = payload.get("successful", {})
         if "0" not in successful:
             raise WorkerError(f"Zotero item create returned no item key: {payload}")
-        attachment_key = successful["0"]["key"]
-        self.upload_file(attachment_key, markdown_path)
-        return attachment_key
+        return successful["0"]["key"]
+
+    def markdown_attachment_matches(
+        self,
+        item_key: str,
+        *,
+        parent_key: str | None,
+        filename: str,
+        source_pdf_key: str,
+        markdown_sha256: str,
+    ) -> bool:
+        response = self.session.get(f"{self.base_url}/items/{item_key}", timeout=self.timeout)
+        if response.status_code == 404:
+            return False
+        if response.status_code != 200:
+            raise WorkerError(
+                f"Zotero item lookup failed during reconciliation: {response.status_code}"
+            )
+        data = response.json().get("data", {})
+        metadata_matches = (
+            data.get("itemType") == "attachment"
+            and data.get("contentType") == "text/markdown"
+            and data.get("parentItem") == parent_key
+            and data.get("filename") == filename
+            and source_key_from_provenance_note(data.get("note")) == source_pdf_key
+        )
+        if not metadata_matches:
+            return False
+        file_response = self.session.get(
+            f"{self.base_url}/items/{item_key}/file",
+            timeout=self.timeout,
+        )
+        if file_response.status_code == 404:
+            return False
+        if file_response.status_code != 200:
+            raise WorkerError(
+                "Zotero attachment file lookup failed during reconciliation: "
+                f"{file_response.status_code}"
+            )
+        return hashlib.sha256(file_response.content).hexdigest() == markdown_sha256
+
+    def find_markdown_attachment_by_provenance(
+        self,
+        *,
+        parent_key: str | None,
+        filename: str,
+        source_pdf_key: str,
+    ) -> str | None:
+        if not parent_key:
+            return None
+        matches = []
+        start = 0
+        while True:
+            response = self.session.get(
+                f"{self.base_url}/items/{parent_key}/children",
+                params={"format": "json", "limit": 100, "start": start},
+                timeout=self.timeout,
+            )
+            if response.status_code != 200:
+                raise WorkerError(
+                    "Zotero child lookup failed during reconciliation: "
+                    f"{response.status_code}"
+                )
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise WorkerError("Zotero child lookup returned an invalid response")
+            for item in payload:
+                data = item.get("data", {}) if isinstance(item, dict) else {}
+                key = (
+                    str(data.get("key") or item.get("key") or "")
+                    if isinstance(item, dict)
+                    else ""
+                )
+                if (
+                    key
+                    and data.get("itemType") == "attachment"
+                    and data.get("contentType") == "text/markdown"
+                    and data.get("parentItem") == parent_key
+                    and data.get("filename") == filename
+                    and source_key_from_provenance_note(data.get("note")) == source_pdf_key
+                ):
+                    matches.append(key)
+            if len(payload) < 100:
+                break
+            start += len(payload)
+        if len(matches) > 1:
+            raise WorkerError(
+                "duplicate_attachment_evidence: Multiple Markdown children have the same provenance."
+            )
+        return matches[0] if matches else None
 
     def upload_file(self, attachment_key: str, path: Path) -> None:
         file_md5 = md5_file(path)
@@ -907,22 +1452,6 @@ class ZoteroWebClient:
         )
         if patch_response.status_code not in {200, 204}:
             raise WorkerError(f"Zotero item patch failed: {patch_response.status_code} {patch_response.text}")
-
-    def delete_item(self, item_key: str) -> None:
-        response = self.session.get(f"{self.base_url}/items/{item_key}", timeout=self.timeout)
-        if response.status_code == 404:
-            return
-        if response.status_code != 200:
-            raise WorkerError(f"Zotero item lookup failed before delete: {response.status_code} {response.text}")
-        version = response.json()["data"]["version"]
-        delete_response = self.session.delete(
-            f"{self.base_url}/items/{item_key}",
-            headers={"If-Unmodified-Since-Version": str(version)},
-            timeout=self.timeout,
-        )
-        if delete_response.status_code not in {204, 404}:
-            raise WorkerError(f"Zotero item delete failed: {delete_response.status_code} {delete_response.text}")
-
 
 class BaiduOCRClient:
     def __init__(self, config: Config):
@@ -1212,88 +1741,6 @@ def normalize_source_pdf_attachment_name(
     attachment.title = target_name
     attachment.path = target_path
     return attachment
-
-
-def markdown_page_numbers(path: Path) -> list[int]:
-    """Page numbers a generated Markdown file records inline.
-
-    Two shapes, because two are in circulation: the `<!-- page: N -->` anchor
-    the PaddleOCR assembler and the PyMuPDF fallback write, and the `## Page N`
-    heading carried by files converted while a route here still emitted one.
-    No route does any more. Structured pdf-text Markdown has neither — page
-    breaks are not part of what pdf-inspector reconstructs — so its page list
-    lives in the sidecar instead; see `sidecar_page_numbers()`.
-    """
-    pages: list[int] = []
-    pattern = re.compile(r"^(?:## Page (\d+)|<!-- page: (\d+) -->)$")
-    for line in path.read_text(encoding="utf-8").splitlines():
-        match = pattern.match(line.strip())
-        if match:
-            pages.append(int(match.group(1) or match.group(2)))
-    return pages
-
-
-def sidecar_page_numbers(
-    path: Path, *, expected_source_pdf_key: str | None = None
-) -> list[int]:
-    """Page numbers a sidecar records, in any shape a route writes here.
-
-    The pdf-text route writes one JSON object carrying a `pages` array of
-    objects, MinerU writes the same field as bare integers, and both paddle-ocr
-    branches write JSONL, one `{"page": N, "raw": {...}}` per page. All files
-    are named `.jsonl`, and a one-page JSONL sidecar parses whole just as well,
-    so which shape this is has to be read off what is inside rather than off
-    whether the file parses in one piece.
-
-    Pages come back in the order the file lists them, which is the order the
-    route wrote them in: a chunk that fails and is split retries in the place
-    it was popped from, so the page numbers stay ascending.
-    """
-    if not path.exists():
-        return []
-    # An interrupted write can cut the final UTF-8 character in half. Ignore
-    # only the undecodable bytes so complete JSONL records before it still
-    # contribute their page numbers.
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        parsed = None
-    if isinstance(parsed, dict) and isinstance(parsed.get("pages"), list):
-        entries = parsed["pages"]
-        if parsed.get("route") == ROUTE_MINERU:
-            if (
-                expected_source_pdf_key is not None
-                and parsed.get("source_pdf_key") != expected_source_pdf_key
-            ):
-                return []
-            if all(type(entry) is int for entry in entries):
-                return entries
-            return []
-        return [
-            entry["page"]
-            for entry in entries
-            if isinstance(entry, dict) and isinstance(entry.get("page"), int)
-        ]
-    pages: list[int] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(entry, dict) and isinstance(entry.get("page"), int):
-            pages.append(entry["page"])
-    return pages
-
-
-def selection_status(pages: list[int], page_count: int, *, uploaded: bool) -> str:
-    full = pages == list(range(1, page_count + 1))
-    if uploaded:
-        return "completed" if full else "uploaded_partial"
-    return "local_complete" if full else "local_partial"
 
 
 def route_attachment(
@@ -1593,6 +2040,197 @@ def source_key_from_provenance_note(note: object) -> str | None:
     return match.group(1).upper() if match else None
 
 
+def reconcile_staged_conversion(
+    *,
+    attachment: Attachment,
+    state: StateDB,
+    page_count: int,
+) -> ReconciliationOutcome:
+    source_md5 = md5_file(attachment.path)
+    record = state.conversion_evidence_record_for_source(attachment.key, source_md5)
+    raw_evidence = record[0] if record else None
+    if record is not None:
+        evidence_reference = record[1]
+        try:
+            evidence_path = resolve_artifact_reference(
+                state.artifact_root,
+                evidence_reference,
+            )
+            if not evidence_path.is_file():
+                return blocked(
+                    "missing_evidence_reference",
+                    "Rerun conversion to restore the committed evidence reference.",
+                )
+            if evidence_path.read_bytes() != private_json_record_bytes(raw_evidence):
+                return blocked(
+                    "evidence_reference_drift",
+                    "Rerun conversion for the current evidence bytes.",
+                )
+        except (OSError, UnicodeDecodeError, ValueError):
+            return blocked(
+                "evidence_reference_drift",
+                "Rerun conversion for the current evidence bytes.",
+            )
+    return reconcile_conversion_evidence(
+        raw_evidence=raw_evidence,
+        expected_contract_version=WORKER_EXTRACTION_CONTRACT_VERSION,
+        source_pdf_key=attachment.key,
+        source_md5=source_md5,
+        source_path=attachment.path,
+        parent_item_key=attachment.parent_key,
+        page_count=page_count,
+        artifact_root=state.artifact_root,
+    )
+
+
+def upload_reconciled_conversion(
+    *,
+    attachment: Attachment,
+    config: Config,
+    state: StateDB,
+    page_count: int,
+) -> str:
+    outcome = reconcile_staged_conversion(
+        attachment=attachment,
+        state=state,
+        page_count=page_count,
+    )
+    if not outcome.accepted or outcome.evidence is None or outcome.route is None:
+        raise ReconciliationBlocked(
+            outcome.error_code or "invalid_evidence",
+            outcome.guidance or "Rerun conversion.",
+        )
+    evidence = outcome.evidence
+    uploaded_status = coverage_status(
+        evidence.selected_pages,
+        evidence.page_count,
+        uploaded=True,
+    )
+    zotero = ZoteroWebClient(config)
+    source_md5 = md5_file(attachment.path)
+    if evidence.markdown_attachment_key:
+        if zotero.markdown_attachment_matches(
+            evidence.markdown_attachment_key,
+            parent_key=attachment.parent_key,
+            filename=evidence.markdown_path.name,
+            source_pdf_key=attachment.key,
+            markdown_sha256=evidence.markdown_artifact.sha256,
+        ):
+            return uploaded_status
+        raise ReconciliationBlocked(
+            "attachment_mismatch",
+            "The bound Markdown child is missing or no longer matches this evidence.",
+        )
+    upload_owner_token = state.claim_upload(
+        pdf_key=attachment.key,
+        source_md5=source_md5,
+        evidence=evidence,
+    )
+    zotero_key = state.pending_attachment_key(
+        attachment.key,
+        source_md5,
+        upload_owner_token,
+    )
+    delivery_error_code = "upload_failure"
+    try:
+        if zotero_key:
+            if not zotero.markdown_attachment_matches(
+                zotero_key,
+                parent_key=attachment.parent_key,
+                filename=evidence.markdown_path.name,
+                source_pdf_key=attachment.key,
+                markdown_sha256=evidence.markdown_artifact.sha256,
+            ):
+                delivery_error_code = "attachment_mismatch"
+                raise WorkerError(
+                    "attachment_mismatch: The pending Markdown attachment is missing or changed."
+                )
+        else:
+            discovered_key = zotero.find_markdown_attachment_by_provenance(
+                parent_key=attachment.parent_key,
+                filename=evidence.markdown_path.name,
+                source_pdf_key=attachment.key,
+            )
+            zotero_key = discovered_key if isinstance(discovered_key, str) else None
+            if not zotero_key:
+                zotero_key = zotero.create_markdown_attachment_item(
+                    parent_key=attachment.parent_key,
+                    title=attachment_title(attachment, outcome.route),
+                    markdown_path=evidence.markdown_path,
+                    tags=attachment_tags(config),
+                    note=attachment_provenance_note(attachment, outcome.route, config),
+                )
+            state.record_pending_attachment(
+                pdf_key=attachment.key,
+                source_md5=source_md5,
+                markdown_attachment_key=zotero_key,
+                upload_owner_token=upload_owner_token,
+            )
+        if not zotero_key:
+            raise WorkerError("attachment_identity_missing: Zotero returned no attachment key.")
+        zotero.upload_file(zotero_key, evidence.markdown_path)
+    except Exception as exc:
+        state.record_delivery_error(
+            attachment.key,
+            source_md5,
+            delivery_error_code,
+            upload_owner_token,
+        )
+        raise DeliveryError(delivery_error_code) from exc
+    state.bind_markdown_attachment(
+        attachment=attachment,
+        source_md5=source_md5,
+        evidence=evidence,
+        markdown_attachment_key=zotero_key,
+        status=uploaded_status,
+        upload_owner_token=upload_owner_token,
+    )
+    return uploaded_status
+
+
+def verify_uploaded_conversion(
+    *,
+    attachment: Attachment,
+    config: Config,
+    state: StateDB,
+    page_count: int,
+) -> str:
+    """Read-only validation for a completion the Book Pipeline wants to reuse."""
+    outcome = reconcile_staged_conversion(
+        attachment=attachment,
+        state=state,
+        page_count=page_count,
+    )
+    if not outcome.accepted or outcome.evidence is None:
+        raise ReconciliationBlocked(
+            outcome.error_code or "invalid_evidence",
+            outcome.guidance or "Rerun conversion.",
+        )
+    evidence = outcome.evidence
+    if not evidence.markdown_attachment_key:
+        raise ReconciliationBlocked(
+            "attachment_identity_missing",
+            "Upload and bind the reconciled Markdown before resuming Book Pipeline.",
+        )
+    zotero = ZoteroWebClient(config)
+    if not zotero.markdown_attachment_matches(
+        evidence.markdown_attachment_key,
+        parent_key=attachment.parent_key,
+        filename=evidence.markdown_path.name,
+        source_pdf_key=attachment.key,
+        markdown_sha256=evidence.markdown_artifact.sha256,
+    ):
+        raise ReconciliationBlocked(
+            "attachment_mismatch",
+            "The bound Markdown child is missing or no longer matches this evidence.",
+        )
+    return coverage_status(
+        evidence.selected_pages,
+        evidence.page_count,
+        uploaded=True,
+    )
+
+
 def process_text_route(
     *,
     attachment: Attachment,
@@ -1603,7 +2241,6 @@ def process_text_route(
     pages: list[int],
     route_reason: str,
     no_upload: bool,
-    replace_attachment_key: str | None = None,
 ) -> str:
     markdown_path, sidecar_path = output_paths(config, attachment, "pdf-text")
     extracted = pdf_text.extract_markdown(attachment.path, pages=pages, dirty_text=config)
@@ -1638,7 +2275,7 @@ def process_text_route(
         pages=pages,
         kind="assembled_markdown",
     )
-    write_markdown_evidence(
+    publication_evidence_path = write_markdown_evidence(
         markdown_path,
         source_format="pdf",
         extraction_engine=extracted.engine,
@@ -1668,39 +2305,25 @@ def process_text_route(
         ),
         encoding="utf-8",
     )
-    if no_upload:
-        state.upsert_document(
-            attachment=attachment,
-            source_md5=source_md5,
-            route="pdf-text",
-            status=selection_status(pages, page_count, uploaded=False),
-            page_count=page_count,
-            output_path=markdown_path,
-            sidecar_path=sidecar_path,
-        )
-        return selection_status(pages, page_count, uploaded=False)
-    zotero = ZoteroWebClient(config)
-    zotero_key = zotero.create_markdown_attachment(
-        parent_key=attachment.parent_key,
-        title=attachment_title(attachment, "pdf-text"),
-        markdown_path=markdown_path,
-        tags=attachment_tags(config),
-        note=attachment_provenance_note(attachment, "pdf-text", config),
-    )
-    if replace_attachment_key and replace_attachment_key != zotero_key:
-        zotero.delete_item(replace_attachment_key)
-    status = selection_status(pages, page_count, uploaded=True)
-    state.upsert_document(
+    normalized_pages = [page_no for page_no, _ in extracted.page_chars]
+    state.commit_conversion_evidence(
         attachment=attachment,
         source_md5=source_md5,
         route="pdf-text",
-        status=status,
         page_count=page_count,
-        output_path=markdown_path,
+        selected_pages=normalized_pages,
+        markdown_path=markdown_path,
         sidecar_path=sidecar_path,
-        zotero_attachment_key=zotero_key,
+        publication_evidence_path=publication_evidence_path,
     )
-    return status
+    if no_upload:
+        return coverage_status(normalized_pages, page_count, uploaded=False)
+    return upload_reconciled_conversion(
+        attachment=attachment,
+        config=config,
+        state=state,
+        page_count=page_count,
+    )
 
 
 def process_ocr_route(
@@ -1715,7 +2338,6 @@ def process_ocr_route(
     no_upload: bool,
     deadline: float,
     ocr_pages_remaining: int,
-    replace_attachment_key: str | None = None,
 ) -> tuple[str, int]:
     if not config.baidu_token:
         state.upsert_document(
@@ -1923,7 +2545,7 @@ def process_ocr_route(
         )
         for document in source_documents
     ]
-    write_markdown_evidence(
+    publication_evidence_path = write_markdown_evidence(
         markdown_path,
         source_format="ocr",
         extraction_engine=config.baidu_model,
@@ -1936,39 +2558,35 @@ def process_ocr_route(
             "layoutModel": is_layout_model(config),
         },
     )
-    if no_upload:
-        state.upsert_document(
-            attachment=attachment,
-            source_md5=source_md5,
-            route="paddle-ocr",
-            status=selection_status(pages, page_count, uploaded=False),
-            page_count=page_count,
-            output_path=markdown_path,
-            sidecar_path=sidecar_path,
-        )
-        return selection_status(pages, page_count, uploaded=False), pages_used
-    zotero = ZoteroWebClient(config)
-    zotero_key = zotero.create_markdown_attachment(
-        parent_key=attachment.parent_key,
-        title=attachment_title(attachment, "paddle-ocr"),
-        markdown_path=markdown_path,
-        tags=attachment_tags(config),
-        note=attachment_provenance_note(attachment, "paddle-ocr", config),
-    )
-    if replace_attachment_key and replace_attachment_key != zotero_key:
-        zotero.delete_item(replace_attachment_key)
-    status = selection_status(pages, page_count, uploaded=True)
-    state.upsert_document(
+    normalized_pages = [
+        json.loads(line)["page"]
+        for line in combined_lines
+        if line.strip()
+    ]
+    state.commit_conversion_evidence(
         attachment=attachment,
         source_md5=source_md5,
         route="paddle-ocr",
-        status=status,
         page_count=page_count,
-        output_path=markdown_path,
+        selected_pages=normalized_pages,
+        markdown_path=markdown_path,
         sidecar_path=sidecar_path,
-        zotero_attachment_key=zotero_key,
+        publication_evidence_path=publication_evidence_path,
     )
-    return status, pages_used
+    if no_upload:
+        return (
+            coverage_status(normalized_pages, page_count, uploaded=False),
+            pages_used,
+        )
+    return (
+        upload_reconciled_conversion(
+            attachment=attachment,
+            config=config,
+            state=state,
+            page_count=page_count,
+        ),
+        pages_used,
+    )
 
 
 def format_page_ranges(pages: list[int]) -> str:
@@ -2062,7 +2680,6 @@ def process_mineru_route(
     route_reason: str,
     no_upload: bool,
     deadline: float,
-    replace_attachment_key: str | None = None,
 ) -> str:
     mineru_script = APP_ROOT / "mineru.py"
     if not mineru_script.is_file():
@@ -2199,7 +2816,22 @@ def process_mineru_route(
                 )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise WorkerError(f"MinerU publication evidence is invalid: {exc}") from exc
-    write_markdown_evidence(
+    normalized_pages = [
+        page
+        for document in source_documents
+        for page in document.pages
+    ]
+    if any(page not in pages for page in normalized_pages):
+        raise WorkerError(
+            "MinerU publication evidence contains pages outside the requested selection"
+        )
+    try:
+        coverage_status(normalized_pages, page_count, uploaded=False)
+    except ValueError as exc:
+        raise WorkerError(
+            "MinerU publication evidence has invalid producer page coverage"
+        ) from exc
+    publication_evidence_path = write_markdown_evidence(
         markdown_path,
         source_format="mineru",
         extraction_engine="MinerU Precision v4",
@@ -2208,7 +2840,7 @@ def process_mineru_route(
         extraction_facts={
             "route": ROUTE_MINERU,
             "pageCount": page_count,
-            "selectedPages": pages,
+            "selectedPages": normalized_pages,
         },
     )
     sidecar_path.write_text(
@@ -2216,7 +2848,7 @@ def process_mineru_route(
             {
                 "source_pdf_key": attachment.key,
                 "route": ROUTE_MINERU,
-                "pages": pages,
+                "pages": normalized_pages,
                 "mineru_language": config.mineru_language,
                 "mineru_artifact_dir": str(artifact_dir),
                 "mineru_manifest_path": str(artifact_dir / "mineru_manifest.json"),
@@ -2227,39 +2859,28 @@ def process_mineru_route(
         + "\n",
         encoding="utf-8",
     )
-    status = selection_status(pages, page_count, uploaded=not no_upload)
-    if no_upload:
-        state.upsert_document(
-            attachment=attachment,
-            source_md5=source_md5,
-            route=ROUTE_MINERU,
-            status=status,
-            page_count=page_count,
-            output_path=markdown_path,
-            sidecar_path=sidecar_path,
-        )
-        return status
-    zotero = ZoteroWebClient(config)
-    zotero_key = zotero.create_markdown_attachment(
-        parent_key=attachment.parent_key,
-        title=attachment_title(attachment, ROUTE_MINERU),
-        markdown_path=markdown_path,
-        tags=attachment_tags(config),
-        note=attachment_provenance_note(attachment, ROUTE_MINERU, config),
-    )
-    if replace_attachment_key and replace_attachment_key != zotero_key:
-        zotero.delete_item(replace_attachment_key)
-    state.upsert_document(
+    manifest_path = artifact_dir / "mineru_manifest.json"
+    if not manifest_path.is_file():
+        raise WorkerError("MinerU adapter produced no manifest")
+    state.commit_conversion_evidence(
         attachment=attachment,
         source_md5=source_md5,
         route=ROUTE_MINERU,
-        status=status,
         page_count=page_count,
-        output_path=markdown_path,
+        selected_pages=normalized_pages,
+        markdown_path=markdown_path,
         sidecar_path=sidecar_path,
-        zotero_attachment_key=zotero_key,
+        publication_evidence_path=publication_evidence_path,
+        additional_artifacts=(("mineru-artifact-directory", artifact_dir),),
     )
-    return status
+    if no_upload:
+        return coverage_status(normalized_pages, page_count, uploaded=False)
+    return upload_reconciled_conversion(
+        attachment=attachment,
+        config=config,
+        state=state,
+        page_count=page_count,
+    )
 
 
 def process_needs_mineru_route(
@@ -2300,25 +2921,81 @@ def process_attachment(
     normalize_source: bool = True,
     pipeline_route: bool = False,
 ) -> tuple[str, int]:
+    source_md5 = md5_file(attachment.path)
+    page_count = pdf_page_count(attachment.path)
+    completed_row = state.completed(attachment.key, source_md5)
+    completed_route_matches = (
+        not force_route
+        or completed_row is None
+        or completed_row["route"] == force_route
+    )
+    completed_outcome = (
+        reconcile_staged_conversion(
+            attachment=attachment,
+            state=state,
+            page_count=page_count,
+        )
+        if completed_row and completed_route_matches
+        else None
+    )
+    if completed_row and not completed_route_matches:
+        raise ReconciliationBlocked(
+            "completed_route_conflict",
+            "The completed attachment is bound to another route; regenerate it explicitly.",
+        )
+    if completed_row and (
+        completed_outcome is None
+        or not completed_outcome.accepted
+        or completed_outcome.evidence is None
+    ):
+        raise ReconciliationBlocked(
+            completed_outcome.error_code if completed_outcome else "invalid_evidence",
+            completed_outcome.guidance if completed_outcome else "Rerun conversion.",
+        )
+    if (
+        completed_row
+        and completed_outcome is not None
+        and completed_outcome.accepted
+        and completed_outcome.evidence is not None
+        and completed_outcome.evidence.markdown_attachment_key
+        == completed_row["zotero_attachment_key"]
+    ):
+        if dry_run and not no_upload:
+            evidence = completed_outcome.evidence
+            if not ZoteroWebClient(config).markdown_attachment_matches(
+                evidence.markdown_attachment_key,
+                parent_key=attachment.parent_key,
+                filename=evidence.markdown_path.name,
+                source_pdf_key=attachment.key,
+                markdown_sha256=evidence.markdown_artifact.sha256,
+            ):
+                logging.warning(
+                    "STALE completed %s because the bound Markdown child no longer matches",
+                    attachment.key,
+                )
+                return "stale_completed", 0
+        elif not no_upload:
+            upload_reconciled_conversion(
+                attachment=attachment,
+                config=config,
+                state=state,
+                page_count=page_count,
+            )
+        logging.info("REUSE evidence-bound conversion %s", attachment.key)
+        return "skipped_completed", 0
+    if completed_row:
+        raise ReconciliationBlocked(
+            "attachment_identity_mismatch",
+            "The completed row is not bound to its current conversion evidence.",
+        )
     if normalize_source and not dry_run and not no_upload:
         attachment = normalize_source_pdf_attachment_name(
             attachment=attachment,
             config=config,
             zotero=ZoteroWebClient(config),
         )
-    source_md5 = md5_file(attachment.path)
-    completed_row = state.completed(attachment.key, source_md5)
-    replace_attachment_key = None
-    completed_route_matches = not force_route or completed_row is None or completed_row["route"] == force_route
-    if completed_row and completed_route_matches and completed_row_is_current(completed_row, config):
-        if no_upload or completed_row["zotero_attachment_key"]:
-            logging.info("SKIP completed %s %s", attachment.key, attachment.title)
-            return "skipped_completed", 0
-        logging.info("REBUILD completed %s because uploaded Zotero attachment is missing", attachment.key)
-    if completed_row:
-        logging.info("REBUILD completed %s with current Baidu model %s", attachment.key, config.baidu_model)
-        replace_attachment_key = completed_row["zotero_attachment_key"]
-    page_count = pdf_page_count(attachment.path)
+        source_md5 = md5_file(attachment.path)
+        page_count = pdf_page_count(attachment.path)
     if not force_route:
         sibling_row = state.same_parent_source_row(attachment, source_md5)
         if sibling_row is not None:
@@ -2354,14 +3031,13 @@ def process_attachment(
             pipeline_route=pipeline_route,
         )
     logging.info(
-        "PLAN %s route=%s pages=%s selected=%s parent_type=%s sampled_chars=%s title=%s",
+        "PLAN %s route=%s pages=%s selected=%s parent_type=%s sampled_chars=%s",
         attachment.key,
         route,
         page_count,
         len(pages),
         attachment.parent_item_type,
         sampled_chars,
-        attachment.title,
     )
     if dry_run:
         return "dry_run", 0
@@ -2376,7 +3052,6 @@ def process_attachment(
                 pages=pages,
                 route_reason=route_reason,
                 no_upload=no_upload,
-                replace_attachment_key=replace_attachment_key,
             ),
             0,
         )
@@ -2392,7 +3067,6 @@ def process_attachment(
             no_upload=no_upload,
             deadline=deadline,
             ocr_pages_remaining=ocr_pages_remaining,
-            replace_attachment_key=replace_attachment_key,
         )
     if route == ROUTE_MINERU:
         return (
@@ -2406,7 +3080,6 @@ def process_attachment(
                 route_reason=route_reason,
                 no_upload=no_upload,
                 deadline=deadline,
-                replace_attachment_key=replace_attachment_key,
             ),
             0,
         )
@@ -2437,52 +3110,64 @@ def attachment_matches_filters(attachment: Attachment, args: argparse.Namespace)
     return True
 
 
-def completed_row_is_current(row: sqlite3.Row, config: Config) -> bool:
-    if row["extraction_contract_version"] != WORKER_EXTRACTION_CONTRACT_VERSION:
-        return False
-    output_path = row["output_path"]
-    if not output_path or not Path(output_path).exists():
-        return False
-    if row["route"] != "paddle-ocr" or not is_layout_model(config):
-        return True
-    sample = Path(output_path).read_text(encoding="utf-8", errors="ignore")[:5000]
-    return not sample.lstrip().startswith("---") and "\n## Page " not in sample
-
-
 def emit_attachment_evidence(
     *,
     attachment: Attachment,
     state: StateDB,
     observed_status: str,
 ) -> None:
+    if observed_status not in {"completed", "skipped_completed"}:
+        return
     source_md5 = md5_file(attachment.path)
     row = state.document(attachment.key, source_md5)
-    if (
-        row is None
-        or row["status"] != "completed"
-        or row["extraction_contract_version"] != WORKER_EXTRACTION_CONTRACT_VERSION
-    ):
+    if row is None or row["status"] != "completed":
         return
-    output_path = Path(row["output_path"] or "")
-    markdown_attachment_key = str(row["zotero_attachment_key"] or "").strip()
-    parent_item_key = str(row["parent_key"] or "").strip()
-    if (
-        not output_path.is_file()
-        or output_path.stat().st_size == 0
-        or not markdown_attachment_key
-        or not parent_item_key
-    ):
+    try:
+        page_count = pdf_page_count(attachment.path)
+    except Exception:
         return
+    outcome = reconcile_staged_conversion(
+        attachment=attachment,
+        state=state,
+        page_count=page_count,
+    )
+    if not outcome.accepted or outcome.evidence is None:
+        return
+    evidence = outcome.evidence
+    markdown_attachment_key = evidence.markdown_attachment_key or ""
+    if not markdown_attachment_key or not evidence.parent_item_key:
+        return
+    evidence_record = state.conversion_evidence_record(attachment.key, source_md5)
+    if evidence_record is None:
+        return
+    raw_evidence, evidence_reference = evidence_record
+    try:
+        evidence_path = resolve_artifact_reference(state.artifact_root, evidence_reference)
+        if evidence_path.read_bytes() != private_json_record_bytes(raw_evidence):
+            return
+        evidence_sha256 = digest_path(evidence_path)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return
+    artifacts = {artifact.kind: artifact for artifact in evidence.artifacts}
     payload = {
         "schemaVersion": WORKER_ATTACHMENT_EVIDENCE_SCHEMA,
-        "extractionContractVersion": row["extraction_contract_version"],
+        "conversionEvidenceSchema": evidence.schema_version,
+        "conversionEvidenceReference": evidence_reference,
+        "conversionEvidenceSha256": evidence_sha256,
+        "extractionContractVersion": evidence.extraction_contract_version,
         "status": "already_completed" if observed_status == "skipped_completed" else "completed",
-        "route": str(row["route"] or ""),
+        "route": evidence.route,
         "pdfAttachmentKey": attachment.key,
-        "parentItemKey": parent_item_key,
-        "sourceSha256": sha256_file(attachment.path),
-        "markdownPath": str(output_path.resolve()),
-        "markdownSha256": sha256_file(output_path),
+        "parentItemKey": evidence.parent_item_key,
+        "sourceSha256": evidence.source_sha256,
+        "pageCount": evidence.page_count,
+        "selectedPages": list(evidence.selected_pages),
+        "markdownReference": evidence.markdown_artifact.reference,
+        "markdownSha256": evidence.markdown_artifact.sha256,
+        "routeSidecarReference": artifacts["route-sidecar"].reference,
+        "routeSidecarSha256": artifacts["route-sidecar"].sha256,
+        "publicationEvidenceReference": artifacts["publication-evidence"].reference,
+        "publicationEvidenceSha256": artifacts["publication-evidence"].sha256,
         "markdownAttachmentKey": markdown_attachment_key,
     }
     logging.info(
@@ -2491,74 +3176,33 @@ def emit_attachment_evidence(
     )
 
 
-def infer_generated_markdown_route(markdown_path: Path, sidecar_path: Path) -> str:
-    if sidecar_path.exists():
-        try:
-            text = sidecar_path.read_text(encoding="utf-8")
-            try:
-                parsed_sidecar = json.loads(text)
-            except Exception:
-                parsed_sidecar = None
-            if (
-                isinstance(parsed_sidecar, dict)
-                and parsed_sidecar.get("route") == ROUTE_MINERU
-            ):
-                return ROUTE_MINERU
-            for raw_line in text.splitlines():
-                line = raw_line.strip()
-                if not line:
-                    continue
-                parsed = json.loads(line)
-                if parsed.get("route") == "pdf-text":
-                    return "pdf-text"
-                raw = parsed.get("raw") if isinstance(parsed, dict) else None
-                if isinstance(raw, dict) and (extract_layout_results(raw) or raw.get("markdown")):
-                    return "paddle-ocr"
-        except Exception:
-            pass
-    sample = markdown_path.read_text(encoding="utf-8", errors="ignore")[:5000]
-    if sample.lstrip().startswith("---") or "\n## Page " in sample:
-        return "pdf-text"
-    return "paddle-ocr"
-
-
 def upload_test(config: Config, state: StateDB, local: ZoteroLocalClient, key: str) -> None:
     attachment = local.get_pdf_attachment(key)
-    staging_dir = config.output_root / ".state" / "staging" / key
-    legacy_dir = config.output_root / key
-    candidates = list(staging_dir.glob("*.md")) + list(legacy_dir.glob("*.md"))
-    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
-    if not candidates:
-        raise WorkerError(f"No generated Markdown exists for {key}. Run --smoke --no-upload first.")
-    markdown_path = candidates[0]
-    sidecar_path = markdown_path.with_suffix(".jsonl")
-    route = infer_generated_markdown_route(markdown_path, sidecar_path)
-    zotero_key = ZoteroWebClient(config).create_markdown_attachment(
-        parent_key=attachment.parent_key,
-        title=attachment_title(attachment, route),
-        markdown_path=markdown_path,
-        tags=attachment_tags(config),
-        note=attachment_provenance_note(attachment, route, config),
-    )
-    source_md5 = md5_file(attachment.path)
     page_count = pdf_page_count(attachment.path)
-    pages = sidecar_page_numbers(
-        sidecar_path, expected_source_pdf_key=attachment.key
-    )
-    if route != ROUTE_MINERU and not pages:
-        pages = markdown_page_numbers(markdown_path)
-    status = selection_status(pages, page_count, uploaded=True)
-    state.upsert_document(
+    status = upload_reconciled_conversion(
         attachment=attachment,
-        source_md5=source_md5,
-        route=route,
-        status=status,
+        config=config,
+        state=state,
         page_count=page_count,
-        output_path=markdown_path,
-        sidecar_path=sidecar_path if sidecar_path.exists() else None,
-        zotero_attachment_key=zotero_key,
     )
-    logging.info("Uploaded %s to Zotero attachment %s status=%s", markdown_path, zotero_key, status)
+    logging.info("Reconciled and uploaded %s status=%s", attachment.key, status)
+
+
+def verify_uploaded_test(
+    config: Config,
+    state: StateDB,
+    local: ZoteroLocalClient,
+    key: str,
+) -> None:
+    attachment = local.get_pdf_attachment(key)
+    page_count = pdf_page_count(attachment.path)
+    status = verify_uploaded_conversion(
+        attachment=attachment,
+        config=config,
+        state=state,
+        page_count=page_count,
+    )
+    logging.info("Verified uploaded evidence %s status=%s", attachment.key, status)
 
 
 def install_dependencies_check() -> None:
@@ -2601,7 +3245,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pages", help="Limit processing to pages like '1-3' or '1,3,5-7'.")
     parser.add_argument("--no-upload", action="store_true", help="Generate local Markdown without Zotero Web API upload.")
     parser.add_argument("--smoke", action="store_true", help="Alias for one-attachment test mode; requires --attachment-key.")
-    parser.add_argument("--upload-test", action="store_true", help="Upload the latest generated Markdown for --attachment-key.")
+    parser.add_argument(
+        "--upload-test",
+        action="store_true",
+        help="Upload the exact current evidence-bound Markdown for --attachment-key.",
+    )
+    parser.add_argument(
+        "--verify-uploaded-evidence",
+        action="store_true",
+        help="Read-only validation of current local and bound Zotero evidence.",
+    )
     parser.add_argument("--max-runtime-minutes", type=float, default=55.0)
     parser.add_argument("--force-ocr", action="store_true", help="Force Paddle OCR route.")
     parser.add_argument("--force-text", action="store_true", help="Force direct PDF text extraction route.")
@@ -2632,6 +3285,10 @@ def main(argv: list[str] | None = None) -> int:
         raise WorkerError("--smoke requires --attachment-key")
     if args.upload_test and not args.attachment_key:
         raise WorkerError("--upload-test requires --attachment-key")
+    if args.verify_uploaded_evidence and not args.attachment_key:
+        raise WorkerError("--verify-uploaded-evidence requires --attachment-key")
+    if args.upload_test and args.verify_uploaded_evidence:
+        raise WorkerError("Use only one upload evidence operation")
     forced_routes = sum(bool(value) for value in (args.force_ocr, args.force_text, args.force_mineru))
     if forced_routes > 1:
         raise WorkerError("Use only one of --force-ocr, --force-text, or --force-mineru")
@@ -2641,6 +3298,9 @@ def main(argv: list[str] | None = None) -> int:
     local.ping()
     if args.upload_test:
         upload_test(config, state, local, args.attachment_key)
+        return 0
+    if args.verify_uploaded_evidence:
+        verify_uploaded_test(config, state, local, args.attachment_key)
         return 0
 
     deadline = time.time() + args.max_runtime_minutes * 60
@@ -2705,6 +3365,12 @@ def main(argv: list[str] | None = None) -> int:
         except DeadlineReached as exc:
             logging.info("Deadline reached: %s", exc)
             break
+        except DeliveryError as exc:
+            logging.warning("Retryable Zotero delivery error for %s: %s", attachment.key, exc.code)
+            statuses["retryable_upload"] = statuses.get("retryable_upload", 0) + 1
+        except ReconciliationBlocked as exc:
+            logging.warning("OCR evidence blocked for %s: %s", attachment.key, exc.code)
+            statuses["blocked_evidence"] = statuses.get("blocked_evidence", 0) + 1
         except Exception as exc:
             logging.exception("Failed %s: %s", attachment.key, exc)
             try:
@@ -2725,11 +3391,27 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+def cli(argv: list[str] | None = None) -> int:
+    """Run the worker while keeping validation failures machine-readable and path-safe."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
     try:
-        raise SystemExit(main())
+        return main(arguments)
     except KeyboardInterrupt:
-        raise SystemExit(130)
+        return 130
     except Exception as exc:
+        if "--verify-uploaded-evidence" in arguments:
+            if isinstance(exc, ReconciliationBlocked):
+                code = re.sub(r"[^a-z0-9_-]", "_", exc.code.lower())
+                print(f"BOOK_PIPELINE_EVIDENCE_MISMATCH {code}", file=sys.stderr)
+                return 2
+            print(
+                "BOOK_PIPELINE_EVIDENCE_RETRYABLE remote_validation_unavailable",
+                file=sys.stderr,
+            )
+            return 75
         logging.exception("Fatal error: %s", exc)
-        raise SystemExit(1)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())
