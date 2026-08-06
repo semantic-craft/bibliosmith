@@ -41,6 +41,18 @@ fn stderr_tail_surfaces_the_last_lines_of_a_python_traceback() {
 }
 
 #[test]
+fn stderr_tail_redacts_absolute_python_traceback_paths() {
+    let stderr = "Traceback (most recent call last):\n  File \"/opt/private/project/worker.py\", line 7\nRuntimeError: unavailable\n";
+    let tail = stderr_tail(stderr);
+
+    assert_eq!(
+        tail,
+        "Traceback (most recent call last): | File \"[redacted path]\", line 7 | RuntimeError: unavailable"
+    );
+    assert!(!tail.contains("/opt/private"));
+}
+
+#[test]
 fn prompt_pack_catalog_exposes_four_functional_packs_with_valid_revisions() {
     let catalog = builtin_prompt_pack_catalog().unwrap();
     let names = catalog
@@ -1863,7 +1875,6 @@ impl RunnerCommandExecutor for ZoteroRoutePreviewExecutor {
                 "12:00:01 INFO PLAN SCAN route=paddle-ocr pages=240 selected=240 parent_type=book sampled_chars=0 title=Scanned PDF",
                 "12:00:02 INFO PLAN MINERU route=mineru pages=32 selected=32 parent_type=journalArticle sampled_chars=0 title=MinerU Candidate",
                 "12:00:03 INFO PLAN DIRTY route=needs-mineru pages=12 selected=12 parent_type=book sampled_chars=600 title=Dirty Text Layer",
-                "12:00:04 INFO SKIP completed DONE Already Converted",
             ]
             .join("\n"),
             log_summary: vec!["Zotero route dry-run completed".into()],
@@ -1879,8 +1890,6 @@ impl RunnerCommandExecutor for ZoteroFingerprintPreviewExecutor {
         Ok(RunnerCommandResult {
             stdout: String::new(),
             stderr: [
-                "12:00:00 INFO SKIP completed CURRENT Current Title source_md5=aaa111 output_path=/tmp/current.md zotero_attachment_key=MDOLD",
-                "12:00:01 INFO REBUILD completed MISSING because uploaded Zotero attachment is missing",
                 "12:00:02 INFO PLAN MISSING route=pdf-text pages=10 selected=10 parent_type=book sampled_chars=1200 title=Missing Upload source_md5=aaa111",
                 "12:00:03 INFO PLAN CHANGED route=pdf-text pages=12 selected=12 parent_type=book sampled_chars=1400 title=Changed Source source_md5=bbb222",
                 "12:00:04 INFO PLAN DIRTY route=needs-mineru pages=8 selected=8 parent_type=book sampled_chars=500 title=Dirty Blocked source_md5=ccc333",
@@ -1929,9 +1938,20 @@ impl RunnerCommandExecutor for ZoteroConversionExecutor {
                 )
                 .unwrap();
                 fs::write(staging.join("direct.jsonl"), "{\"page\":1}\n").unwrap();
+                let markdown = staging.join("direct.md");
                 Ok(RunnerCommandResult {
-                    stdout: "Uploaded direct.md to Zotero attachment MDKEY123 status=completed"
-                        .into(),
+                    stdout: format!(
+                        "12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
+                        worker_attachment_evidence_payload(
+                            "DIRECT",
+                            "PARENT123",
+                            &"a".repeat(64),
+                            &markdown,
+                            "completed",
+                            "pdf-text",
+                            "MDKEY123",
+                        )
+                    ),
                     stderr: String::new(),
                     log_summary: vec!["Zotero conversion fixture completed".into()],
                 })
@@ -2015,13 +2035,25 @@ impl RunnerCommandExecutor for ZoteroExtractIndexExecutor {
                     "---\nparent_item_key: \"PARENT123\"\nsource_pdf_key: \"DIRECT\"\n---\n\n# Direct Markdown\n",
                 )
                 .unwrap();
+                let markdown = staging.join("direct.md");
                 let stdout = if self.omit_markdown_attachment_key {
-                    "Completed direct.md without upload evidence status=completed"
+                    "Completed direct.md without upload evidence status=completed".into()
                 } else {
-                    "Uploaded direct.md to Zotero attachment MDKEY123 status=completed"
+                    format!(
+                        "12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
+                        worker_attachment_evidence_payload(
+                            "DIRECT",
+                            "PARENT123",
+                            &"a".repeat(64),
+                            &markdown,
+                            "completed",
+                            "pdf-text",
+                            "MDKEY123",
+                        )
+                    )
                 };
                 Ok(RunnerCommandResult {
-                    stdout: stdout.into(),
+                    stdout,
                     stderr: String::new(),
                     log_summary: vec!["Zotero conversion fixture completed".into()],
                 })
@@ -2105,8 +2137,20 @@ impl RunnerCommandExecutor for MineruFixtureExecutor {
                     "{\"engine\":\"mineru\"}\n",
                 )
                 .unwrap();
+                let markdown = command.output_dir.join("mineru.md");
                 Ok(RunnerCommandResult {
-                    stdout: "Uploaded mineru.md to Zotero attachment MINERUMD".into(),
+                    stdout: format!(
+                        "12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
+                        worker_attachment_evidence_payload(
+                            "MINERU",
+                            "PARENTMINERU",
+                            &"a".repeat(64),
+                            &markdown,
+                            "completed",
+                            "mineru",
+                            "MINERUMD",
+                        )
+                    ),
                     stderr: String::new(),
                     log_summary: vec!["MinerU fixture completed".into()],
                 })
@@ -2969,8 +3013,25 @@ impl RunnerCommandExecutor for ZoteroBatchFixtureExecutor {
             format!("{{\"key\":\"{key}\"}}\n"),
         )
         .unwrap();
+        let markdown = command.output_dir.join(format!("{key}.md"));
         Ok(RunnerCommandResult {
-            stdout: format!("Uploaded {key}.md to Zotero attachment {key}MD"),
+            stdout: format!(
+                "12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
+                worker_attachment_evidence_payload(
+                    key,
+                    &format!("{key}PARENT"),
+                    &"a".repeat(64),
+                    &markdown,
+                    "completed",
+                    match key {
+                        "DIRECT" => "pdf-text",
+                        "SCAN" => "paddle-ocr",
+                        "MINERU" => "mineru",
+                        _ => unreachable!(),
+                    },
+                    &format!("{key}MD"),
+                )
+            ),
             stderr: String::new(),
             log_summary: vec![format!("Batch fixture completed {key}")],
         })
@@ -3019,8 +3080,20 @@ impl RunnerCommandExecutor for RetryCollectionExecutor {
             format!("---\nparent_item_key: \"{key}PARENT\"\n---\n\n# {key}\n"),
         )
         .unwrap();
+        let markdown = command.output_dir.join(format!("{key}.md"));
         Ok(RunnerCommandResult {
-            stdout: format!("Uploaded {key}.md to Zotero attachment {key}MD"),
+            stdout: format!(
+                "12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
+                worker_attachment_evidence_payload(
+                    key,
+                    &format!("{key}PARENT"),
+                    &"a".repeat(64),
+                    &markdown,
+                    "completed",
+                    "pdf-text",
+                    &format!("{key}MD"),
+                )
+            ),
             stderr: String::new(),
             log_summary: vec![format!("Retry fixture completed {key}")],
         })
@@ -3667,23 +3740,90 @@ fn collection_snapshot_executor_for_pdf(root: &Path) -> (CollectionSnapshotExecu
     (executor, pdf)
 }
 
+fn worker_attachment_evidence_payload(
+    pdf_attachment_key: &str,
+    parent_item_key: &str,
+    source_sha256: &str,
+    markdown_path: &Path,
+    status: &str,
+    route: &str,
+    markdown_attachment_key: &str,
+) -> serde_json::Value {
+    let artifact_root = markdown_path
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == ".state"))
+        .and_then(Path::parent)
+        .unwrap_or_else(|| markdown_path.parent().unwrap());
+    let artifact_dir = markdown_path.parent().unwrap();
+    let stem = markdown_path.file_stem().unwrap().to_string_lossy();
+    let conversion_evidence = artifact_dir.join(format!("{stem}.conversion-evidence.json"));
+    let route_sidecar = artifact_dir.join(format!("{stem}.route.json"));
+    let publication_evidence = artifact_dir.join(format!("{stem}.publication.json"));
+    fs::write(
+        &conversion_evidence,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": OCR_CONVERSION_EVIDENCE_SCHEMA,
+            "extractionContractVersion": ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION,
+            "sourcePdfKey": pdf_attachment_key,
+            "sourceSha256": source_sha256,
+            "parentItemKey": parent_item_key,
+            "route": route,
+            "pageCount": 1,
+            "selectedPages": [1],
+            "markdownAttachmentKey": markdown_attachment_key,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(&route_sidecar, br#"{"route":"fixture"}"#).unwrap();
+    fs::write(
+        &publication_evidence,
+        br#"{"schema":"publication-extraction-evidence-v2"}"#,
+    )
+    .unwrap();
+    serde_json::json!({
+        "schemaVersion": ZOTERO_WORKER_ATTACHMENT_EVIDENCE_SCHEMA,
+        "conversionEvidenceSchema": OCR_CONVERSION_EVIDENCE_SCHEMA,
+        "conversionEvidenceReference": conversion_evidence.strip_prefix(artifact_root).unwrap().to_string_lossy(),
+        "conversionEvidenceSha256": sha256_file(&conversion_evidence).unwrap(),
+        "extractionContractVersion": ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION,
+        "status": status,
+        "route": route,
+        "pdfAttachmentKey": pdf_attachment_key,
+        "parentItemKey": parent_item_key,
+        "sourceSha256": source_sha256,
+        "pageCount": 1,
+        "selectedPages": [1],
+        "markdownReference": markdown_path.strip_prefix(artifact_root).unwrap().to_string_lossy(),
+        "markdownSha256": sha256_file(markdown_path).unwrap(),
+        "routeSidecarReference": route_sidecar.strip_prefix(artifact_root).unwrap().to_string_lossy(),
+        "routeSidecarSha256": sha256_file(&route_sidecar).unwrap(),
+        "publicationEvidenceReference": publication_evidence.strip_prefix(artifact_root).unwrap().to_string_lossy(),
+        "publicationEvidenceSha256": sha256_file(&publication_evidence).unwrap(),
+        "markdownAttachmentKey": markdown_attachment_key,
+    })
+}
+
 struct DurableCollectionChildExecutor {
     labels: Mutex<Vec<String>>,
     fail_index: bool,
+    source_sha256: String,
 }
 
 impl DurableCollectionChildExecutor {
-    fn new() -> Self {
+    fn new(root: &Path) -> Self {
         Self {
             labels: Mutex::new(Vec::new()),
             fail_index: false,
+            source_sha256: sha256_file(&root.join("zotero/PDFOK/ok.pdf")).unwrap(),
         }
     }
 
-    fn failing_index() -> Self {
+    fn failing_index(root: &Path) -> Self {
         Self {
             labels: Mutex::new(Vec::new()),
             fail_index: true,
+            source_sha256: sha256_file(&root.join("zotero/PDFOK/ok.pdf")).unwrap(),
         }
     }
 
@@ -3713,8 +3853,20 @@ impl RunnerCommandExecutor for DurableCollectionChildExecutor {
                     "---\nparent_item_key: \"PARENT1\"\n---\n\n# Extracted\n",
                 )
                 .unwrap();
+                let markdown = command.output_dir.join("PDFOK.md");
                 Ok(RunnerCommandResult {
-                    stdout: "Uploaded PDFOK.md to Zotero attachment MARKDOWN1".into(),
+                    stdout: format!(
+                        "12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
+                        worker_attachment_evidence_payload(
+                            "PDFOK",
+                            "PARENT1",
+                            &self.source_sha256,
+                            &markdown,
+                            "completed",
+                            "pdf-text",
+                            "MARKDOWN1",
+                        )
+                    ),
                     stderr: String::new(),
                     log_summary: vec!["Single attachment extraction completed".into()],
                 })
@@ -3752,30 +3904,23 @@ impl RunnerCommandExecutor for DurableCollectionChildExecutor {
 
 struct MixedDurableCollectionExecutor {
     calls: Mutex<Vec<String>>,
-    completed_markdown: PathBuf,
     completed_source_sha256: String,
     fail_index_once_parent: Mutex<Option<String>>,
     indexed_markdown_sha256: Mutex<BTreeMap<String, String>>,
+    root: PathBuf,
 }
 
 impl MixedDurableCollectionExecutor {
     fn new(root: &Path) -> Self {
-        let completed_markdown = root.join("already-completed").join("DONE.md");
-        fs::create_dir_all(completed_markdown.parent().unwrap()).unwrap();
-        fs::write(
-            &completed_markdown,
-            "---\nparent_item_key: \"PARENT4\"\n---\n\n# Reused\n",
-        )
-        .unwrap();
         Self {
             calls: Mutex::new(Vec::new()),
-            completed_markdown,
             completed_source_sha256: sha256_file(
                 &root.join("zotero").join("DONE").join("done.pdf"),
             )
             .unwrap(),
             fail_index_once_parent: Mutex::new(None),
             indexed_markdown_sha256: Mutex::new(BTreeMap::new()),
+            root: root.to_path_buf(),
         }
     }
 
@@ -3810,21 +3955,35 @@ impl RunnerCommandExecutor for MixedDurableCollectionExecutor {
                     "DIRECT" => "12:00:00 INFO PLAN DIRECT route=pdf-text pages=8 selected=8 parent_type=book sampled_chars=2000 title=Direct PDF".into(),
                     "SCAN" => "12:00:01 INFO PLAN SCAN route=paddle-ocr pages=20 selected=20 parent_type=book sampled_chars=0 title=Scanned PDF".into(),
                     "MINERU" => "12:00:02 INFO PLAN MINERU route=mineru pages=12 selected=12 parent_type=book sampled_chars=0 title=MinerU PDF".into(),
-                    "DONE" => format!(
-                        "12:00:03 INFO SKIP completed DONE Already completed PDF\n12:00:03 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
-                        serde_json::json!({
-                            "schemaVersion": "zotero-worker-attachment-evidence-v1",
-                            "extractionContractVersion": ZOTERO_WORKER_EXTRACTION_CONTRACT_VERSION,
-                            "status": "already_completed",
-                            "route": "pdf-text",
-                            "pdfAttachmentKey": "DONE",
-                            "parentItemKey": "PARENT4",
-                            "sourceSha256": self.completed_source_sha256.clone(),
-                            "markdownPath": display_path(&self.completed_markdown),
-                            "markdownSha256": sha256_file(&self.completed_markdown).unwrap(),
-                            "markdownAttachmentKey": "MARKDONE",
-                        })
-                    ),
+                    "DONE" => {
+                        let artifact_root = PathBuf::from(
+                            command_env_value(command, "OCR_OUTPUT_ROOT")
+                                .expect("discovery must declare its worker artifact root"),
+                        );
+                        let completed_markdown = artifact_root
+                            .join(".state")
+                            .join("staging")
+                            .join("DONE")
+                            .join("DONE.md");
+                        fs::create_dir_all(completed_markdown.parent().unwrap()).unwrap();
+                        fs::write(
+                            &completed_markdown,
+                            "---\nparent_item_key: \"PARENT4\"\n---\n\n# Reused\n",
+                        )
+                        .unwrap();
+                        format!(
+                            "12:00:03 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
+                            worker_attachment_evidence_payload(
+                                "DONE",
+                                "PARENT4",
+                                &self.completed_source_sha256,
+                                &completed_markdown,
+                                "already_completed",
+                                "pdf-text",
+                                "MARKDONE",
+                            )
+                        )
+                    }
                     "FAIL" => "12:00:04 INFO PLAN FAIL route=pdf-text pages=8 selected=8 parent_type=book sampled_chars=1800 title=Failing PDF".into(),
                     "NOPADDLE" => "12:00:05 INFO PLAN NOPADDLE route=missing-paddleocr-token pages=10 selected=10 parent_type=book sampled_chars=0 title=Paddle credential blocked PDF".into(),
                     other => panic!("unexpected mixed route attachment {other}"),
@@ -3861,8 +4020,33 @@ impl RunnerCommandExecutor for MixedDurableCollectionExecutor {
                     format!("---\nparent_item_key: \"{parent}\"\n---\n\n# {key}\n"),
                 )
                 .unwrap();
+                let markdown = command.output_dir.join(format!("{key}.md"));
+                let source_name = match key {
+                    "DIRECT" => "direct.pdf",
+                    "SCAN" => "scan.pdf",
+                    "MINERU" => "mineru.pdf",
+                    _ => unreachable!(),
+                };
+                let source_sha256 =
+                    sha256_file(&self.root.join("zotero").join(key).join(source_name)).unwrap();
                 Ok(RunnerCommandResult {
-                    stdout: format!("Uploaded {key}.md to Zotero attachment MARK{key}"),
+                    stdout: format!(
+                        "12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
+                        worker_attachment_evidence_payload(
+                            key,
+                            parent,
+                            &source_sha256,
+                            &markdown,
+                            "completed",
+                            match key {
+                                "DIRECT" => "pdf-text",
+                                "SCAN" => "paddle-ocr",
+                                "MINERU" => "mineru",
+                                _ => unreachable!(),
+                            },
+                            &format!("MARK{key}"),
+                        )
+                    ),
                     stderr: String::new(),
                     log_summary: vec!["Single attachment extraction completed".into()],
                 })
@@ -5776,7 +5960,7 @@ fn durable_collection_child_runs_route_extract_index_and_handoff_in_order() {
         .id
         .clone();
     let runner = CommandPipelineRunner::with_book_ocr_conversion_root(
-        DurableCollectionChildExecutor::new(),
+        DurableCollectionChildExecutor::new(&root),
         worker_root,
     );
 
@@ -5990,7 +6174,7 @@ fn durable_collection_index_failure_preserves_extract_and_blocks_handoff() {
         .id
         .clone();
     let runner = CommandPipelineRunner::with_book_ocr_conversion_root(
-        DurableCollectionChildExecutor::failing_index(),
+        DurableCollectionChildExecutor::failing_index(&root),
         worker_root,
     );
 
@@ -6067,7 +6251,7 @@ fn durable_collection_index_failure_preserves_extract_and_blocks_handoff() {
 }
 
 #[test]
-fn durable_collection_missing_extract_artifact_fails_index_without_reextracting() {
+fn durable_collection_missing_extract_artifact_blocks_reuse_before_index() {
     let root = temp_root("durable-collection-missing-extract-artifact");
     let store = BookPipelineStore::for_test(&root);
     let (snapshot_executor, _) = collection_snapshot_executor_for_pdf(&root);
@@ -6081,7 +6265,7 @@ fn durable_collection_missing_extract_artifact_fails_index_without_reextracting(
     )
     .unwrap();
     let runner = CommandPipelineRunner::with_book_ocr_conversion_root(
-        DurableCollectionChildExecutor::new(),
+        DurableCollectionChildExecutor::new(&root),
         fake_zotero_worker_root(&root),
     );
 
@@ -6131,13 +6315,10 @@ fn durable_collection_missing_extract_artifact_fails_index_without_reextracting(
         .iter()
         .find(|child| child.source.selector.as_deref() == Some("PDFOK"))
         .unwrap();
-    assert_eq!(
-        stage_ref(child, "extract").unwrap().status,
-        STATUS_COMPLETED
-    );
+    assert_eq!(stage_ref(child, "extract").unwrap().status, STATUS_BLOCKED);
     assert_eq!(stage_ref(child, "extract").unwrap().attempt, 1);
-    assert_eq!(stage_ref(child, "index").unwrap().status, STATUS_FAILED);
-    assert_eq!(stage_ref(child, "index").unwrap().attempt, 1);
+    assert_eq!(stage_ref(child, "index").unwrap().status, STATUS_PENDING);
+    assert_eq!(stage_ref(child, "index").unwrap().attempt, 0);
     assert_eq!(stage_ref(child, "handoff").unwrap().status, STATUS_PENDING);
     assert!(child
         .last_error
@@ -6166,7 +6347,7 @@ fn durable_collection_blocks_when_frozen_pdf_changes_before_route() {
     )
     .unwrap();
     let runner = CommandPipelineRunner::with_book_ocr_conversion_root(
-        DurableCollectionChildExecutor::new(),
+        DurableCollectionChildExecutor::new(&root),
         fake_zotero_worker_root(&root),
     );
 
@@ -6212,7 +6393,7 @@ fn durable_collection_blocks_handoff_when_indexed_markdown_changes() {
     )
     .unwrap();
     let runner = CommandPipelineRunner::with_book_ocr_conversion_root(
-        DurableCollectionChildExecutor::new(),
+        DurableCollectionChildExecutor::new(&root),
         worker_root,
     );
     run_job_with_handoff(
@@ -6272,12 +6453,13 @@ fn durable_collection_blocks_handoff_when_indexed_markdown_changes() {
         .iter()
         .find(|child| child.source.selector.as_deref() == Some("PDFOK"))
         .unwrap();
-    assert_eq!(stage_ref(child, "index").unwrap().status, STATUS_COMPLETED);
-    assert_eq!(stage_ref(child, "handoff").unwrap().status, STATUS_BLOCKED);
+    assert_eq!(stage_ref(child, "extract").unwrap().status, STATUS_BLOCKED);
+    assert_eq!(stage_ref(child, "index").unwrap().status, STATUS_PENDING);
+    assert_eq!(stage_ref(child, "handoff").unwrap().status, STATUS_PENDING);
     assert!(child
         .last_error
         .as_deref()
-        .is_some_and(|error| error.contains("indexed Markdown")));
+        .is_some_and(|error| error.contains("Markdown")));
     assert!(!child
         .artifacts
         .iter()
@@ -6326,6 +6508,200 @@ fn durable_collection_mineru_route_uses_single_attachment_worker_adapter() {
 }
 
 #[test]
+fn worker_evidence_marker_must_be_the_complete_logger_message() {
+    let inline = "12:00:00 INFO PLAN KEY route=pdf-text title=BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}";
+    let multiline = "12:00:00 INFO PLAN KEY route=pdf-text\nBOOK_PIPELINE_ATTACHMENT_EVIDENCE {}";
+
+    assert!(parse_zotero_worker_attachment_evidence(inline, "KEY")
+        .unwrap()
+        .is_none());
+    assert!(parse_zotero_worker_attachment_evidence(multiline, "KEY")
+        .unwrap()
+        .is_none());
+    assert_eq!(attachment_key_from_worker_evidence_line(inline), None);
+    assert_eq!(attachment_key_from_worker_evidence_line(multiline), None);
+}
+
+#[test]
+fn resume_remote_validation_uses_the_worker_read_only_evidence_command() {
+    struct ValidationExecutor {
+        calls: Mutex<u32>,
+    }
+
+    impl RunnerCommandExecutor for ValidationExecutor {
+        fn execute(&self, command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+            assert_eq!(command.label, "Zotero worker evidence validation");
+            assert!(command
+                .args
+                .iter()
+                .any(|arg| arg == "--verify-uploaded-evidence"));
+            assert!(has_arg_pair(&command.args, "--attachment-key", "DONE"));
+            assert!(command_env_value(command, "OCR_OUTPUT_ROOT").is_some());
+            *self.calls.lock().unwrap() += 1;
+            Ok(RunnerCommandResult::default())
+        }
+    }
+
+    let root = temp_root("worker-evidence-remote-validation");
+    let store = BookPipelineStore::for_test(&root);
+    let snapshot_executor = CollectionSnapshotExecutor::mixed_routes(&root);
+    let queued = queue_job_with_translation_intent_and_executor(
+        &store,
+        &snapshot_executor,
+        real_collection_source(),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        fast_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let child = queued
+        .children
+        .iter()
+        .find(|child| child.source.selector.as_deref() == Some("DONE"))
+        .unwrap();
+    let artifact_root = root.join("worker-output");
+    fs::create_dir_all(&artifact_root).unwrap();
+    let markdown = artifact_root.join("DONE.md");
+    fs::write(
+        &markdown,
+        "---\nparent_item_key: \"PARENT4\"\n---\n\n# Complete\n",
+    )
+    .unwrap();
+    let fixture = worker_attachment_evidence_payload(
+        "DONE",
+        "PARENT4",
+        &sha256_file(&root.join("zotero/DONE/done.pdf")).unwrap(),
+        &markdown,
+        "already_completed",
+        "pdf-text",
+        "MARKDONE",
+    );
+    let event = format!("12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {fixture}");
+    let evidence = parse_zotero_worker_attachment_evidence(&event, "DONE")
+        .unwrap()
+        .unwrap();
+    let artifact =
+        reused_markdown_artifact_from_evidence(child, &evidence, &artifact_root).unwrap();
+    let executor = ValidationExecutor {
+        calls: Mutex::new(0),
+    };
+
+    validate_worker_evidence_with_executor(
+        &executor,
+        child,
+        &artifact,
+        &fake_zotero_worker_root(&root),
+    )
+    .unwrap();
+
+    assert_eq!(*executor.calls.lock().unwrap(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn worker_validation_exit_codes_distinguish_mismatch_from_retryable_transport() {
+    struct FailingValidationExecutor {
+        error: String,
+    }
+
+    impl RunnerCommandExecutor for FailingValidationExecutor {
+        fn execute(&self, _command: &RunnerCommand) -> Result<RunnerCommandResult, String> {
+            Err(self.error.clone())
+        }
+    }
+
+    let root = temp_root("worker-evidence-validation-outcomes");
+    let store = BookPipelineStore::for_test(&root);
+    let snapshot_executor = CollectionSnapshotExecutor::mixed_routes(&root);
+    let queued = queue_job_with_translation_intent_and_executor(
+        &store,
+        &snapshot_executor,
+        real_collection_source(),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        fast_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let child = queued
+        .children
+        .iter()
+        .find(|child| child.source.selector.as_deref() == Some("DONE"))
+        .unwrap();
+    let artifact_root = root.join("worker-output");
+    fs::create_dir_all(&artifact_root).unwrap();
+    let markdown = artifact_root.join("DONE.md");
+    fs::write(
+        &markdown,
+        "---\nparent_item_key: \"PARENT4\"\n---\n\n# Complete\n",
+    )
+    .unwrap();
+    let fixture = worker_attachment_evidence_payload(
+        "DONE",
+        "PARENT4",
+        &sha256_file(&root.join("zotero/DONE/done.pdf")).unwrap(),
+        &markdown,
+        "already_completed",
+        "pdf-text",
+        "MARKDONE",
+    );
+    let event = format!("12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {fixture}");
+    let evidence = parse_zotero_worker_attachment_evidence(&event, "DONE")
+        .unwrap()
+        .unwrap();
+    let artifact =
+        reused_markdown_artifact_from_evidence(child, &evidence, &artifact_root).unwrap();
+
+    let mismatch = validate_worker_evidence_with_executor(
+        &FailingValidationExecutor {
+            error: "Zotero worker evidence validation exited with status 2: BOOK_PIPELINE_EVIDENCE_MISMATCH attachment_mismatch".into(),
+        },
+        child,
+        &artifact,
+        &fake_zotero_worker_root(&root),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        mismatch,
+        WorkerEvidenceValidationError::Mismatch(_)
+    ));
+
+    let retryable = validate_worker_evidence_with_executor(
+        &FailingValidationExecutor {
+            error: "Zotero worker evidence validation exited with status 75: BOOK_PIPELINE_EVIDENCE_RETRYABLE remote_validation_unavailable".into(),
+        },
+        child,
+        &artifact,
+        &fake_zotero_worker_root(&root),
+    )
+    .unwrap_err();
+    assert_eq!(
+        retryable,
+        WorkerEvidenceValidationError::Retryable(
+            "Zotero worker evidence validation is temporarily unavailable.".into()
+        )
+    );
+
+    let argparse_exit = validate_worker_evidence_with_executor(
+        &FailingValidationExecutor {
+            error: "Zotero worker evidence validation exited with status 2: usage: zotero_llm_worker.py [options]".into(),
+        },
+        child,
+        &artifact,
+        &fake_zotero_worker_root(&root),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        argparse_exit,
+        WorkerEvidenceValidationError::Retryable(_)
+    ));
+    assert!(worker_evidence_mismatch_code(
+        "wrapper failed: Zotero worker evidence validation exited with status 2: BOOK_PIPELINE_EVIDENCE_MISMATCH attachment_mismatch"
+    )
+    .is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn completed_worker_evidence_rejects_another_extraction_contract() {
     let root = temp_root("completed-worker-contract-mismatch");
     let store = BookPipelineStore::for_test(&root);
@@ -6350,28 +6726,155 @@ fn completed_worker_evidence_rejects_another_extraction_contract() {
         "---\nparent_item_key: \"PARENT4\"\n---\n\n# Legacy\n",
     )
     .unwrap();
-    let payload = format!(
-        "BOOK_PIPELINE_ATTACHMENT_EVIDENCE {}",
-        serde_json::json!({
-            "schemaVersion": ZOTERO_WORKER_ATTACHMENT_EVIDENCE_SCHEMA,
-            "extractionContractVersion": "zotero-worker-extraction-legacy",
-            "status": "already_completed",
-            "route": "pdf-text",
-            "pdfAttachmentKey": "DONE",
-            "parentItemKey": "PARENT4",
-            "sourceSha256": sha256_file(&root.join("zotero/DONE/done.pdf")).unwrap(),
-            "markdownPath": display_path(&markdown),
-            "markdownSha256": sha256_file(&markdown).unwrap(),
-            "markdownAttachmentKey": "MARKDONE",
-        })
+    let mut fixture = worker_attachment_evidence_payload(
+        "DONE",
+        "PARENT4",
+        &sha256_file(&root.join("zotero/DONE/done.pdf")).unwrap(),
+        &markdown,
+        "already_completed",
+        "pdf-text",
+        "MARKDONE",
     );
+    fixture["extractionContractVersion"] = serde_json::json!("zotero-worker-extraction-legacy");
+    let payload = format!("12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {fixture}");
     let evidence = parse_zotero_worker_attachment_evidence(&payload, "DONE")
         .unwrap()
         .unwrap();
 
-    let error = reused_markdown_artifact_from_evidence(child, &evidence).unwrap_err();
+    let error =
+        reused_markdown_artifact_from_evidence(child, &evidence, markdown.parent().unwrap())
+            .unwrap_err();
 
     assert!(error.contains("extraction contract"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completed_worker_evidence_rejects_partial_coverage_and_markdown_drift() {
+    let root = temp_root("completed-worker-coverage-drift");
+    let store = BookPipelineStore::for_test(&root);
+    let snapshot_executor = CollectionSnapshotExecutor::mixed_routes(&root);
+    let queued = queue_job_with_translation_intent_and_executor(
+        &store,
+        &snapshot_executor,
+        real_collection_source(),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        fast_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let child = queued
+        .children
+        .iter()
+        .find(|child| child.source.selector.as_deref() == Some("DONE"))
+        .unwrap();
+    let markdown = root.join("completed.md");
+    fs::write(
+        &markdown,
+        "---\nparent_item_key: \"PARENT4\"\n---\n\n# Complete\n",
+    )
+    .unwrap();
+    let mut fixture = worker_attachment_evidence_payload(
+        "DONE",
+        "PARENT4",
+        &sha256_file(&root.join("zotero/DONE/done.pdf")).unwrap(),
+        &markdown,
+        "completed",
+        "pdf-text",
+        "MARKDONE",
+    );
+    fixture["pageCount"] = serde_json::json!(2);
+    let payload = format!("12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {fixture}");
+    let evidence = parse_zotero_worker_attachment_evidence(&payload, "DONE")
+        .unwrap()
+        .unwrap();
+
+    assert!(completed_markdown_artifact_from_evidence(
+        child,
+        &evidence,
+        markdown.parent().unwrap(),
+    )
+    .is_err());
+
+    fixture["pageCount"] = serde_json::json!(1);
+    let payload = format!("12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {fixture}");
+    let evidence = parse_zotero_worker_attachment_evidence(&payload, "DONE")
+        .unwrap()
+        .unwrap();
+    fs::write(&markdown, "drifted private markdown").unwrap();
+
+    let error =
+        completed_markdown_artifact_from_evidence(child, &evidence, markdown.parent().unwrap())
+            .unwrap_err();
+    assert_eq!(
+        error,
+        "Completed worker Markdown hash does not match the persisted evidence."
+    );
+    assert!(!error.contains("drifted private markdown"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completed_worker_evidence_rejects_root_escape_and_companion_drift_on_resume() {
+    let root = temp_root("completed-worker-root-and-resume");
+    let store = BookPipelineStore::for_test(&root);
+    let snapshot_executor = CollectionSnapshotExecutor::mixed_routes(&root);
+    let queued = queue_job_with_translation_intent_and_executor(
+        &store,
+        &snapshot_executor,
+        real_collection_source(),
+        MODE_CONVERT_THEN_TRANSLATE.into(),
+        fast_translation_intent(),
+        BookPipelinePreviewConfig::default(),
+    )
+    .unwrap();
+    let child = queued
+        .children
+        .iter()
+        .find(|child| child.source.selector.as_deref() == Some("DONE"))
+        .unwrap();
+    let markdown = root.join("resume.md");
+    fs::write(
+        &markdown,
+        "---\nparent_item_key: \"PARENT4\"\n---\n\n# Complete\n",
+    )
+    .unwrap();
+    let fixture = worker_attachment_evidence_payload(
+        "DONE",
+        "PARENT4",
+        &sha256_file(&root.join("zotero/DONE/done.pdf")).unwrap(),
+        &markdown,
+        "completed",
+        "pdf-text",
+        "MARKDONE",
+    );
+
+    let mut escaped = fixture.clone();
+    escaped["markdownReference"] = serde_json::json!("../outside.md");
+    let escaped_payload = format!("12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {escaped}");
+    let escaped_evidence = parse_zotero_worker_attachment_evidence(&escaped_payload, "DONE")
+        .unwrap()
+        .unwrap();
+    let escape_error = completed_markdown_artifact_from_evidence(
+        child,
+        &escaped_evidence,
+        markdown.parent().unwrap(),
+    )
+    .unwrap_err();
+    assert!(escape_error.contains("unsafe artifact reference"));
+
+    let payload = format!("12:00:00 INFO BOOK_PIPELINE_ATTACHMENT_EVIDENCE {fixture}");
+    let evidence = parse_zotero_worker_attachment_evidence(&payload, "DONE")
+        .unwrap()
+        .unwrap();
+    let artifact =
+        completed_markdown_artifact_from_evidence(child, &evidence, markdown.parent().unwrap())
+            .unwrap();
+    fs::write(root.join("resume.route.json"), b"drifted private sidecar").unwrap();
+
+    let resume_error = validate_persisted_worker_evidence_artifact(child, &artifact).unwrap_err();
+    assert!(resume_error.contains("route sidecar hash"));
+    assert!(!resume_error.contains("drifted private sidecar"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -6784,7 +7287,16 @@ fn durable_collection_user_run_and_retry_complete_the_searchable_end_to_end_chai
     assert_eq!(first_run.membership.as_ref(), Some(&frozen_membership));
     assert!(first_run.collection_items.is_empty());
     assert_eq!(first_run.summary.total, 4);
-    assert_eq!(first_run.summary.failed, 1);
+    assert_eq!(
+        first_run.summary.failed,
+        1,
+        "unexpected first-run child states: {:?}",
+        first_run
+            .children
+            .iter()
+            .map(|child| (&child.source.selector, &child.status, &child.last_error))
+            .collect::<Vec<_>>()
+    );
     for key in ["DIRECT", "MINERU", "DONE"] {
         let child = first_run
             .children
@@ -6862,6 +7374,135 @@ fn durable_collection_user_run_and_retry_complete_the_searchable_end_to_end_chai
         2
     );
     assert_eq!(*snapshot_executor.calls.lock().unwrap(), 1);
+
+    struct RetryableEvidenceValidationRunner;
+
+    impl PipelineRunner for RetryableEvidenceValidationRunner {
+        fn run(&self, _job: &BookPipelineJob, _output_dir: &Path) -> Result<RunnerOutput, String> {
+            panic!("a completed job must not rerun extraction")
+        }
+
+        fn validate_worker_evidence(
+            &self,
+            _job: &BookPipelineJob,
+            _child: &BookPipelineChildJob,
+            _markdown: &BookPipelineArtifact,
+        ) -> Result<(), WorkerEvidenceValidationError> {
+            Err(WorkerEvidenceValidationError::Retryable(
+                "Zotero worker evidence validation is temporarily unavailable.".into(),
+            ))
+        }
+    }
+
+    let completed_children = serde_json::to_value(&completed.children).unwrap();
+    let unavailable = run_job_to_quiescence_with_handoff(
+        &restarted,
+        &RetryableEvidenceValidationRunner,
+        &FakeTranslationHandoffRunner,
+        &queued.id,
+        Some(&repo_root),
+    )
+    .unwrap();
+    assert_eq!(unavailable.status, STATUS_FAILED);
+    assert_eq!(
+        unavailable.current_step,
+        "OCR evidence validation temporarily unavailable"
+    );
+    assert_eq!(
+        serde_json::to_value(&unavailable.children).unwrap(),
+        completed_children,
+        "transport errors must preserve every completed stage and artifact"
+    );
+
+    let recovered = run_job_to_quiescence_with_handoff(
+        &restarted,
+        &runner,
+        &FakeTranslationHandoffRunner,
+        &queued.id,
+        Some(&repo_root),
+    )
+    .unwrap();
+    assert_eq!(recovered.status, completed.status);
+    assert!(recovered.last_error.is_none());
+
+    let mut missing_contract = recovered.clone();
+    let missing_contract_child = missing_contract
+        .children
+        .iter_mut()
+        .find(|child| child.source.selector.as_deref() == Some("DONE"))
+        .unwrap();
+    missing_contract_child
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.kind == "markdown")
+        .unwrap()
+        .input_hashes
+        .remove("workerEvidenceContract");
+    let missing_error = validate_completed_worker_evidence_for_resume(
+        &mut missing_contract,
+        &ArtifactFixtureRunner,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        missing_error,
+        WorkerEvidenceValidationError::Mismatch(_)
+    ));
+    let missing_contract_child = missing_contract
+        .children
+        .iter()
+        .find(|child| child.source.selector.as_deref() == Some("DONE"))
+        .unwrap();
+    assert_eq!(
+        stage_ref(missing_contract_child, "extract").unwrap().status,
+        STATUS_BLOCKED
+    );
+
+    let done = completed
+        .children
+        .iter()
+        .find(|child| child.source.selector.as_deref() == Some("DONE"))
+        .unwrap();
+    let markdown = done
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "markdown")
+        .unwrap();
+    let artifact_root = persisted_worker_artifact_root(markdown).unwrap();
+    let route_sidecar =
+        artifact_root.join(markdown.input_hashes.get("routeSidecarReference").unwrap());
+    fs::write(route_sidecar, "drifted route sidecar").unwrap();
+
+    let drifted = run_job_to_quiescence_with_handoff(
+        &restarted,
+        &runner,
+        &FakeTranslationHandoffRunner,
+        &queued.id,
+        Some(&repo_root),
+    )
+    .unwrap();
+
+    for key in ["DIRECT", "SCAN", "MINERU"] {
+        let child = drifted
+            .children
+            .iter()
+            .find(|child| child.source.selector.as_deref() == Some(key))
+            .unwrap();
+        assert_eq!(
+            stage_ref(child, "extract").unwrap().status,
+            STATUS_COMPLETED
+        );
+    }
+    let done = drifted
+        .children
+        .iter()
+        .find(|child| child.source.selector.as_deref() == Some("DONE"))
+        .unwrap();
+    assert_eq!(stage_ref(done, "extract").unwrap().status, STATUS_BLOCKED);
+    assert_eq!(stage_ref(done, "index").unwrap().status, STATUS_PENDING);
+    assert!(stage_ref(done, "extract")
+        .unwrap()
+        .input_hashes
+        .contains_key("workerEvidenceInvalidation"));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -8206,8 +8847,9 @@ fn zotero_discovery_parses_worker_dry_run_plan_sources() {
         .find(|source| source.selector.as_deref() == Some("DIRECT1"))
         .unwrap();
     assert_eq!(direct.kind, "zotero_attachment");
-    assert_eq!(direct.title.as_deref(), Some("Born Digital Book"));
+    assert_eq!(direct.title, None);
     let direct_item = &direct.fake_zotero_items.as_ref().unwrap()[0];
+    assert_eq!(direct_item.title, "DIRECT1");
     assert!(direct_item.has_text_layer);
     assert!(!direct_item.scanned);
 
@@ -8457,9 +9099,7 @@ fn zotero_route_preview_uses_worker_dry_run_policy() {
             && !item.can_run
             && item.blocked_reason.is_some()
     }));
-    assert!(route.iter().any(|item| {
-        item.id == "DONE" && item.route_kind == "already_converted" && !item.can_run
-    }));
+    assert!(route.iter().all(|item| item.id != "DONE"));
 
     let route_with_remote_ocr = preview_zotero_route_from_worker(
         &ZoteroRoutePreviewExecutor,
@@ -8520,14 +9160,14 @@ fn zotero_filter_queue_discovers_real_children_from_worker() {
     assert_eq!(job.kind, "collection");
     assert_eq!(job.status, STATUS_READY);
     let route_ids: Vec<&str> = job.route.iter().map(|item| item.id.as_str()).collect();
-    assert_eq!(route_ids, ["DIRECT", "SCAN", "MINERU", "DIRTY", "DONE"]);
+    assert_eq!(route_ids, ["DIRECT", "SCAN", "MINERU", "DIRTY"]);
     assert!(job.route.iter().all(|item| !item.id.contains("query=")));
     let scan = job.route.iter().find(|item| item.id == "SCAN").unwrap();
     assert_eq!(scan.route_kind, "direct_text");
     assert!(scan.can_run);
     assert_eq!(scan.route_override.as_deref(), Some("direct"));
 
-    assert_eq!(job.children.len(), 5);
+    assert_eq!(job.children.len(), 4);
     for child in &job.children {
         assert_eq!(child.source.kind, "zotero_attachment");
         let selector = child.source.selector.as_deref().unwrap();
@@ -8582,7 +9222,7 @@ fn zotero_filter_queue_with_no_matches_blocks_without_demo_children() {
 }
 
 #[test]
-fn zotero_conversion_records_markdown_artifact_and_upload_key() {
+fn zotero_conversion_records_upload_key_and_revalidates_companions_before_resume() {
     let root = temp_root("zotero-conversion-success");
     let worker_root = fake_zotero_worker_root(&root);
     let store = BookPipelineStore::for_test(&root);
@@ -8595,15 +9235,9 @@ fn zotero_conversion_records_markdown_artifact_and_upload_key() {
     .unwrap();
     assert_eq!(job.status, STATUS_READY);
 
-    let completed = run_job(
-        &store,
-        &CommandPipelineRunner::with_book_ocr_conversion_root(
-            ZoteroConversionExecutor,
-            worker_root,
-        ),
-        &job.id,
-    )
-    .unwrap();
+    let runner =
+        CommandPipelineRunner::with_book_ocr_conversion_root(ZoteroConversionExecutor, worker_root);
+    let completed = run_job(&store, &runner, &job.id).unwrap();
 
     assert_eq!(completed.status, STATUS_COMPLETED);
     assert_eq!(completed.current_step, "Completed");
@@ -8626,6 +9260,33 @@ fn zotero_conversion_records_markdown_artifact_and_upload_key() {
         .log_summary
         .iter()
         .any(|line| line.contains("Zotero Markdown attachment recorded: MDKEY123")));
+    let artifact_root = persisted_worker_artifact_root(markdown).unwrap();
+    let route_sidecar =
+        artifact_root.join(markdown.input_hashes.get("routeSidecarReference").unwrap());
+    fs::write(&route_sidecar, b"drifted companion bytes").unwrap();
+
+    let blocked = run_job(&store, &runner, &job.id).unwrap();
+
+    assert_eq!(blocked.status, STATUS_BLOCKED);
+    assert!(blocked
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.contains("route sidecar hash")));
+    assert!(!blocked
+        .last_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("drifted companion bytes"));
+    assert_eq!(child_stage_status(&blocked, "extract"), STATUS_BLOCKED);
+    assert_eq!(child_stage_status(&blocked, "index"), STATUS_PENDING);
+    let persisted = store
+        .load()
+        .unwrap()
+        .jobs
+        .into_iter()
+        .find(|candidate| candidate.id == job.id)
+        .unwrap();
+    assert_eq!(persisted.status, STATUS_BLOCKED);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -8923,7 +9584,7 @@ fn item_scoped_index_retry_does_not_rerun_extraction() {
 }
 
 #[test]
-fn zotero_preview_reconciles_completed_and_changed_fingerprints() {
+fn zotero_preview_keeps_only_safe_fingerprints_from_route_plans() {
     let root = temp_root("zotero-fingerprint-preview");
     let worker_root = fake_zotero_worker_root(&root);
     let source = BookPipelineSource {
@@ -8951,11 +9612,10 @@ fn zotero_preview_reconciles_completed_and_changed_fingerprints() {
     )
     .unwrap();
 
-    let current = route.iter().find(|item| item.id == "CURRENT").unwrap();
-    assert_eq!(current.route_kind, "already_converted");
-    assert!(!current.can_run);
-    assert!(current.source_ref.contains("/tmp/current.md"));
-    assert!(current.source_ref.contains("source_md5=aaa111"));
+    assert!(route.iter().all(|item| item.id != "CURRENT"));
+    assert!(route
+        .iter()
+        .all(|item| !item.source_ref.contains("/tmp/current.md")));
 
     let missing_upload = route.iter().find(|item| item.id == "MISSING").unwrap();
     assert_eq!(missing_upload.route_kind, "direct_text");

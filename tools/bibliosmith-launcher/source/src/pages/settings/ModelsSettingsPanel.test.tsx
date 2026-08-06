@@ -70,9 +70,10 @@ describe("ModelsSettingsPanel", () => {
     const user = userEvent.setup();
     render(<ModelsSettingsPanel locale="en" />);
 
-    await waitFor(() => expect(api.getModelCatalog).toHaveBeenCalled());
     const picker = screen.getByRole("combobox", { name: "Translation model" });
-    const brand = screen.getByRole("group", { name: "火山方舟 · Doubao" });
+    const brand = await screen.findByRole("group", {
+      name: "火山方舟 · Doubao",
+    });
     const model = within(brand).getByLabelText("Model");
     expect(model.tagName).toBe("INPUT");
     expect(
@@ -102,8 +103,7 @@ describe("ModelsSettingsPanel", () => {
     const user = userEvent.setup();
     render(<ModelsSettingsPanel locale="en" />);
 
-    await waitFor(() => expect(api.getModelCatalog).toHaveBeenCalled());
-    const brand = screen.getByRole("group", {
+    const brand = await screen.findByRole("group", {
       name: "火山方舟 · Doubao",
     });
     const model = within(brand).getByLabelText("Model") as HTMLInputElement;
@@ -118,10 +118,9 @@ describe("ModelsSettingsPanel", () => {
     const user = userEvent.setup();
     render(<ModelsSettingsPanel locale="en" />);
 
-    await waitFor(() => expect(api.getModelCatalog).toHaveBeenCalled());
     const picker = screen.getByRole("combobox", { name: "Translation model" });
     const doubaoModel = within(
-      screen.getByRole("group", { name: "火山方舟 · Doubao" }),
+      await screen.findByRole("group", { name: "火山方舟 · Doubao" }),
     ).getByLabelText("Model") as HTMLInputElement;
     expect(screen.queryByLabelText("Workspace ID (optional)")).toBeNull();
     await user.clear(doubaoModel);
@@ -160,12 +159,11 @@ describe("ModelsSettingsPanel", () => {
     const user = userEvent.setup();
     render(<ModelsSettingsPanel locale="en" />);
 
-    await waitFor(() => expect(api.getModelCatalog).toHaveBeenCalled());
     await user.selectOptions(
       screen.getByRole("combobox", { name: "Translation model" }),
       "qwen:payg",
     );
-    const brand = screen.getByRole("group", {
+    const brand = await screen.findByRole("group", {
       name: "阿里云百炼 · Qwen",
     });
     const workspace = within(brand).getByLabelText("Workspace ID (optional)");

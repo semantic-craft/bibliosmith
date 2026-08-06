@@ -25,6 +25,7 @@ from zotero_llm_worker import (  # noqa: E402
     get_config,
     md5_file,
     process_mineru_route,
+    reconcile_staged_conversion,
     route_attachment,
     source_key_from_provenance_note,
     strict_mineru_source_coordinates,
@@ -32,7 +33,7 @@ from zotero_llm_worker import (  # noqa: E402
 )
 
 
-def write_mineru_publication_evidence(result: Path) -> None:
+def write_mineru_publication_evidence(result: Path, pages: list[int]) -> None:
     lines = result.read_text(encoding="utf-8").splitlines()
     result.with_suffix(".publication.json").write_text(
         json.dumps(
@@ -44,7 +45,7 @@ def write_mineru_publication_evidence(result: Path) -> None:
                         "path": result.name,
                         "startLine": 1,
                         "endLine": max(1, len(lines)),
-                        "pages": [],
+                        "pages": pages,
                         "kind": "mineru_part_markdown",
                         "sha256": hashlib.sha256(result.read_bytes()).hexdigest(),
                     }
@@ -65,6 +66,44 @@ def write_mineru_publication_evidence(result: Path) -> None:
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def commit_bound_evidence(
+    state: StateDB,
+    attachment: Attachment,
+    markdown: Path,
+    *,
+    route: str = "pdf-text",
+    page_count: int = 1,
+) -> None:
+    sidecar = markdown.with_suffix(".jsonl")
+    sidecar.write_text('{"route":"fixture"}\n', encoding="utf-8")
+    publication = markdown.with_suffix(".publication.json")
+    publication.write_text('{"schema":"publication-extraction-evidence-v2"}\n', encoding="utf-8")
+    source_md5 = md5_file(attachment.path)
+    evidence = state.commit_conversion_evidence(
+        attachment=attachment,
+        source_md5=source_md5,
+        route=route,
+        page_count=page_count,
+        selected_pages=range(1, page_count + 1),
+        markdown_path=markdown,
+        sidecar_path=sidecar,
+        publication_evidence_path=publication,
+    )
+    upload_owner_token = state.claim_upload(
+        pdf_key=attachment.key,
+        source_md5=source_md5,
+        evidence=evidence,
+    )
+    state.bind_markdown_attachment(
+        attachment=attachment,
+        source_md5=source_md5,
+        evidence=evidence,
+        markdown_attachment_key="MDKEY123",
+        status="completed",
+        upload_owner_token=upload_owner_token,
     )
 
 
@@ -250,6 +289,7 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             config.output_root = root / "output"
             config.mineru_language = "latin"
             state = StateDB(root / "state.sqlite3")
+            source_md5 = md5_file(source)
 
             def fake_run(command: list[str], **_: object) -> SimpleNamespace:
                 output_dir = Path(command[command.index("--output-dir") + 1])
@@ -274,7 +314,7 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                     "![Figure](.mineru_batches/batch-1/part-1/images/figure.png)\n",
                     encoding="utf-8",
                 )
-                write_mineru_publication_evidence(result)
+                write_mineru_publication_evidence(result, [1, 2])
                 (result.parent / "mineru_manifest.json").write_text(
                     '{"model_version":"vlm"}\n', encoding="utf-8"
                 )
@@ -285,7 +325,7 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                     attachment=attachment,
                     config=config,
                     state=state,
-                    source_md5="fixture-md5",
+                    source_md5=source_md5,
                     page_count=2,
                     pages=[1, 2],
                     route_reason="forced by test",
@@ -294,7 +334,7 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                 )
 
             self.assertEqual("local_complete", status)
-            row = state.document(attachment.key, "fixture-md5")
+            row = state.document(attachment.key, source_md5)
             assert row is not None
             self.assertEqual("mineru", row["route"])
             markdown = Path(row["output_path"])
@@ -333,6 +373,19 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                 )
             )
 
+            (artifact_dir / "mineru_manifest.json").write_text(
+                '{"model_version":"drifted"}\n', encoding="utf-8"
+            )
+            local = unittest.mock.Mock()
+            local.get_pdf_attachment.return_value = attachment
+            with (
+                patch("zotero_llm_worker.pdf_page_count", return_value=2),
+                patch("zotero_llm_worker.ZoteroWebClient") as web_client_class,
+                self.assertRaisesRegex(Exception, "artifact_drift"),
+            ):
+                upload_test(config, state, local, attachment.key)
+            web_client_class.assert_not_called()
+
     def test_upload_test_promotes_a_complete_mineru_artifact_to_handoff_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -349,7 +402,10 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                 result = output_dir / "document" / "full.md"
                 result.parent.mkdir(parents=True)
                 result.write_text("# Complete MinerU result\n", encoding="utf-8")
-                write_mineru_publication_evidence(result)
+                write_mineru_publication_evidence(result, [1, 2, 3])
+                (result.parent / "mineru_manifest.json").write_text(
+                    '{"model_version":"vlm"}\n', encoding="utf-8"
+                )
                 return SimpleNamespace(returncode=0)
 
             with patch("zotero_llm_worker.subprocess.run", side_effect=fake_run):
@@ -372,7 +428,7 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                 patch("zotero_llm_worker.pdf_page_count", return_value=3),
                 patch("zotero_llm_worker.ZoteroWebClient") as web_client_class,
             ):
-                web_client_class.return_value.create_markdown_attachment.return_value = (
+                web_client_class.return_value.create_markdown_attachment_item.return_value = (
                     "MDKEY123"
                 )
                 upload_test(config, state, local, attachment.key)
@@ -382,7 +438,10 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             self.assertEqual("completed", completed["status"] if completed else None)
             self.assertEqual("mineru", completed["route"] if completed else None)
 
-            with self.assertLogs(level="INFO") as logs:
+            with (
+                patch("zotero_llm_worker.pdf_page_count", return_value=3),
+                self.assertLogs(level="INFO") as logs,
+            ):
                 emit_attachment_evidence(
                     attachment=attachment,
                     state=state,
@@ -399,9 +458,7 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             self.assertEqual("mineru", payload["route"])
             self.assertEqual("MDKEY123", payload["markdownAttachmentKey"])
 
-    def assert_upload_test_keeps_mineru_sidecar_partial(
-        self, sidecar: dict[str, object]
-    ) -> None:
+    def test_mineru_commits_producer_reported_coverage_instead_of_requested_pages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "source.pdf"
@@ -410,58 +467,39 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             config = get_config()
             config.output_root = root / "output"
             state = StateDB(root / "state.sqlite3")
-            staging = config.output_root / ".state" / "staging" / attachment.key
-            staging.mkdir(parents=True)
-            markdown = staging / "source.mineru.md"
-            markdown.write_text(
-                "# MinerU result\n\n"
-                "<!-- page: 1 -->\n\n"
-                "<!-- page: 2 -->\n\n"
-                "<!-- page: 3 -->\n",
-                encoding="utf-8",
-            )
-            markdown.with_suffix(".jsonl").write_text(
-                json.dumps(sidecar),
-                encoding="utf-8",
-            )
-            local = unittest.mock.Mock()
-            local.get_pdf_attachment.return_value = attachment
 
-            with (
-                patch("zotero_llm_worker.pdf_page_count", return_value=3),
-                patch("zotero_llm_worker.ZoteroWebClient") as web_client_class,
-            ):
-                web_client_class.return_value.create_markdown_attachment.return_value = (
-                    "MDKEY123"
+            def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+                output_dir = Path(command[command.index("--output-dir") + 1])
+                result = output_dir / "document" / "full.md"
+                result.parent.mkdir(parents=True)
+                result.write_text("# Partial MinerU result\n", encoding="utf-8")
+                write_mineru_publication_evidence(result, [1, 3])
+                (result.parent / "mineru_manifest.json").write_text(
+                    '{"model_version":"vlm"}\n', encoding="utf-8"
                 )
-                upload_test(config, state, local, attachment.key)
+                return SimpleNamespace(returncode=0)
 
-            source_md5 = md5_file(source)
-            self.assertIsNone(state.completed(attachment.key, source_md5))
-            row = state.document(attachment.key, source_md5)
-            self.assertIsNotNone(row)
-            self.assertEqual("uploaded_partial", row["status"] if row else None)
-            self.assertEqual("mineru", row["route"] if row else None)
+            with patch("zotero_llm_worker.subprocess.run", side_effect=fake_run):
+                status = process_mineru_route(
+                    attachment=attachment,
+                    config=config,
+                    state=state,
+                    source_md5=md5_file(source),
+                    page_count=3,
+                    pages=[1, 2, 3],
+                    route_reason="partial test",
+                    no_upload=True,
+                    deadline=time.time() + 30,
+                )
 
-    def test_upload_test_keeps_an_invalid_mineru_sidecar_partial_even_with_markdown_pages(
-        self,
-    ) -> None:
-        self.assert_upload_test_keeps_mineru_sidecar_partial(
-            {
-                "source_pdf_key": "KXPSMW4C",
-                "route": "mineru",
-                "pages": [1, {"page": 2}, 3],
-            }
-        )
-
-    def test_upload_test_keeps_a_mismatched_mineru_sidecar_partial(self) -> None:
-        self.assert_upload_test_keeps_mineru_sidecar_partial(
-            {
-                "source_pdf_key": "OTHERKEY",
-                "route": "mineru",
-                "pages": [1, 2, 3],
-            }
-        )
+            outcome = reconcile_staged_conversion(
+                attachment=attachment,
+                state=state,
+                page_count=3,
+            )
+            self.assertEqual("local_partial", status)
+            self.assertTrue(outcome.accepted)
+            self.assertEqual((1, 3), outcome.selected_pages)
 
     def test_completed_worker_evidence_binds_source_markdown_and_zotero_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -482,18 +520,12 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                 content_type="application/pdf",
             )
             state = StateDB(root / "state.sqlite3")
-            source_md5 = md5_file(source)
-            state.upsert_document(
-                attachment=attachment,
-                source_md5=source_md5,
-                route="pdf-text",
-                status="completed",
-                page_count=1,
-                output_path=markdown,
-                zotero_attachment_key="MDKEY123",
-            )
+            commit_bound_evidence(state, attachment, markdown)
 
-            with self.assertLogs(level="INFO") as logs:
+            with (
+                patch("zotero_llm_worker.pdf_page_count", return_value=1),
+                self.assertLogs(level="INFO") as logs,
+            ):
                 emit_attachment_evidence(
                     attachment=attachment,
                     state=state,
@@ -512,6 +544,8 @@ class ZoteroTagPolicyTests(unittest.TestCase):
             )
             self.assertEqual(64, len(payload["sourceSha256"]))
             self.assertEqual(64, len(payload["markdownSha256"]))
+            self.assertEqual(64, len(payload["conversionEvidenceSha256"]))
+            self.assertEqual([1], payload["selectedPages"])
 
     def test_completed_worker_evidence_rejects_missing_extraction_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -532,23 +566,21 @@ class ZoteroTagPolicyTests(unittest.TestCase):
                 content_type="application/pdf",
             )
             state = StateDB(root / "state.sqlite3")
+            commit_bound_evidence(state, attachment, markdown)
             source_md5 = md5_file(source)
-            state.upsert_document(
-                attachment=attachment,
-                source_md5=source_md5,
-                route="pdf-text",
-                status="completed",
-                page_count=1,
-                output_path=markdown,
-                zotero_attachment_key="MDKEY123",
-            )
+            raw = state.conversion_evidence_json(attachment.key, source_md5)
+            evidence = json.loads(raw or "{}")
+            evidence["extractionContractVersion"] = None
             state.conn.execute(
-                "UPDATE documents SET extraction_contract_version=NULL WHERE pdf_key=?",
-                (attachment.key,),
+                "UPDATE conversion_evidence SET evidence_json=? WHERE pdf_key=?",
+                (json.dumps(evidence), attachment.key),
             )
             state.conn.commit()
 
-            with patch("zotero_llm_worker.logging.info") as info:
+            with (
+                patch("zotero_llm_worker.pdf_page_count", return_value=1),
+                patch("zotero_llm_worker.logging.info") as info,
+            ):
                 emit_attachment_evidence(
                     attachment=attachment,
                     state=state,

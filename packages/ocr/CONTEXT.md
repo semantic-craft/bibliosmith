@@ -40,6 +40,14 @@ _Avoid_: exception route, manual fallback
 The SQLite database at `$HOME/Zotero/OCR_OUTPUT/.state/zotero_llm.sqlite3` that tracks document and chunk processing status.
 _Avoid_: cache, log database
 
+**OCR conversion evidence**:
+The current-contract State DB record and private mirror that bind one Source PDF identity to its route, producer-observed page coverage, Markdown, route sidecar, publication evidence, hashes, and Markdown child attachment identity.
+_Avoid_: latest file, inferred route, parsed upload sidecar
+
+**OCR Evidence Reconciliation**:
+The single worker interface that verifies OCR conversion evidence against current Source PDF and artifact bytes before upload, reuse, retry, or Book Pipeline handoff. Cross-process evidence uses only root-relative artifact references plus hashes; Zotero delivery uses a reclaimable owner lease and unique Source-PDF provenance.
+_Avoid_: recovery scan, completion guess, sidecar fallback
+
 **Staging artifact**:
 Local Markdown, JSONL, chunk PDF, or OCR result files under `$HOME/Zotero/OCR_OUTPUT/.state/`.
 _Avoid_: final output, deliverable

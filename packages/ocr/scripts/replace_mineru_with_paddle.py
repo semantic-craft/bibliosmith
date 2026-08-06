@@ -27,7 +27,6 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from zotero_llm_worker import (  # noqa: E402
     Attachment,
-    Config,
     DeadlineReached,
     QuotaExhaustedError,
     RetryableRemoteError,
@@ -37,13 +36,13 @@ from zotero_llm_worker import (  # noqa: E402
     ZoteroWebClient,
     ROUTE_NEEDS_MINERU,
     add_zotero_tag_argument,
-    completed_row_is_current,
     configure_logging,
     get_config,
     install_dependencies_check,
     md5_file,
     pdf_page_count,
     process_attachment,
+    reconcile_staged_conversion,
     route_attachment,
     source_key_from_provenance_note,
 )
@@ -396,40 +395,30 @@ def load_jobs(conn: sqlite3.Connection, *, include_done: bool = False) -> list[J
 
 def paddle_row_for(
     state: StateDB,
-    config: Config,
     *,
-    pdf_key: str,
-    source_md5: str,
+    attachment: Attachment,
+    page_count: int,
     zotero: ZoteroWebClient | None = None,
 ) -> sqlite3.Row | None:
-    rows = state.conn.execute(
-        """
-        SELECT *
-        FROM documents
-        WHERE pdf_key=? AND source_md5=? AND route='paddle-ocr' AND status='completed'
-        ORDER BY updated_at DESC
-        """,
-        (pdf_key, source_md5),
-    ).fetchall()
-    for row in rows:
-        if not completed_row_is_current(row, config):
-            continue
-        key = row["zotero_attachment_key"]
-        if not key:
-            continue
-        if zotero is not None and not web_item_exists(zotero, key):
-            state.conn.execute(
-                """
-                UPDATE documents
-                SET zotero_attachment_key=NULL, updated_at=?
-                WHERE pdf_key=? AND source_md5=? AND route='paddle-ocr'
-                """,
-                (now_utc(), pdf_key, source_md5),
-            )
-            state.conn.commit()
-            continue
-        return row
-    return None
+    source_md5 = md5_file(attachment.path)
+    row = state.completed(attachment.key, source_md5)
+    outcome = reconcile_staged_conversion(
+        attachment=attachment,
+        state=state,
+        page_count=page_count,
+    )
+    if (
+        row is None
+        or not outcome.accepted
+        or outcome.evidence is None
+        or outcome.evidence.route != "paddle-ocr"
+        or not outcome.evidence.markdown_attachment_key
+    ):
+        return None
+    key = outcome.evidence.markdown_attachment_key
+    if zotero is not None and not web_item_exists(zotero, key):
+        return None
+    return row
 
 
 def web_item_exists(zotero: ZoteroWebClient, item_key: str) -> bool:
@@ -631,9 +620,8 @@ def process_jobs(args: argparse.Namespace) -> int:
         try:
             row = paddle_row_for(
                 state,
-                config,
-                pdf_key=attachment.key,
-                source_md5=source_md5,
+                attachment=attachment,
+                page_count=page_count,
                 zotero=zotero,
             )
         except Exception as exc:
@@ -723,9 +711,8 @@ def process_jobs(args: argparse.Namespace) -> int:
         try:
             row = paddle_row_for(
                 state,
-                config,
-                pdf_key=attachment.key,
-                source_md5=source_md5,
+                attachment=attachment,
+                page_count=page_count,
                 zotero=zotero,
             )
         except Exception as exc:
