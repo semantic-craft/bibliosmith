@@ -1,43 +1,40 @@
-# BiblioSmith Launcher 1.16.3
+# BiblioSmith Launcher 1.16.4
 
 ## ZH
 
-BiblioSmith Launcher 1.16.3 强化 PDF 转换、Zotero 上传与 Book Pipeline 之间的证据交接，使中断后的继续执行建立在可核验的当前产物上。
+BiblioSmith Launcher 1.16.4 修复 OCR 设置页在服务切换期间丢失进行中操作状态的问题，并随版本源码纳入 PR #202 中完成的代理协作约定与提示词方案研究材料。
 
-### OCR 证据协调
+### OCR 设置状态
 
-- PDF 文本、PaddleOCR 与 MinerU 现在使用同一套版本化、哈希绑定的转换证据，记录来源 PDF、页范围、路由和每项产物的精确摘要。
-- 每次转换写入独立且不可变的 run；显式换路由或重建旧完成记录时，不会覆盖仍然有效的旧产物。只有完整证据成功提交后，当前引用才会切换。
-- Zotero 上传采用租约与幂等恢复。传输中断后可安全重试，避免重复创建 Markdown 附件；过期执行者不能覆盖新的提交。
-- Book Pipeline 在启动、重试和恢复时都会重新核对当前 evidence、文件摘要、页覆盖与 Zotero 附件身份。缺失、漂移或不匹配时会明确阻断并给出安全错误码，不再根据目录或修改时间猜测完成状态。
-- 用于协调的 conversion evidence 与 worker handoff 不保存书籍正文；产物引用限制在受控根目录内，Book Pipeline 的 mismatch 标记只暴露安全错误码。
+- 在 PaddleOCR 与 MinerU 配置之间切换时，两个服务面板会保留各自的组件状态，不再因暂时离开当前面板而卸载。
+- 保存、删除凭据或检测服务期间切换到另一服务，再切回时仍会显示正确的忙碌状态和结果消息。
+- 进行中的操作保持禁用，避免用户因状态被重置而重复提交同一请求。
+- 非当前服务面板继续从界面和辅助技术中隐藏，不改变一次只显示一个 OCR 配置的交互。
 
-本版仍仅提供 macOS Apple Silicon DMG。安装包使用 Developer ID 签名、Apple 公证与 stapling，并通过 Gatekeeper 验证；请从本 Release 手动下载升级。
+本版还包含 PR #202 合并的项目协作文档与提示词方案研究边界。它们不改变 Launcher 的运行时行为，但与本版本源码一同保留。当前仍仅提供 macOS Apple Silicon DMG；安装包使用 Developer ID 签名、Apple 公证与 stapling，并通过 Gatekeeper 验证。
 
 ## EN
 
-BiblioSmith Launcher 1.16.3 strengthens the evidence handoff between PDF conversion, Zotero delivery, and Book Pipeline so interrupted work resumes only from verifiable current artifacts.
+BiblioSmith Launcher 1.16.4 fixes lost in-flight action state when switching OCR services and includes the agent collaboration guidance and prompt-pack research materials merged in PR #202 in the corresponding source snapshot.
 
-### OCR evidence reconciliation
+### OCR settings state
 
-- PDF text, PaddleOCR, and MinerU now share one versioned, hash-bound conversion-evidence contract covering the source PDF, selected pages, route, and exact digest of every artifact.
-- Each conversion writes to an isolated immutable run. Explicit route changes and legacy completion regeneration no longer overwrite a valid prior bundle; the current reference changes only after the complete evidence commit succeeds.
-- Zotero delivery now uses leases and idempotent recovery. Interrupted uploads can retry without creating duplicate Markdown attachments, and expired workers cannot overwrite a newer commit.
-- Book Pipeline revalidates current evidence, file digests, page coverage, and Zotero attachment identity on start, retry, and resume. Missing, drifted, or mismatched evidence blocks with a safe error code instead of inferring completion from directories or modification times.
-- Reconciliation conversion evidence and worker handoffs do not retain book content. Artifact references stay within a controlled root, and Book Pipeline mismatch markers expose only safe error codes.
+- Switching between PaddleOCR and MinerU now preserves each service panel's component state instead of unmounting the temporarily inactive panel.
+- If you switch services while saving, deleting credentials, or testing a service, returning to the original service still shows the correct busy state and result message.
+- In-flight controls remain disabled, preventing duplicate submissions caused by an apparently reset interface.
+- The inactive service remains hidden from both the visible interface and assistive technology, preserving the one-configuration-at-a-time interaction.
 
-This release remains a macOS Apple Silicon DMG. It is Developer ID signed, Apple notarized and stapled, and Gatekeeper verified. Download the DMG from this Release to upgrade manually.
+This release also carries the project collaboration documentation and prompt-pack research boundaries merged in PR #202. They do not change Launcher runtime behavior but are preserved with this version's source. The release remains a macOS Apple Silicon DMG, Developer ID signed, Apple notarized and stapled, and Gatekeeper verified.
 
 ## JA
 
-BiblioSmith Launcher 1.16.3 は、PDF 変換、Zotero 配信、Book Pipeline 間の証拠引き継ぎを強化し、中断後の処理を検証可能な最新成果物からのみ再開します。
+BiblioSmith Launcher 1.16.4 は、OCR サービス切替時に進行中の操作状態が失われる問題を修正し、PR #202 で統合されたエージェント協働ガイドとプロンプトパック研究資料を対応するソーススナップショットに含めます。
 
-### OCR 証拠の整合
+### OCR 設定の状態保持
 
-- PDF テキスト、PaddleOCR、MinerU は、元 PDF、選択ページ、ルート、各成果物の正確なダイジェストを含む、共通のバージョン付きハッシュ拘束型変換証拠を使用します。
-- 各変換は独立した不変 run に書き込みます。明示的なルート変更や旧完了レコードの再生成でも、有効な旧成果物を上書きせず、完全な evidence commit が成功した後にだけ現在参照を切り替えます。
-- Zotero 配信はリースと冪等な復旧に対応します。中断したアップロードを Markdown 添付の重複なしで再試行でき、期限切れ worker は新しい commit を上書きできません。
-- Book Pipeline は開始、再試行、再開のたびに、現在の evidence、ファイルダイジェスト、ページ範囲、Zotero 添付の同一性を再検証します。欠落、変化、不一致がある場合は安全なエラーコードで停止し、ディレクトリや更新時刻から完了を推測しません。
-- 整合確認用の conversion evidence と worker handoff は書籍本文を保持しません。成果物参照は管理対象のルート内に制限され、Book Pipeline の mismatch marker は安全なエラーコードだけを公開します。
+- PaddleOCR と MinerU を切り替えても、非アクティブ側をアンマウントせず、各サービスパネルのコンポーネント状態を保持します。
+- 認証情報の保存・削除やサービス検査の途中で別サービスへ移動して戻った場合も、処理中状態と結果メッセージを正しく表示します。
+- 実行中の操作は無効のまま維持され、画面がリセットされたように見えることで同じ要求を重複送信する事態を防ぎます。
+- 非選択サービスは画面と支援技術の双方から引き続き隠され、一度に一つの OCR 設定だけを表示する操作を維持します。
 
-本リリースも macOS Apple Silicon 向け DMG のみです。Developer ID 署名、Apple 公証、stapling、Gatekeeper 検証を行います。この Release から DMG を手動でダウンロードして更新してください。
+本リリースには、PR #202 で統合されたプロジェクト協働文書とプロンプトパック研究の境界資料も含まれます。Launcher の実行時動作は変更しませんが、本バージョンのソースとともに保持されます。引き続き macOS Apple Silicon 向け DMG のみを提供し、Developer ID 署名、Apple 公証、stapling、Gatekeeper 検証を行います。
