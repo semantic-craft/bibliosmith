@@ -54,14 +54,14 @@ Keep inherited license files. Do not copy sample books, generated EPUBs, covers,
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues; external PRs are not a triage request surface.
-
-New issues and all live work go in `semantic-craft/bibliosmith`. Pass `--repo` explicitly instead of inferring it from `git remote -v`. `semantic-craft/bibliosmith-private-archive` is a read-only historical reference — GitHub has it archived, so creating issues, commenting, and closing are all rejected there; read it with `gh issue view <N> --repo semantic-craft/bibliosmith-private-archive`. See `docs/agents/issue-tracker.md`.
+New issues and all live work are tracked in GitHub Issues at `semantic-craft/bibliosmith`; external PRs are not a triage request surface, and `semantic-craft/bibliosmith-private-archive` is read-only history. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-Use the labels that exist: `ready-for-agent`, `needs-decision`, `blocked`, `wontfix`, plus the kind labels. An untriaged issue carries no workflow label. See `docs/agents/triage-labels.md`.
+Use the labels that exist: `ready-for-agent`, `needs-decision`, `blocked`, and
+`wontfix`, plus the kind labels. An untriaged issue carries no workflow label.
+See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-This repo uses a single-context layout: root `CONTEXT.md` plus `docs/adr/`. See `docs/agents/domain.md`. Migrated planning documents (the PRD and the Wayfinder map) live in `docs/planning/`.
+This repo uses a single-context layout: root `CONTEXT.md` plus `docs/adr/`; package-local context documents are supplemental. See `docs/agents/domain.md`. Migrated planning documents live in `docs/planning/`.
