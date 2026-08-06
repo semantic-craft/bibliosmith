@@ -79,7 +79,7 @@ class TextRouteMarkdownTests(unittest.TestCase):
         self.state = state
         self.page_count = page_count
         staging = config.output_root / ".state" / "staging" / self.attachment.key
-        markdown = next(staging.glob("*.md"))
+        markdown = next(staging.rglob("*.md"))
         return status, markdown, markdown.with_suffix(".jsonl")
 
     def test_the_markdown_carries_no_page_headings(self) -> None:

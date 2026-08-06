@@ -275,7 +275,7 @@ def now_utc() -> str:
     return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
 
 
-def write_private_json_record(path: Path, raw: str) -> None:
+def write_private_record_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}-",
@@ -283,15 +283,18 @@ def write_private_json_record(path: Path, raw: str) -> None:
     )
     temporary_path = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(raw)
-            handle.write("\n")
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         temporary_path.replace(path)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def write_private_json_record(path: Path, raw: str) -> None:
+    write_private_record_bytes(path, private_json_record_bytes(raw))
 
 
 def private_json_record_bytes(raw: str) -> bytes:
@@ -690,6 +693,9 @@ class StateDB:
             ) from exc
         raw_evidence = evidence.to_json()
         timestamp = now_utc()
+        previous_mirror: bytes | None = None
+        mirror_existed = False
+        mirror_written = False
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             active_upload = self.conn.execute(
@@ -709,7 +715,11 @@ class StateDB:
                 raise WorkerError(
                     "upload_in_progress: Conversion evidence is leased for delivery."
                 )
+            mirror_existed = evidence_path.exists()
+            if mirror_existed:
+                previous_mirror = evidence_path.read_bytes()
             write_private_json_record(evidence_path, raw_evidence)
+            mirror_written = True
             self._upsert_document_row(
                 attachment=attachment,
                 source_md5=source_md5,
@@ -750,6 +760,14 @@ class StateDB:
             )
             self.conn.commit()
         except BaseException:
+            if mirror_written:
+                try:
+                    if mirror_existed and previous_mirror is not None:
+                        write_private_record_bytes(evidence_path, previous_mirror)
+                    else:
+                        evidence_path.unlink(missing_ok=True)
+                except BaseException:
+                    pass
             self.conn.rollback()
             raise
         return evidence
@@ -1654,11 +1672,66 @@ class BaiduOCRClient:
         return payload
 
 
-def output_paths(config: Config, attachment: Attachment, route: str) -> tuple[Path, Path]:
-    out_dir = config.output_root / ".state" / "staging" / attachment.key
-    out_dir.mkdir(parents=True, exist_ok=True)
+@dataclass
+class ConversionRun:
+    root: Path
+    markdown_path: Path
+    sidecar_path: Path
+    committed: bool = False
+
+    def cleanup_uncommitted(
+        self,
+        *,
+        state: StateDB,
+        pdf_key: str,
+        source_md5: str,
+    ) -> None:
+        if self.committed:
+            return
+        try:
+            record = state.conversion_evidence_record(pdf_key, source_md5)
+            if record is not None:
+                evidence_path = resolve_artifact_reference(
+                    state.artifact_root,
+                    record[1],
+                )
+        except (OSError, sqlite3.Error, ValueError, WorkerError):
+            logging.warning(
+                "Preserving unverified conversion run because its DB reference could not be checked"
+            )
+            return
+        if record is not None:
+            try:
+                evidence_path.resolve().relative_to(self.root.resolve())
+            except ValueError:
+                pass
+            else:
+                return
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def create_conversion_run(
+    config: Config,
+    attachment: Attachment,
+    source_md5: str,
+    route: str,
+) -> ConversionRun:
+    run_parent = (
+        config.output_root
+        / ".state"
+        / "staging"
+        / attachment.key
+        / source_md5
+        / route
+    )
+    run_parent.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(tempfile.mkdtemp(prefix="run-", dir=run_parent))
     base = markdown_basename(attachment)
-    return out_dir / f"{base}.md", out_dir / f"{base}.jsonl"
+    return ConversionRun(
+        root=out_dir,
+        markdown_path=out_dir / f"{base}.md",
+        sidecar_path=out_dir / f"{base}.jsonl",
+    )
 
 
 def creator_name(creator: dict[str, Any]) -> str:
@@ -2231,18 +2304,20 @@ def verify_uploaded_conversion(
     )
 
 
-def process_text_route(
+def _process_text_route(
     *,
     attachment: Attachment,
     config: Config,
     state: StateDB,
+    run: ConversionRun,
     source_md5: str,
     page_count: int,
     pages: list[int],
     route_reason: str,
     no_upload: bool,
 ) -> str:
-    markdown_path, sidecar_path = output_paths(config, attachment, "pdf-text")
+    markdown_path = run.markdown_path
+    sidecar_path = run.sidecar_path
     extracted = pdf_text.extract_markdown(attachment.path, pages=pages, dirty_text=config)
     logging.info(
         "Extracted %s with %s%s",
@@ -2316,6 +2391,7 @@ def process_text_route(
         sidecar_path=sidecar_path,
         publication_evidence_path=publication_evidence_path,
     )
+    run.committed = True
     if no_upload:
         return coverage_status(normalized_pages, page_count, uploaded=False)
     return upload_reconciled_conversion(
@@ -2326,11 +2402,44 @@ def process_text_route(
     )
 
 
-def process_ocr_route(
+def process_text_route(
     *,
     attachment: Attachment,
     config: Config,
     state: StateDB,
+    source_md5: str,
+    page_count: int,
+    pages: list[int],
+    route_reason: str,
+    no_upload: bool,
+) -> str:
+    run = create_conversion_run(config, attachment, source_md5, "pdf-text")
+    try:
+        return _process_text_route(
+            attachment=attachment,
+            config=config,
+            state=state,
+            run=run,
+            source_md5=source_md5,
+            page_count=page_count,
+            pages=pages,
+            route_reason=route_reason,
+            no_upload=no_upload,
+        )
+    finally:
+        run.cleanup_uncommitted(
+            state=state,
+            pdf_key=attachment.key,
+            source_md5=source_md5,
+        )
+
+
+def _process_ocr_route(
+    *,
+    attachment: Attachment,
+    config: Config,
+    state: StateDB,
+    run: ConversionRun,
     source_md5: str,
     page_count: int,
     pages: list[int],
@@ -2355,7 +2464,8 @@ def process_ocr_route(
         "extract", "pages", total=len(pages)
     )
     operation_progress.start("starting")
-    markdown_path, sidecar_path = output_paths(config, attachment, "paddle-ocr")
+    markdown_path = run.markdown_path
+    sidecar_path = run.sidecar_path
     chunk_dir = config.output_root / ".state" / "chunks" / attachment.key / source_md5
     max_bytes = config.baidu_max_upload_mb * 1024 * 1024
     page_groups = page_chunks(pages, config.max_ocr_pages_per_job)
@@ -2573,6 +2683,7 @@ def process_ocr_route(
         sidecar_path=sidecar_path,
         publication_evidence_path=publication_evidence_path,
     )
+    run.committed = True
     if no_upload:
         return (
             coverage_status(normalized_pages, page_count, uploaded=False),
@@ -2587,6 +2698,42 @@ def process_ocr_route(
         ),
         pages_used,
     )
+
+
+def process_ocr_route(
+    *,
+    attachment: Attachment,
+    config: Config,
+    state: StateDB,
+    source_md5: str,
+    page_count: int,
+    pages: list[int],
+    route_reason: str,
+    no_upload: bool,
+    deadline: float,
+    ocr_pages_remaining: int,
+) -> tuple[str, int]:
+    run = create_conversion_run(config, attachment, source_md5, "paddle-ocr")
+    try:
+        return _process_ocr_route(
+            attachment=attachment,
+            config=config,
+            state=state,
+            run=run,
+            source_md5=source_md5,
+            page_count=page_count,
+            pages=pages,
+            route_reason=route_reason,
+            no_upload=no_upload,
+            deadline=deadline,
+            ocr_pages_remaining=ocr_pages_remaining,
+        )
+    finally:
+        run.cleanup_uncommitted(
+            state=state,
+            pdf_key=attachment.key,
+            source_md5=source_md5,
+        )
 
 
 def format_page_ranges(pages: list[int]) -> str:
@@ -2669,11 +2816,12 @@ def strict_mineru_source_coordinates(
     return start_line, end_line, pages
 
 
-def process_mineru_route(
+def _process_mineru_route(
     *,
     attachment: Attachment,
     config: Config,
     state: StateDB,
+    run: ConversionRun,
     source_md5: str,
     page_count: int,
     pages: list[int],
@@ -2687,7 +2835,8 @@ def process_mineru_route(
     run_root = config.output_root / ".state" / "mineru" / attachment.key / source_md5
     run_root.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=run_root))
-    markdown_path, sidecar_path = output_paths(config, attachment, ROUTE_MINERU)
+    markdown_path = run.markdown_path
+    sidecar_path = run.sidecar_path
     artifact_dir = markdown_path.with_suffix(".mineru")
     timeout_seconds = max(1, int(deadline - time.time()))
     try:
@@ -2873,6 +3022,7 @@ def process_mineru_route(
         publication_evidence_path=publication_evidence_path,
         additional_artifacts=(("mineru-artifact-directory", artifact_dir),),
     )
+    run.committed = True
     if no_upload:
         return coverage_status(normalized_pages, page_count, uploaded=False)
     return upload_reconciled_conversion(
@@ -2881,6 +3031,40 @@ def process_mineru_route(
         state=state,
         page_count=page_count,
     )
+
+
+def process_mineru_route(
+    *,
+    attachment: Attachment,
+    config: Config,
+    state: StateDB,
+    source_md5: str,
+    page_count: int,
+    pages: list[int],
+    route_reason: str,
+    no_upload: bool,
+    deadline: float,
+) -> str:
+    run = create_conversion_run(config, attachment, source_md5, ROUTE_MINERU)
+    try:
+        return _process_mineru_route(
+            attachment=attachment,
+            config=config,
+            state=state,
+            run=run,
+            source_md5=source_md5,
+            page_count=page_count,
+            pages=pages,
+            route_reason=route_reason,
+            no_upload=no_upload,
+            deadline=deadline,
+        )
+    finally:
+        run.cleanup_uncommitted(
+            state=state,
+            pdf_key=attachment.key,
+            source_md5=source_md5,
+        )
 
 
 def process_needs_mineru_route(
@@ -2939,10 +3123,23 @@ def process_attachment(
         else None
     )
     if completed_row and not completed_route_matches:
-        raise ReconciliationBlocked(
-            "completed_route_conflict",
-            "The completed attachment is bound to another route; regenerate it explicitly.",
+        logging.info(
+            "REGENERATE completed %s from %s through explicit route %s",
+            attachment.key,
+            completed_row["route"],
+            force_route,
         )
+        completed_row = None
+    if (
+        completed_row
+        and completed_outcome is not None
+        and completed_outcome.error_code == "missing_evidence"
+    ):
+        logging.info(
+            "REGENERATE completed %s because current conversion evidence is absent",
+            attachment.key,
+        )
+        completed_row = None
     if completed_row and (
         completed_outcome is None
         or not completed_outcome.accepted

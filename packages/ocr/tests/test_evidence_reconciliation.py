@@ -475,6 +475,178 @@ class PdfTextEvidenceReconciliationTests(unittest.TestCase):
 
         web_client_class.assert_not_called()
 
+    def test_explicit_route_override_regenerates_completed_evidence(self) -> None:
+        self.commit_route_evidence("mineru", [1, 2])
+        source_md5 = md5_file(self.pdf)
+        mineru = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=2,
+        )
+        owner = self.state.claim_upload(
+            pdf_key=self.attachment.key,
+            source_md5=source_md5,
+            evidence=mineru.evidence,
+        )
+        self.state.bind_markdown_attachment(
+            attachment=self.attachment,
+            source_md5=source_md5,
+            evidence=mineru.evidence,
+            markdown_attachment_key="MINERU01",
+            status="completed",
+            upload_owner_token=owner,
+        )
+
+        status, pages_used = process_attachment(
+            attachment=self.attachment,
+            config=self.config,
+            state=self.state,
+            page_spec=None,
+            no_upload=True,
+            dry_run=False,
+            force_route="pdf-text",
+            deadline=float("inf"),
+            ocr_pages_remaining=100,
+            normalize_source=False,
+        )
+
+        regenerated = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=2,
+        )
+        self.assertEqual("local_complete", status)
+        self.assertEqual(0, pages_used)
+        self.assertTrue(regenerated.accepted)
+        self.assertEqual("pdf-text", regenerated.route)
+        self.assertIsNone(regenerated.evidence.markdown_attachment_key)
+
+    def test_failed_route_override_preserves_the_completed_artifact_bundle(self) -> None:
+        self.commit_route_evidence("mineru", [1, 2])
+        source_md5 = md5_file(self.pdf)
+        mineru = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=2,
+        )
+        owner = self.state.claim_upload(
+            pdf_key=self.attachment.key,
+            source_md5=source_md5,
+            evidence=mineru.evidence,
+        )
+        self.state.bind_markdown_attachment(
+            attachment=self.attachment,
+            source_md5=source_md5,
+            evidence=mineru.evidence,
+            markdown_attachment_key="MINERU01",
+            status="completed",
+            upload_owner_token=owner,
+        )
+        before = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=2,
+        )
+        previous_evidence = self.state.conversion_evidence_json(
+            self.attachment.key,
+            source_md5,
+        )
+        previous_artifact_files = {
+            path: path.read_bytes()
+            for artifact in before.evidence.artifacts
+            for path in (
+                sorted(item for item in artifact.path.rglob("*") if item.is_file())
+                if artifact.path.is_dir()
+                else [artifact.path]
+            )
+        }
+        staging_root = (
+            self.config.output_root / ".state" / "staging" / self.attachment.key
+        )
+        previous_runs = {
+            path for path in staging_root.rglob("run-*") if path.is_dir()
+        }
+
+        with (
+            patch(
+                "zotero_llm_worker.write_markdown_evidence",
+                side_effect=RuntimeError("fixture producer failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "fixture producer failure"),
+        ):
+            process_attachment(
+                attachment=self.attachment,
+                config=self.config,
+                state=self.state,
+                page_spec=None,
+                no_upload=True,
+                dry_run=False,
+                force_route="pdf-text",
+                deadline=float("inf"),
+                ocr_pages_remaining=100,
+                normalize_source=False,
+            )
+
+        restored = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=2,
+        )
+        self.assertTrue(restored.accepted)
+        self.assertEqual("mineru", restored.route)
+        self.assertEqual(
+            previous_evidence,
+            self.state.conversion_evidence_json(self.attachment.key, source_md5),
+        )
+        self.assertEqual(
+            previous_artifact_files,
+            {path: path.read_bytes() for path in previous_artifact_files},
+        )
+        self.assertEqual(
+            previous_runs,
+            {path for path in staging_root.rglob("run-*") if path.is_dir()},
+        )
+
+    def test_completed_row_without_current_evidence_is_regenerated(self) -> None:
+        source_md5 = md5_file(self.pdf)
+        self.state.upsert_document(
+            attachment=self.attachment,
+            source_md5=source_md5,
+            route="pdf-text",
+            status="completed",
+            page_count=2,
+            zotero_attachment_key="LEGACY01",
+        )
+        config = dataclasses.replace(
+            self.config,
+            text_sample_min_chars=1,
+            text_page_min_chars=1,
+            dirty_text_guard=False,
+        )
+
+        status, pages_used = process_attachment(
+            attachment=self.attachment,
+            config=config,
+            state=self.state,
+            page_spec=None,
+            no_upload=True,
+            dry_run=False,
+            force_route=None,
+            deadline=float("inf"),
+            ocr_pages_remaining=100,
+            normalize_source=False,
+        )
+
+        regenerated = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=2,
+        )
+        self.assertEqual("local_complete", status)
+        self.assertEqual(0, pages_used)
+        self.assertTrue(regenerated.accepted)
+        self.assertEqual("pdf-text", regenerated.route)
+
     def test_state_evidence_uses_worker_relative_references_and_no_content(self) -> None:
         self.convert_without_upload()
         raw = self.state.conversion_evidence_json(
@@ -589,6 +761,118 @@ class PdfTextEvidenceReconciliationTests(unittest.TestCase):
             "SELECT upload_state, upload_owner_token FROM conversion_evidence"
         ).fetchone()
         self.assertEqual(("uploading", owner), tuple(row))
+
+    def test_failed_evidence_commit_restores_the_previous_private_mirror(self) -> None:
+        self.convert_without_upload()
+        source_md5 = md5_file(self.pdf)
+        current = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=2,
+        )
+        artifacts = {artifact.kind: artifact.path for artifact in current.evidence.artifacts}
+        record = self.state.conversion_evidence_record(self.attachment.key, source_md5)
+        mirror = self.state.artifact_root / record[1]
+        previous_mirror = mirror.read_bytes()
+        self.state.conn.execute(
+            """
+            CREATE TRIGGER fail_conversion_evidence_update
+            BEFORE UPDATE ON conversion_evidence
+            BEGIN
+                SELECT RAISE(FAIL, 'fixture commit failure');
+            END
+            """
+        )
+
+        with self.assertRaisesRegex(Exception, "fixture commit failure"):
+            self.state.commit_conversion_evidence(
+                attachment=self.attachment,
+                source_md5=source_md5,
+                route="paddle-ocr",
+                page_count=2,
+                selected_pages=[1, 2],
+                markdown_path=artifacts["markdown"],
+                sidecar_path=artifacts["route-sidecar"],
+                publication_evidence_path=artifacts["publication-evidence"],
+            )
+
+        self.assertEqual(previous_mirror, mirror.read_bytes())
+        restored = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=2,
+        )
+        self.assertTrue(restored.accepted)
+        self.assertEqual("pdf-text", restored.route)
+
+    def test_post_commit_interrupt_preserves_the_referenced_conversion_run(self) -> None:
+        committed = self.state.commit_conversion_evidence
+
+        def commit_then_interrupt(**kwargs: object) -> None:
+            committed(**kwargs)
+            raise KeyboardInterrupt("fixture post-commit interrupt")
+
+        with (
+            patch.object(
+                self.state,
+                "commit_conversion_evidence",
+                side_effect=commit_then_interrupt,
+            ),
+            self.assertRaisesRegex(KeyboardInterrupt, "fixture post-commit interrupt"),
+        ):
+            process_text_route(
+                attachment=self.attachment,
+                config=self.config,
+                state=self.state,
+                source_md5=md5_file(self.pdf),
+                page_count=2,
+                pages=[1, 2],
+                route_reason="post-commit test",
+                no_upload=True,
+            )
+
+        restored = reconcile_staged_conversion(
+            attachment=self.attachment,
+            state=self.state,
+            page_count=2,
+        )
+        self.assertTrue(restored.accepted)
+        self.assertEqual("pdf-text", restored.route)
+        self.assertTrue(restored.evidence.markdown_path.is_file())
+
+    def test_unsafe_existing_reference_does_not_mask_a_producer_failure(self) -> None:
+        self.convert_without_upload()
+        source_md5 = md5_file(self.pdf)
+        self.state.conn.execute(
+            """
+            UPDATE conversion_evidence
+            SET evidence_reference='../escaped.json'
+            WHERE pdf_key=? AND source_md5=?
+            """,
+            (self.attachment.key, source_md5),
+        )
+        self.state.conn.commit()
+
+        with self.assertLogs(level="WARNING") as captured:
+            with (
+                patch(
+                    "zotero_llm_worker.write_markdown_evidence",
+                    side_effect=RuntimeError("fixture producer failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "fixture producer failure"),
+            ):
+                process_text_route(
+                    attachment=self.attachment,
+                    config=self.config,
+                    state=self.state,
+                    source_md5=source_md5,
+                    page_count=2,
+                    pages=[1, 2],
+                    route_reason="unsafe reference test",
+                    no_upload=True,
+                )
+
+        self.assertNotIn(str(self.root), "\n".join(captured.output))
 
     def test_expired_owner_cannot_rewrite_mirror_after_lease_handoff(self) -> None:
         self.convert_without_upload()

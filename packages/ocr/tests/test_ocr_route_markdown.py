@@ -155,7 +155,7 @@ class OcrRouteMarkdownTests(unittest.TestCase):
                 ocr_pages_remaining=len(pages),
             )
         staging = config.output_root / ".state" / "staging" / self.attachment.key
-        markdown = next(staging.glob("*.md"))
+        markdown = next(staging.rglob("*.md"))
         return status, markdown, markdown.with_suffix(".jsonl"), pages_used
 
     def test_the_markdown_carries_no_page_headings(self) -> None:
