@@ -1,7 +1,7 @@
 {
   "name": "bibliosmith-launcher",
   "private": true,
-  "version": "1.16.2",
+  "version": "1.16.3",
   "type": "module",
   "scripts": {
     "version:sync": "node scripts/sync-version.mjs",
