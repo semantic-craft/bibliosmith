@@ -7,45 +7,50 @@ PRs as a request surface: no.
 
 ## Which repository
 
-**`semantic-craft/bibliosmith`.** All new issues and all live work go there.
-Pass it explicitly rather than inferring it from `git remote -v`: this project
-has two repositories, and only one of them accepts writes.
+All new issues and live work go to **`semantic-craft/bibliosmith`**. Always pass
+`--repo semantic-craft/bibliosmith`; do not infer the target from
+`git remote -v`, because this checkout has multiple GitHub remotes.
 
 ```bash
 gh issue list --repo semantic-craft/bibliosmith
 gh issue create --repo semantic-craft/bibliosmith
 ```
 
-**`semantic-craft/bibliosmith-private-archive` is a read-only historical
-reference.** It is the pre-open-source repository, and GitHub has it archived,
-which makes the whole repository read-only: creating an issue, commenting,
-closing, and editing labels are all rejected. Read it, never write to it:
+**`semantic-craft/bibliosmith-private-archive` is read-only history.** Read it
+when older documents refer to archived issue numbers, but never attempt to
+create, comment on, edit, label, or close issues there:
 
 ```bash
-gh issue view <N> --repo semantic-craft/bibliosmith-private-archive
+gh issue view <number> --repo semantic-craft/bibliosmith-private-archive
 ```
 
-Twelve issues were still open there when it was archived, and they will stay
-open forever. Do not open a duplicate of one in `semantic-craft/bibliosmith`
-without checking first — the live successors were renumbered, and the mapping is
-in `docs/planning/README.md`.
+Issue numbers restarted in the public repository. A bare `#NN` written before
+2026-07-24 usually refers to the archive. Check `docs/planning/README.md` for
+migrated issue mappings. The archived PRD and Wayfinder map were migrated into
+`docs/planning/`.
 
-Issue numbers restarted at 1 in the public repository. A bare `#NN` in a
-document written before 2026-07-24 usually belongs to the archive's numbering,
-not this one.
+## Conventions
 
-The live content of the two planning issues that were frozen in the archive —
-PRD `#52` and Wayfinder map `#40` — was migrated into `docs/planning/`.
+- **Create:** `gh issue create --repo semantic-craft/bibliosmith --title "..." --body "..."`
+- **Read:** `gh issue view <number> --repo semantic-craft/bibliosmith --comments`
+- **List:** `gh issue list --repo semantic-craft/bibliosmith --state open --json number,title,body,labels,comments`
+- **Comment:** `gh issue comment <number> --repo semantic-craft/bibliosmith --body "..."`
+- **Apply/remove labels:** `gh issue edit <number> --repo semantic-craft/bibliosmith --add-label "..."` or `--remove-label "..."`
+- **Close:** `gh issue close <number> --repo semantic-craft/bibliosmith --comment "..."`
 
-## Usage
+GitHub shares one number space across issues and pull requests. Resolve an
+ambiguous number explicitly with `gh pr view` or `gh issue view`, always passing
+`--repo`.
 
-When a skill says "publish to the issue tracker", create a GitHub issue in
+## Skill operations
+
+When a skill says “publish to the issue tracker,” create an issue in
 `semantic-craft/bibliosmith`.
 
-When a skill says "fetch the relevant ticket", run
-`gh issue view <number> --repo semantic-craft/bibliosmith --comments`.
+When a skill says “fetch the relevant ticket,” run:
 
-Use `gh issue create/view/list/comment/edit/close` for issue operations, always
-with an explicit `--repo`.
+```bash
+gh issue view <number> --repo semantic-craft/bibliosmith --comments
+```
 
-See `docs/agents/triage-labels.md` for the labels that actually exist.
+See `docs/agents/triage-labels.md` before applying workflow labels.

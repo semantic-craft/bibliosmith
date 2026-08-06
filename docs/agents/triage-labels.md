@@ -1,9 +1,8 @@
 # Triage Labels
 
-These are the labels that exist on `semantic-craft/bibliosmith`. The list is
-written from the repository rather than from a skill's vocabulary, because
-`gh issue edit --add-label <name>` fails outright on a label that does not
-exist. Verify before adding anything not listed here:
+This file maps the engineering skills' canonical triage roles onto the labels
+that actually exist in `semantic-craft/bibliosmith`. Verify before using a new
+label:
 
 ```bash
 gh label list --repo semantic-craft/bibliosmith
@@ -18,31 +17,22 @@ gh label list --repo semantic-craft/bibliosmith
 | `blocked` | Blocked by another ticket |
 | `wontfix` | This will not be worked on |
 
-An issue with no workflow label is untriaged. There is no `needs-triage` label,
-and adding one would only restate the absence.
+An issue with no workflow label is untriaged.
 
-## Kind labels
+## Skill vocabulary
 
-`bug`, `documentation`, `enhancement`, `question`, `duplicate`, `invalid`,
-`help wanted`, `good first issue` — GitHub's defaults, used as they read.
-
-`dependencies`, `github_actions`, `rust`, `javascript` — applied by Dependabot;
-also used by hand to mark which subsystem an issue lands in.
-
-## Mapping from the mattpocock/skills vocabulary
-
-| Label in mattpocock/skills | Use here |
+| Canonical role | Use in this tracker |
 | --- | --- |
-| `needs-triage` | no label |
+| `needs-triage` | no workflow label |
 | `needs-info` | `question` |
 | `ready-for-agent` | `ready-for-agent` |
 | `ready-for-human` | `needs-decision` |
 | `wontfix` | `wontfix` |
 
-Four of those five used to be listed as canonical here, and only two of them
-had ever been created. If a workflow genuinely needs `needs-triage`,
-`needs-info`, or `ready-for-human` as distinct labels, create them first and
-then extend this table; do not assume they are there.
+Kind labels use GitHub's defaults (`bug`, `documentation`, `enhancement`,
+`question`, `duplicate`, `invalid`, `help wanted`, and `good first issue`).
+Dependency PRs also use `dependencies`, `github_actions`, `python:uv`, `rust`,
+or `javascript` as appropriate.
 
-Labels on `semantic-craft/bibliosmith-private-archive` are irrelevant: that
-repository is archived, so its labels cannot be applied to anything.
+Labels on `semantic-craft/bibliosmith-private-archive` are irrelevant because
+that repository is archived and read-only.

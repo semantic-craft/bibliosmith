@@ -220,8 +220,13 @@ export function OcrSettingsPanel({ locale }: { locale: string }) {
         </select>
       </div>
 
-      {services.filter(([service]) => service === visibleService).map(([service, name, hint]) => (
-        <div key={service} className="st-models-brand">
+      {services.map(([service, name, hint]) => (
+        <div
+          key={service}
+          className="st-models-brand"
+          hidden={service !== visibleService}
+          style={service !== visibleService ? { display: "none" } : undefined}
+        >
           <div className="st-models-brand-head">
             <b>{name}</b>
             <a href={KEY_URLS[service]} target="_blank" rel="noreferrer">
