@@ -8,8 +8,8 @@
 //! Keys live in the macOS Keychain, one entry per `(profile, config)` slot —
 //! never in a file, so providers and supported billing routes stay distinct.
 //! The active selection, Qwen's optional Workspace ID, and its web-search
-//! preference are not secret and live in launcher config alongside the proxy
-//! and other non-secret app settings.
+//! preference are not secret and live in launcher config alongside the other
+//! non-secret app settings.
 //!
 //! At translate time the Rust runner reads the key from the Keychain and injects
 //! it into the engine subprocess under the slot's `key_env`, so the engine's

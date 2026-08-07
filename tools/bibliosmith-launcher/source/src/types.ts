@@ -3,7 +3,6 @@ export type WorkspaceState = {
   recommendedWorkspaceRoot: string;
   workspaceReady: boolean;
   workspaceStatus: "missing" | "empty" | "ready" | "occupied";
-  proxyConfigured: boolean;
   platform: string;
 };
 
@@ -28,28 +27,6 @@ export type DiagnosticLogSettings = {
   maxBytes: number;
   backupCount: number;
   maxTotalBytes: number;
-};
-
-export type NetworkProxySettings = {
-  enabled: boolean;
-  scheme: "http" | "https" | "socks5" | "socks5h";
-  host: string;
-  port: number | null;
-};
-
-export type ProxyTestResult = {
-  ok: boolean;
-  message: string;
-  elapsedMs?: number | null;
-  httpVersion?: string | null;
-  targetUrl: string;
-};
-
-export type ProxyAutoDetectResult = {
-  detected: boolean;
-  proxy?: NetworkProxySettings | null;
-  test?: ProxyTestResult | null;
-  message: string;
 };
 
 export type RuntimeToolStatus = {

@@ -2,15 +2,12 @@ import { useEffect } from "react";
 import { X } from "lucide-react";
 import type {
   LauncherSettings,
-  NetworkProxySettings,
-  ProxyTestResult,
   TranslationPromptPackCatalog,
   TranslationPromptPackReference,
   TranslationPromptPackRevisionDraft,
 } from "../../types";
 import type { Copy, LanguageSetting } from "../../i18n";
 import { SettingToggle } from "../../components";
-import { ProxySettingsPanel } from "./ProxySettingsPanel";
 import { ModelsSettingsPanel } from "./ModelsSettingsPanel";
 import { modelsCopy } from "./modelsCopy";
 import { OcrSettingsPanel } from "./OcrSettingsPanel";
@@ -28,14 +25,8 @@ export function SettingsOverlay({
   locale,
   languageSetting,
   settings,
-  proxySettings,
-  proxyBusy,
-  proxyTestResult,
   onLanguageChange,
   onUpdateSetting,
-  onProxyChange,
-  onProxyTest,
-  onProxyAutoDetect,
   promptPackCatalog,
   promptPackDefaults,
   promptPackBusy,
@@ -49,14 +40,8 @@ export function SettingsOverlay({
   locale: string;
   languageSetting: LanguageSetting;
   settings: LauncherSettings;
-  proxySettings: NetworkProxySettings;
-  proxyBusy: "test" | "detect" | null;
-  proxyTestResult: ProxyTestResult | null;
   onLanguageChange: (value: LanguageSetting) => void;
   onUpdateSetting: (key: keyof LauncherSettings, value: boolean) => void;
-  onProxyChange: (value: NetworkProxySettings) => void;
-  onProxyTest: () => void;
-  onProxyAutoDetect: () => void;
   promptPackCatalog: TranslationPromptPackCatalog | null;
   promptPackDefaults: Record<"programmatic" | "expert-agent", TranslationPromptPackReference | null>;
   promptPackBusy: boolean;
@@ -107,15 +92,6 @@ export function SettingsOverlay({
                 </select>
               </div>
               <SettingToggle title={copy.autoStartTitle} description={copy.autoStartDescription} checked={settings.autoStart} onChange={(value) => onUpdateSetting("autoStart", value)} />
-              <ProxySettingsPanel
-                copy={copy}
-                settings={proxySettings}
-                busy={proxyBusy}
-                result={proxyTestResult}
-                onChange={onProxyChange}
-                onTest={onProxyTest}
-                onAutoDetect={onProxyAutoDetect}
-              />
             </div>
           </div>
 
