@@ -2627,6 +2627,19 @@ pub fn run() {
             Some(vec![]),
         ))
         .setup(|app| {
+            // In-app updates. The updater verifies every downloaded bundle
+            // against the minisign public key in tauri.conf.json before it
+            // replaces the installed App, so a compromised release asset or a
+            // hijacked endpoint cannot install anything this project did not
+            // sign. The process plugin is here only for its restart command,
+            // which is how the frontend hands control to the freshly installed
+            // bundle; nothing else in the launcher restarts the process.
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
+            }
             app_paths::initialize(app)?;
             let window = app.get_webview_window("main").expect("main window missing");
             let _ = window.set_title(&format!(

@@ -58,6 +58,8 @@ import { copies, detectLocale, type LanguageSetting, type Locale } from "./i18n"
 import { SettingsOverlay } from "./pages/settings";
 import { pipelineJobOutcomeSucceeded, translationHandoffReady } from "./lib/pipeline-status";
 import { FloatingFeedback, Titlebar, type FloatingToast, type ToastTone } from "./shell";
+import { useLauncherUpdate } from "./updates";
+import { updatesCopy } from "./pages/settings/updatesCopy";
 import { WorkspaceSetupGate } from "./startup/WorkspaceSetupGate";
 import launcherVersionManifest from "../launcher-version.json";
 import {
@@ -262,6 +264,30 @@ function LauncherApp() {
       floatingToastTimer.current = null;
     }, 2200);
   }, []);
+
+  // Installing an update unpacks a new App bundle over the installed one, and
+  // a running job is executing Python, Node and Chromium out of that bundle's
+  // resources. The count gates the install button and the hook's install call.
+  const runningJobCount = useMemo(
+    () => pipelineState.jobs.filter((job) => job.status === "running").length,
+    [pipelineState.jobs],
+  );
+  const launcherUpdate = useLauncherUpdate(runningJobCount);
+
+  // The silent startup check needs one way of saying what it found. The toast
+  // fades; the dot on the gear stays until the update is installed, so an
+  // update found while the user was away is still visible later.
+  const announcedUpdateVersion = useRef<string | null>(null);
+  useEffect(() => {
+    if (launcherUpdate.state.kind !== "available") return;
+    const { version } = launcherUpdate.state;
+    if (announcedUpdateVersion.current === version) return;
+    announcedUpdateVersion.current = version;
+    showFloatingToast(updatesCopy(locale).updateFoundToast(version), "info");
+  }, [launcherUpdate.state, locale, showFloatingToast]);
+  const updateBadgeLabel = launcherUpdate.state.kind === "available"
+    ? updatesCopy(locale).available(launcherUpdate.state.version)
+    : null;
 
   const pipelineConfig = useMemo<BookPipelinePreviewConfig>(() => ({
     hasPaddleocrCredentials: pipelineDraft.hasPaddleocrCredentials,
@@ -911,6 +937,7 @@ function LauncherApp() {
         version={LAUNCHER_VERSION}
         settingsLabel={copy.settingsTitle}
         settingsActive={settingsOpen}
+        updateBadgeLabel={updateBadgeLabel}
         onToggleSettings={() => (settingsOpen ? closeSettings() : setSettingsOpen(true))}
       />
 
@@ -992,6 +1019,9 @@ function LauncherApp() {
               onSavePromptPackRevision={savePromptPackRevision}
               onDeletePromptPack={deletePromptPack}
               onSetPromptPackDefault={setPromptPackDefault}
+              launcherVersion={LAUNCHER_VERSION}
+              updateController={launcherUpdate}
+              runningJobCount={runningJobCount}
               onClose={closeSettings}
             />
           )}

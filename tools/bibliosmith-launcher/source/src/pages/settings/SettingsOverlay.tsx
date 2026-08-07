@@ -8,7 +8,8 @@ import type {
   TranslationPromptPackReference,
   TranslationPromptPackRevisionDraft,
 } from "../../types";
-import type { Copy, LanguageSetting } from "../../i18n";
+import type { Copy, LanguageSetting, Locale } from "../../i18n";
+import type { LauncherUpdateController } from "../../updates";
 import { SettingToggle } from "../../components";
 import { ProxySettingsPanel } from "./ProxySettingsPanel";
 import { ModelsSettingsPanel } from "./ModelsSettingsPanel";
@@ -16,6 +17,8 @@ import { modelsCopy } from "./modelsCopy";
 import { OcrSettingsPanel } from "./OcrSettingsPanel";
 import { ocrCopy } from "./ocrCopy";
 import { PromptPackSettingsPanel } from "./PromptPackSettingsPanel";
+import { UpdateSettingsPanel } from "./UpdateSettingsPanel";
+import { updatesCopy } from "./updatesCopy";
 import "./settings.css";
 
 /**
@@ -43,11 +46,17 @@ export function SettingsOverlay({
   onSavePromptPackRevision,
   onDeletePromptPack,
   onSetPromptPackDefault,
+  launcherVersion,
+  updateController,
+  runningJobCount,
   onClose,
 }: {
   copy: Copy;
-  locale: string;
+  locale: Locale;
   languageSetting: LanguageSetting;
+  launcherVersion: string;
+  updateController: LauncherUpdateController;
+  runningJobCount: number;
   settings: LauncherSettings;
   proxySettings: NetworkProxySettings;
   proxyBusy: "test" | "detect" | null;
@@ -86,6 +95,18 @@ export function SettingsOverlay({
         </header>
 
         <div className="st-panel-body">
+          <div className="st-group">
+            <div className="st-group-title">{updatesCopy(locale).title}</div>
+            <div className="st-group-card">
+              <UpdateSettingsPanel
+                locale={locale}
+                currentVersion={launcherVersion}
+                controller={updateController}
+                runningJobCount={runningJobCount}
+              />
+            </div>
+          </div>
+
           <div className="st-group">
             <div className="st-group-title">{copy.settingsGroupGeneral}</div>
             <div className="st-group-card">

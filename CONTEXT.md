@@ -68,7 +68,8 @@ desktop launcher owns orchestration, but it does not own every component's data.
 
 - The installed App bundle owns read-only code, provider registries, packages,
   and runtime scripts. Production never executes those resources from a source
-  checkout or a user workspace.
+  checkout or a user workspace. A self-update replaces this layer whole, so
+  nothing that must survive an update may be written inside the bundle.
 - The operating system's Application Support directory owns launcher config,
   logs, pipeline state, and managed runtime state. Credentials remain in the
   system Keychain.
@@ -102,3 +103,7 @@ desktop launcher owns orchestration, but it does not own every component's data.
 - [ADR 0005](docs/adr/0005-publication-structure-is-independent-of-translation-units.md):
   publication sections and bounded translation units are separate contracts;
   package, structure, and reader acceptance are separate conclusions.
+- [ADR 0006](docs/adr/0006-user-confirmed-signed-self-update.md): the launcher
+  checks for updates once per launch but never installs one on its own; the
+  updater bundle carries its own signature, checked against the public key in
+  the running build, and an install is refused while jobs are running.
