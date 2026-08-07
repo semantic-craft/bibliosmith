@@ -1677,12 +1677,17 @@ export type LauncherUpdateDownloadProgress = {
 };
 
 /**
- * Resolves to null when the installed build is already the newest one. The
- * browser preview has no installed App to replace, so it answers null too
- * rather than pretending an update exists.
+ * Resolves to null when the installed build is already the newest one.
+ *
+ * The browser preview refuses rather than answering null: null is the "already
+ * newest" answer, and there is no installed App in a preview for that to be
+ * true of. Reporting up to date there would repeat the stub this feature
+ * replaced, which claimed the same thing without ever asking anyone.
  */
 export async function checkLauncherUpdate(): Promise<LauncherUpdate | null> {
-  if (!isTauriRuntime()) return null;
+  if (!isTauriRuntime()) {
+    throw new Error("Updates are only available in the installed app.");
+  }
   const update = await check();
   if (!update) return null;
   return {

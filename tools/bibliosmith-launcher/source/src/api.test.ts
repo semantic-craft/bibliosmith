@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  checkLauncherUpdate,
   copyTranslationPromptPack,
   deleteTranslationPromptPack,
   diffTranslationPromptPackRevisions,
@@ -235,5 +236,16 @@ describe("prompt-pack management in the browser preview", () => {
       { packId: second.packId, revisionId: second.revisionId, contentSha256: second.contentSha256 },
     );
     expect(diff.afterMetadata.parameters.styleGuidance).toBe("克制的现代汉语");
+  });
+});
+
+describe("checkLauncherUpdate", () => {
+  // null is the "already on the newest build" answer, and the card renders it
+  // as "up to date". A browser preview has no installed build for that to be
+  // true of, so answering null there would repeat the stub this replaced.
+  it("refuses outside the installed app instead of reporting up to date", async () => {
+    await expect(checkLauncherUpdate()).rejects.toThrow(
+      "Updates are only available in the installed app.",
+    );
   });
 });

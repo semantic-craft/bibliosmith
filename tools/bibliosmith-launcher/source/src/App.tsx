@@ -56,7 +56,7 @@ import {
 } from "./types";
 import { copies, detectLocale, type LanguageSetting, type Locale } from "./i18n";
 import { SettingsOverlay } from "./pages/settings";
-import { pipelineJobOutcomeSucceeded, translationHandoffReady } from "./lib/pipeline-status";
+import { pipelineJobActivelyRunning, pipelineJobOutcomeSucceeded, translationHandoffReady } from "./lib/pipeline-status";
 import { FloatingFeedback, Titlebar, type FloatingToast, type ToastTone } from "./shell";
 import { useLauncherUpdate } from "./updates";
 import { updatesCopy } from "./pages/settings/updatesCopy";
@@ -269,7 +269,7 @@ function LauncherApp() {
   // a running job is executing Python, Node and Chromium out of that bundle's
   // resources. The count gates the install button and the hook's install call.
   const runningJobCount = useMemo(
-    () => pipelineState.jobs.filter((job) => job.status === "running").length,
+    () => pipelineState.jobs.filter(pipelineJobActivelyRunning).length,
     [pipelineState.jobs],
   );
   const launcherUpdate = useLauncherUpdate(runningJobCount);
