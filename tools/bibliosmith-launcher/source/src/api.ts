@@ -26,11 +26,8 @@ import {
   WorkspaceState,
   ModelCatalog,
   ModelConnectionResult,
-  NetworkProxySettings,
   OcrConnectionResult,
   OcrCredentialsStatus,
-  ProxyAutoDetectResult,
-  ProxyTestResult,
   RuntimeStatus,
   TranslationPromptPackCatalog,
   TranslationPromptPackDefinition,
@@ -60,7 +57,6 @@ function previewWorkspaceState(): WorkspaceState {
     recommendedWorkspaceRoot: "Documents/BiblioSmith",
     workspaceReady: true,
     workspaceStatus: "ready",
-    proxyConfigured: false,
     platform: "preview",
   };
 }
@@ -571,56 +567,6 @@ export function setSaveLogsEnabled(saveLogs: boolean) {
     });
   }
   return invoke<DiagnosticLogSettings>("set_save_logs_enabled", { saveLogs });
-}
-
-export function getProxySettings() {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<NetworkProxySettings>({
-      enabled: false,
-      scheme: "http",
-      host: "127.0.0.1",
-      port: 7890,
-    });
-  }
-  return invoke<NetworkProxySettings>("get_proxy_settings");
-}
-
-export function saveProxySettings(proxy: NetworkProxySettings) {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<NetworkProxySettings>(proxy);
-  }
-  return invoke<NetworkProxySettings>("save_proxy_settings", { proxy });
-}
-
-export function testProxySettings(proxy: NetworkProxySettings) {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ProxyTestResult>({
-      ok: true,
-      message: "Preview mode: proxy test succeeded in 38 ms.",
-      elapsedMs: 38,
-      httpVersion: "HTTP/2",
-      targetUrl: "https://api.github.com/",
-    });
-  }
-  return invoke<ProxyTestResult>("test_proxy_settings", { proxy });
-}
-
-export function autoDetectProxySettings(force = true) {
-  if (!isTauriRuntime()) {
-    return Promise.resolve<ProxyAutoDetectResult>({
-      detected: true,
-      proxy: { enabled: true, scheme: "http", host: "127.0.0.1", port: 7890 },
-      test: {
-        ok: true,
-        message: "Preview mode: proxy auto detection succeeded.",
-        elapsedMs: 36,
-        httpVersion: "HTTP/2",
-        targetUrl: "https://api.github.com/",
-      },
-      message: "Preview mode: detected local proxy.",
-    });
-  }
-  return invoke<ProxyAutoDetectResult>("auto_detect_proxy_settings", { force });
 }
 
 export function getModelCatalog() {

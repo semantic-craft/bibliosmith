@@ -106,7 +106,7 @@ validate_reading（digest 退役）。审批门照旧停驻，呈现为状态卡
 
 - **模型**：8 个供应商槽原样保留（`ModelsSettingsPanel.tsx`）
 - **OCR**：PaddleOCR / MinerU 密钥（`OcrSettingsPanel.tsx`）
-- **通用**：语言 + 代理（两家 OCR 都是境内远程 API，代理必须留）+ 开机自启
+- **通用**：语言 + 开机自启（应用内代理设置已退役，改用 `HTTP_PROXY` 等环境变量）
 
 ## 流水线：一个入口，两条成书轨
 

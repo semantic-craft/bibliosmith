@@ -1,5 +1,4 @@
 use chrono::Local;
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "windows")]
@@ -8,7 +7,6 @@ use std::{
     any::Any,
     env, fs,
     io::{self, Read, Write},
-    net::{IpAddr, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Output, Stdio},
     sync::{
@@ -40,9 +38,6 @@ const TRAY_QUIT_ID: &str = "tray_quit";
 const LAUNCHER_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const LAUNCHER_LOG_BACKUP_COUNT: usize = 0;
 const LAUNCHER_LOG_LEGACY_EXPORT_BACKUP_SCAN_COUNT: usize = 5;
-const PROXY_TEST_TIMEOUT_SECONDS: u64 = 8;
-const PROXY_PORT_PROBE_TIMEOUT_MS: u64 = 260;
-const GITHUB_CONNECTIVITY_TEST_URL: &str = "https://api.github.com/";
 const PYTHON_RUNTIME_VERSION: &str = "3.12.10";
 const PYTHON_RUNTIME_DIR_NAME: &str = "python-3.12.10-embed-amd64";
 const PYTHON_RUNTIME_ARCHIVE: &str = "python-3.12.10-embed-amd64.zip";
@@ -268,7 +263,6 @@ struct WorkspaceState {
     recommended_workspace_root: String,
     workspace_ready: bool,
     workspace_status: app_paths::WorkspaceStatus,
-    proxy_configured: bool,
     platform: String,
 }
 
@@ -285,7 +279,6 @@ struct ActionResult {
 struct LauncherConfig {
     workspace_root: Option<String>,
     save_logs: Option<bool>,
-    proxy: Option<NetworkProxySettings>,
     active_model: Option<model_settings::ActiveModel>,
     qwen_workspace_id: Option<String>,
     qwen_web_search_enabled: Option<bool>,
@@ -319,45 +312,6 @@ pub(crate) fn write_qwen_settings(
         config.qwen_workspace_id = workspace_id;
         config.qwen_web_search_enabled = Some(web_search_enabled);
     })
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct NetworkProxySettings {
-    enabled: bool,
-    scheme: String,
-    host: String,
-    port: Option<u16>,
-}
-
-impl Default for NetworkProxySettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            scheme: "http".into(),
-            host: "127.0.0.1".into(),
-            port: Some(7890),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProxyTestResult {
-    ok: bool,
-    message: String,
-    elapsed_ms: Option<u128>,
-    http_version: Option<String>,
-    target_url: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProxyAutoDetectResult {
-    detected: bool,
-    proxy: Option<NetworkProxySettings>,
-    test: Option<ProxyTestResult>,
-    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -406,7 +360,6 @@ struct DiagnosticExportContext {
     log_dir: String,
     log_max_bytes: u64,
     log_backup_count: usize,
-    proxy_configured: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -485,7 +438,6 @@ fn collect_workspace_state_from(
         recommended_workspace_root: display_path(&recommended),
         workspace_ready: workspace_status == app_paths::WorkspaceStatus::Ready,
         workspace_status,
-        proxy_configured: is_proxy_configured(),
         platform: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
     }
 }
@@ -528,97 +480,6 @@ fn set_save_logs_enabled(save_logs: bool) -> Result<DiagnosticLogSettings, Strin
         append_launcher_log("INFO", "diagnostic logging enabled by user");
     }
     diagnostic_log_settings()
-}
-
-#[tauri::command]
-fn get_proxy_settings() -> Result<NetworkProxySettings, String> {
-    Ok(configured_proxy_settings())
-}
-
-#[tauri::command]
-fn save_proxy_settings(proxy: NetworkProxySettings) -> Result<NetworkProxySettings, String> {
-    write_proxy_config(proxy)
-}
-
-#[tauri::command]
-async fn test_proxy_settings(proxy: NetworkProxySettings) -> Result<ProxyTestResult, String> {
-    let proxy_url = proxy_url_from_settings(&proxy)?;
-    let Some(proxy_url) = proxy_url else {
-        return Ok(ProxyTestResult {
-            ok: false,
-            message: "请先启用代理并填写 IP/端口。".into(),
-            elapsed_ms: None,
-            http_version: None,
-            target_url: GITHUB_CONNECTIVITY_TEST_URL.into(),
-        });
-    };
-
-    match test_github_connectivity_via_proxy(&proxy_url, false).await {
-        Ok(result) => Ok(result),
-        Err(auto_error) => {
-            append_launcher_log(
-                "WARN",
-                format!("proxy automatic HTTP test failed, retrying HTTP/1.1: {auto_error}"),
-            );
-            match test_github_connectivity_via_proxy(&proxy_url, true).await {
-                Ok(result) => Ok(result),
-                Err(retry_error) => Ok(proxy_test_failure_result(format!(
-                    "代理测试失败。自动 HTTP：{auto_error}；HTTP/1.1 重试：{retry_error}"
-                ))),
-            }
-        }
-    }
-}
-
-#[tauri::command]
-async fn auto_detect_proxy_settings(force: Option<bool>) -> Result<ProxyAutoDetectResult, String> {
-    let force = force.unwrap_or(false);
-    let current = configured_proxy_settings();
-    if current.enabled && !force {
-        return Ok(ProxyAutoDetectResult {
-            detected: true,
-            proxy: Some(current),
-            test: None,
-            message: "已启用手动代理设置，自动识别不会覆盖。".into(),
-        });
-    }
-
-    let mut last_error = String::new();
-    for candidate in proxy_detection_candidates_with_current(&current) {
-        if !proxy_candidate_port_open_quick(&candidate) {
-            last_error = proxy_candidate_label(&candidate, "本机端口未监听");
-            append_launcher_log(
-                "DEBUG",
-                format!("skip proxy auto detect candidate: {last_error}"),
-            );
-            continue;
-        }
-        let saved = write_proxy_config(candidate)?;
-        append_launcher_log(
-            "INFO",
-            format!(
-                "auto detected proxy settings scheme={} host={} port={:?}",
-                saved.scheme, saved.host, saved.port
-            ),
-        );
-        return Ok(ProxyAutoDetectResult {
-            detected: true,
-            proxy: Some(saved),
-            test: None,
-            message: "识别成功，请点击“测试连接”。".into(),
-        });
-    }
-
-    Ok(ProxyAutoDetectResult {
-        detected: false,
-        proxy: None,
-        test: None,
-        message: if last_error.is_empty() {
-            "未识别到本机代理配置。".into()
-        } else {
-            format!("未识别到本机代理配置。最后一次识别结果：{last_error}")
-        },
-    })
 }
 
 #[tauri::command]
@@ -1984,330 +1845,6 @@ fn write_save_logs_config(save_logs: bool) -> Result<(), String> {
     update_launcher_config(|config| config.save_logs = Some(save_logs))
 }
 
-fn configured_proxy_settings() -> NetworkProxySettings {
-    read_launcher_config()
-        .and_then(|config| config.proxy)
-        .unwrap_or_default()
-}
-
-fn write_proxy_config(proxy: NetworkProxySettings) -> Result<NetworkProxySettings, String> {
-    validate_proxy_settings(&proxy)?;
-    update_launcher_config(|config| config.proxy = Some(proxy.clone()))?;
-    append_launcher_log(
-        "INFO",
-        format!(
-            "network proxy updated enabled={} scheme={} host={} port={:?}",
-            proxy.enabled, proxy.scheme, proxy.host, proxy.port
-        ),
-    );
-    Ok(proxy)
-}
-
-fn validate_proxy_settings(proxy: &NetworkProxySettings) -> Result<(), String> {
-    let scheme = normalized_proxy_scheme(&proxy.scheme)?;
-    if proxy.enabled {
-        if proxy.host.trim().is_empty() {
-            return Err("代理 IP/主机不能为空。".into());
-        }
-        let port = proxy.port.ok_or_else(|| "代理端口不能为空。".to_string())?;
-        if port == 0 {
-            return Err("代理端口必须在 1-65535 之间。".into());
-        }
-    }
-    if scheme.is_empty() {
-        return Err("代理协议不能为空。".into());
-    }
-    Ok(())
-}
-
-fn normalized_proxy_scheme(value: &str) -> Result<String, String> {
-    let scheme = value.trim().to_ascii_lowercase();
-    match scheme.as_str() {
-        "http" | "https" | "socks5" | "socks5h" => Ok(scheme),
-        _ => Err("代理协议只支持 http、https、socks5、socks5h。".into()),
-    }
-}
-
-fn configured_proxy_url() -> Result<Option<String>, String> {
-    proxy_url_from_settings(&configured_proxy_settings())
-}
-
-fn configured_proxy_url_best_effort() -> Option<String> {
-    configured_proxy_url().ok().flatten()
-}
-
-fn proxy_url_from_settings(proxy: &NetworkProxySettings) -> Result<Option<String>, String> {
-    validate_proxy_settings(proxy)?;
-    if !proxy.enabled {
-        return Ok(None);
-    }
-    let scheme = normalized_proxy_scheme(&proxy.scheme)?;
-    let host = proxy.host.trim();
-    let port = proxy.port.ok_or_else(|| "代理端口不能为空。".to_string())?;
-    Ok(Some(format!("{scheme}://{host}:{port}")))
-}
-
-fn proxy_settings_from_url(value: &str) -> Option<NetworkProxySettings> {
-    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("direct") {
-        return None;
-    }
-    if trimmed.contains(';') {
-        return trimmed
-            .split(';')
-            .filter_map(|part| {
-                let value = part.split_once('=').map(|(_, value)| value).unwrap_or(part);
-                proxy_settings_from_url(value)
-            })
-            .next();
-    }
-    let (scheme_hint, raw) = trimmed
-        .split_once('=')
-        .map(|(key, value)| (Some(key.trim().to_ascii_lowercase()), value.trim()))
-        .unwrap_or((None, trimmed));
-    let candidate = if raw.contains("://") {
-        raw.to_string()
-    } else {
-        let scheme = match scheme_hint.as_deref() {
-            Some("socks") | Some("socks5") => "socks5",
-            Some("socks5h") => "socks5h",
-            _ => "http",
-        };
-        format!("{scheme}://{raw}")
-    };
-    let url = reqwest::Url::parse(&candidate).ok()?;
-    let scheme = normalized_proxy_scheme(url.scheme()).ok()?;
-    let host = url.host_str()?.trim_matches(['[', ']']).to_string();
-    if host.trim().is_empty() || host.contains(' ') {
-        return None;
-    }
-    let port = url.port()?;
-    Some(NetworkProxySettings {
-        enabled: true,
-        scheme,
-        host,
-        port: Some(port),
-    })
-}
-
-fn proxy_detection_candidates_with_current(
-    _current: &NetworkProxySettings,
-) -> Vec<NetworkProxySettings> {
-    let mut candidates = Vec::new();
-    // Auto-detect must read the computer's proxy configuration, not the current
-    // UI draft. The user can type arbitrary values; only "测试连接" should use them.
-    for name in [
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "ALL_PROXY",
-        "https_proxy",
-        "http_proxy",
-        "all_proxy",
-    ] {
-        if let Ok(value) = env::var(name) {
-            if let Some(proxy) = proxy_settings_from_url(&value) {
-                candidates.push(proxy);
-            }
-        }
-    }
-    candidates.extend(system_proxy_candidates());
-    candidates.extend(static_proxy_detection_candidates());
-    dedupe_proxy_candidates(candidates)
-}
-
-fn static_proxy_detection_candidates() -> Vec<NetworkProxySettings> {
-    let mut candidates = Vec::new();
-    for value in [
-        "http://127.0.0.1:7890",
-        "http://127.0.0.1:7897",
-        "socks5h://127.0.0.1:10808",
-        "socks5://127.0.0.1:10808",
-        "http://127.0.0.1:10809",
-        "http://127.0.0.1:10808",
-        "socks5h://127.0.0.1:7891",
-        "http://127.0.0.1:20171",
-        "http://localhost:7890",
-        "socks5h://localhost:10808",
-        "socks5://localhost:10808",
-        "http://localhost:10809",
-    ] {
-        if let Some(proxy) = proxy_settings_from_url(value) {
-            candidates.push(proxy);
-        }
-    }
-    dedupe_proxy_candidates(candidates)
-}
-
-fn proxy_candidate_port_open_quick(candidate: &NetworkProxySettings) -> bool {
-    if !is_loopback_proxy_host(&candidate.host) {
-        return true;
-    }
-    let Some(port) = candidate.port else {
-        return false;
-    };
-    let host = candidate.host.trim().trim_matches(['[', ']']);
-    let address = if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    };
-    let Ok(addresses) = address.to_socket_addrs() else {
-        return false;
-    };
-    let timeout = Duration::from_millis(PROXY_PORT_PROBE_TIMEOUT_MS);
-    addresses
-        .into_iter()
-        .any(|address| TcpStream::connect_timeout(&address, timeout).is_ok())
-}
-
-fn is_loopback_proxy_host(host: &str) -> bool {
-    let host = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
-    if host == "localhost" {
-        return true;
-    }
-    host.parse::<IpAddr>()
-        .map(|address| address.is_loopback())
-        .unwrap_or(false)
-}
-
-fn proxy_candidate_label(candidate: &NetworkProxySettings, detail: &str) -> String {
-    format!(
-        "{}://{}:{} {detail}",
-        candidate.scheme,
-        candidate.host,
-        candidate
-            .port
-            .map(|port| port.to_string())
-            .unwrap_or_else(|| "?".into())
-    )
-}
-
-fn dedupe_proxy_candidates(candidates: Vec<NetworkProxySettings>) -> Vec<NetworkProxySettings> {
-    let mut unique = Vec::new();
-    for candidate in candidates {
-        let Ok(Some(url)) = proxy_url_from_settings(&candidate) else {
-            continue;
-        };
-        let exists = unique
-            .iter()
-            .filter_map(|item| proxy_url_from_settings(item).ok().flatten())
-            .any(|existing| existing.eq_ignore_ascii_case(&url));
-        if !exists {
-            unique.push(candidate);
-        }
-    }
-    unique
-}
-
-#[cfg(target_os = "windows")]
-fn system_proxy_candidates() -> Vec<NetworkProxySettings> {
-    let mut candidates = Vec::new();
-    if let Some(proxy_server) = windows_internet_proxy_server() {
-        candidates.extend(parse_proxy_server_list(&proxy_server));
-    }
-    if let Some(proxy_server) = winhttp_proxy_server() {
-        candidates.extend(parse_proxy_server_list(&proxy_server));
-    }
-    candidates
-}
-
-#[cfg(not(target_os = "windows"))]
-fn system_proxy_candidates() -> Vec<NetworkProxySettings> {
-    Vec::new()
-}
-
-#[cfg(target_os = "windows")]
-fn windows_internet_proxy_server() -> Option<String> {
-    let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
-    let enable_output = hidden_command_output("reg", &["query", key, "/v", "ProxyEnable"]).ok()?;
-    let proxy_enabled = enable_output
-        .lines()
-        .any(|line| line.contains("ProxyEnable") && (line.contains("0x1") || line.ends_with(" 1")));
-    if !proxy_enabled {
-        return None;
-    }
-    let server_output = hidden_command_output("reg", &["query", key, "/v", "ProxyServer"]).ok()?;
-    registry_value_tail(&server_output, "ProxyServer")
-}
-
-#[cfg(target_os = "windows")]
-fn winhttp_proxy_server() -> Option<String> {
-    let output = hidden_command_output("netsh", &["winhttp", "show", "proxy"]).ok()?;
-    output
-        .lines()
-        .filter_map(|line| {
-            line.split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-        })
-        .find(|value| {
-            !value.is_empty()
-                && !value.to_ascii_lowercase().contains("direct")
-                && (value.contains(':') || value.contains('='))
-        })
-}
-
-#[cfg(target_os = "windows")]
-fn hidden_command_output(program: &str, args: &[&str]) -> Result<String, String> {
-    let mut command = Command::new(program);
-    command.args(args);
-    command.creation_flags(0x08000000);
-    let output = command.output().map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-#[cfg(target_os = "windows")]
-fn registry_value_tail(output: &str, name: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        if !line.contains(name) {
-            return None;
-        }
-        line.split_whitespace()
-            .last()
-            .map(|value| value.to_string())
-    })
-}
-
-// Only the Windows system_proxy_candidates reads the registry values this
-// parses; the non-Windows build has no caller and no test.
-#[cfg(target_os = "windows")]
-fn parse_proxy_server_list(value: &str) -> Vec<NetworkProxySettings> {
-    let mut proxies = Vec::new();
-    for part in value.split(';') {
-        let raw = part.trim();
-        if raw.is_empty() {
-            continue;
-        }
-        if let Some(proxy) = proxy_settings_from_url(raw) {
-            proxies.push(proxy);
-        }
-    }
-    if proxies.is_empty() {
-        if let Some(proxy) = proxy_settings_from_url(value) {
-            proxies.push(proxy);
-        }
-    }
-    proxies
-}
-
-fn apply_reqwest_proxy(
-    builder: reqwest::ClientBuilder,
-    proxy_url: Option<&str>,
-) -> Result<reqwest::ClientBuilder, String> {
-    if let Some(proxy_url) = proxy_url {
-        let proxy = reqwest::Proxy::all(proxy_url).map_err(|err| format!("代理配置无效：{err}"))?;
-        Ok(builder.proxy(proxy))
-    } else if let Some(proxy_url) = configured_proxy_url_best_effort() {
-        let proxy =
-            reqwest::Proxy::all(&proxy_url).map_err(|err| format!("代理配置无效：{err}"))?;
-        Ok(builder.proxy(proxy))
-    } else {
-        Ok(builder)
-    }
-}
-
 fn diagnostic_log_settings() -> Result<DiagnosticLogSettings, String> {
     let log_file = launcher_log_path()?;
     let log_dir = log_file
@@ -2344,7 +1881,6 @@ fn diagnostic_context_for_export(
         log_dir: display_path(log_dir),
         log_max_bytes,
         log_backup_count,
-        proxy_configured: is_proxy_configured(),
     }
 }
 
@@ -2440,123 +1976,17 @@ fn display_path(path: &Path) -> String {
 }
 
 fn runtime_http_blocking_client() -> Result<reqwest::blocking::Client, String> {
-    let mut builder = reqwest::blocking::Client::builder()
+    let builder = reqwest::blocking::Client::builder()
         .http1_only()
         .connect_timeout(Duration::from_secs(RUNTIME_HTTP_CONNECT_TIMEOUT_SECONDS))
         .timeout(Duration::from_secs(RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS));
-    if let Some(proxy_url) = configured_proxy_url_best_effort() {
-        let proxy =
-            reqwest::Proxy::all(&proxy_url).map_err(|err| format!("代理配置无效：{err}"))?;
-        builder = builder.proxy(proxy);
-    }
     builder
         .build()
         .map_err(|err| format!("无法初始化运行环境下载客户端：{err}"))
 }
 
-async fn test_github_connectivity_via_proxy(
-    proxy_url: &str,
-    http1_only: bool,
-) -> Result<ProxyTestResult, String> {
-    test_github_connectivity_via_proxy_with_timeout(
-        proxy_url,
-        http1_only,
-        Duration::from_secs(PROXY_TEST_TIMEOUT_SECONDS),
-    )
-    .await
-}
-
-async fn test_github_connectivity_via_proxy_with_timeout(
-    proxy_url: &str,
-    http1_only: bool,
-    timeout: Duration,
-) -> Result<ProxyTestResult, String> {
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(timeout)
-        .timeout(timeout);
-    if http1_only {
-        builder = builder.http1_only();
-    }
-    let client = apply_reqwest_proxy(builder, Some(proxy_url))?
-        .build()
-        .map_err(|err| format!("无法初始化代理测试客户端：{err}"))?;
-    let started_at = Instant::now();
-    let response = client
-        .get(GITHUB_CONNECTIVITY_TEST_URL)
-        .header("User-Agent", "BiblioSmith-Launcher")
-        .send()
-        .await
-        .map_err(|err| format!("{err}"))?;
-    let elapsed_ms = started_at.elapsed().as_millis();
-    let status = response.status();
-    let version = format!("{:?}", response.version());
-    let outcome = github_connectivity_outcome(status, elapsed_ms, &version);
-    if !outcome.ok {
-        return Err(outcome.message);
-    }
-    Ok(outcome)
-}
-
-fn github_connectivity_outcome(
-    status: StatusCode,
-    elapsed_ms: u128,
-    http_version: &str,
-) -> ProxyTestResult {
-    let ok = status.is_success()
-        || matches!(
-            status,
-            StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS | StatusCode::UNAUTHORIZED
-        );
-    let message = if status.is_success() {
-        format!("代理可连接 GitHub，耗时 {elapsed_ms} ms。")
-    } else if ok {
-        format!(
-            "GitHub 已响应（HTTP {status}），代理链路可用，耗时 {elapsed_ms} ms。若更新仍失败，请查看 Git 分支状态、权限或限流信息。"
-        )
-    } else {
-        format!("GitHub 返回 HTTP status {status}，代理未通过连通性测试。")
-    };
-    ProxyTestResult {
-        ok,
-        message,
-        elapsed_ms: Some(elapsed_ms),
-        http_version: Some(http_version.to_string()),
-        target_url: GITHUB_CONNECTIVITY_TEST_URL.into(),
-    }
-}
-
-fn proxy_test_failure_result(message: String) -> ProxyTestResult {
-    ProxyTestResult {
-        ok: false,
-        message,
-        elapsed_ms: None,
-        http_version: None,
-        target_url: GITHUB_CONNECTIVITY_TEST_URL.into(),
-    }
-}
-
 fn launcher_current_version() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
-}
-
-fn is_proxy_configured() -> bool {
-    if configured_proxy_url_best_effort().is_some() {
-        return true;
-    }
-    [
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "ALL_PROXY",
-        "https_proxy",
-        "http_proxy",
-        "all_proxy",
-    ]
-    .iter()
-    .any(|key| {
-        std::env::var(key)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-    })
 }
 
 fn download_percent(downloaded: u64, total: u64) -> f64 {
@@ -2659,10 +2089,6 @@ pub fn run() {
             choose_and_create_workspace,
             get_diagnostic_log_settings,
             set_save_logs_enabled,
-            get_proxy_settings,
-            save_proxy_settings,
-            test_proxy_settings,
-            auto_detect_proxy_settings,
             model_settings::get_model_catalog,
             model_settings::save_model_credential,
             model_settings::save_qwen_settings,
@@ -2987,111 +2413,12 @@ mod tests {
         let config = LauncherConfig {
             workspace_root: None,
             save_logs: Some(false),
-            proxy: None,
             active_model: None,
             qwen_workspace_id: None,
             qwen_web_search_enabled: None,
         };
 
         assert!(!diagnostic_logging_enabled_from_config(&config));
-    }
-
-    #[test]
-    fn proxy_url_requires_host_and_port_when_enabled() {
-        let proxy = NetworkProxySettings {
-            enabled: true,
-            scheme: "socks5h".into(),
-            host: "127.0.0.1".into(),
-            port: Some(10808),
-        };
-        assert_eq!(
-            proxy_url_from_settings(&proxy).unwrap(),
-            Some("socks5h://127.0.0.1:10808".into())
-        );
-
-        let missing_host = NetworkProxySettings {
-            host: " ".into(),
-            ..proxy.clone()
-        };
-        assert!(proxy_url_from_settings(&missing_host).is_err());
-    }
-
-    #[test]
-    fn proxy_settings_from_url_accepts_common_local_proxy_urls() {
-        let http =
-            proxy_settings_from_url("http://127.0.0.1:7890").expect("HTTP proxy URL should parse");
-        assert!(http.enabled);
-        assert_eq!(http.scheme, "http");
-        assert_eq!(http.host, "127.0.0.1");
-        assert_eq!(http.port, Some(7890));
-
-        let socks = proxy_settings_from_url("socks5h://localhost:10808")
-            .expect("SOCKS proxy URL should parse");
-        assert_eq!(socks.scheme, "socks5h");
-        assert_eq!(socks.host, "localhost");
-        assert_eq!(socks.port, Some(10808));
-
-        let wininet_socks = proxy_settings_from_url("socks=127.0.0.1:10808")
-            .expect("Windows SOCKS proxy entry should parse as SOCKS");
-        assert_eq!(wininet_socks.scheme, "socks5");
-        assert_eq!(wininet_socks.host, "127.0.0.1");
-        assert_eq!(wininet_socks.port, Some(10808));
-
-        let no_scheme = proxy_settings_from_url("127.0.0.1:7897")
-            .expect("host:port proxy should default to HTTP");
-        assert_eq!(no_scheme.scheme, "http");
-        assert_eq!(no_scheme.port, Some(7897));
-
-        assert!(proxy_settings_from_url("not-a-valid-proxy").is_none());
-    }
-
-    #[test]
-    fn github_connectivity_status_treats_forbidden_as_reachable() {
-        let outcome = github_connectivity_outcome(StatusCode::FORBIDDEN, 429, "HTTP/2");
-
-        assert!(outcome.ok);
-        assert!(outcome.message.contains("GitHub 已响应"));
-        assert_eq!(outcome.elapsed_ms, Some(429));
-        assert_eq!(outcome.http_version.as_deref(), Some("HTTP/2"));
-    }
-
-    #[test]
-    fn proxy_detection_candidates_ignore_current_manual_proxy() {
-        let current = NetworkProxySettings {
-            enabled: true,
-            scheme: "http".into(),
-            host: "2".into(),
-            port: Some(2),
-        };
-
-        let candidates = proxy_detection_candidates_with_current(&current);
-
-        assert!(!candidates
-            .iter()
-            .any(|candidate| candidate.host == "2" && candidate.port == Some(2)));
-    }
-
-    #[test]
-    fn proxy_detection_candidates_prefer_socks_for_common_10808_port() {
-        let candidates = static_proxy_detection_candidates();
-        let socks_index = candidates
-            .iter()
-            .position(|candidate| {
-                candidate.scheme == "socks5h"
-                    && candidate.host == "127.0.0.1"
-                    && candidate.port == Some(10808)
-            })
-            .expect("common SOCKS proxy candidate should be present");
-        let http_index = candidates
-            .iter()
-            .position(|candidate| {
-                candidate.scheme == "http"
-                    && candidate.host == "127.0.0.1"
-                    && candidate.port == Some(10808)
-            })
-            .expect("common HTTP proxy candidate should be present");
-
-        assert!(socks_index < http_index);
     }
 
     #[test]

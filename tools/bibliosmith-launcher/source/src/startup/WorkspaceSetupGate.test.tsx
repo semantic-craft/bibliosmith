@@ -18,7 +18,6 @@ function workspaceState(overrides: Partial<WorkspaceState> = {}): WorkspaceState
     recommendedWorkspaceRoot: "/test-data/Documents/BiblioSmith",
     workspaceReady: false,
     workspaceStatus: "missing",
-    proxyConfigured: false,
     platform: "macos aarch64",
     ...overrides,
   };

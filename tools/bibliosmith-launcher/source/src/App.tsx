@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
   BOOK_PIPELINE_STATE_SCHEMA_VERSION,
-  autoDetectProxySettings,
   chooseBookPipelinePdfFolder,
   advanceBookPipelineJob,
   setBookPipelineRouteOverride,
@@ -13,7 +12,6 @@ import {
   getBookPipelineState,
   getModelCatalog,
   getOcrCredentialsStatus,
-  getProxySettings,
   getRuntimeStatus,
   handoffBookPipelineMarkdown,
   listenRuntimeProgress,
@@ -34,9 +32,7 @@ import {
   saveTranslationPromptPackRevision,
   selectBookTranslationPromptPack,
   setTranslationPromptPackDefault,
-  saveProxySettings,
   startRuntimePrepare,
-  testProxySettings,
 } from "./api";
 import {
   ActivityItem,
@@ -48,8 +44,6 @@ import {
   BookPipelineState,
   LauncherSettings,
   ModelSlotView,
-  NetworkProxySettings,
-  ProxyTestResult,
   TranslationPromptPackCatalog,
   TranslationPromptPackReference,
   TranslationPromptPackRevisionDraft,
@@ -136,14 +130,6 @@ function LauncherApp() {
   const bookPipelineCopy = useMemo(() => pipelineCopy(locale), [locale]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<LauncherSettings>(loadSettings);
-  const [proxySettings, setProxySettings] = useState<NetworkProxySettings>({
-    enabled: false,
-    scheme: "http",
-    host: "127.0.0.1",
-    port: 7890,
-  });
-  const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
-  const [proxyBusy, setProxyBusy] = useState<"test" | "detect" | null>(null);
   const [floatingToast, setFloatingToast] = useState<FloatingToast | null>(null);
   const [pipelineState, setPipelineState] = useState<BookPipelineState>({
     schemaVersion: BOOK_PIPELINE_STATE_SCHEMA_VERSION,
@@ -700,15 +686,6 @@ function LauncherApp() {
     }
   }, [addActivity, showFloatingToast]);
 
-  const refreshProxySettings = useCallback(async () => {
-    try {
-      const proxy = await getProxySettings();
-      setProxySettings(proxy);
-    } catch (error) {
-      addActivity("warning", String(error));
-    }
-  }, [addActivity]);
-
   const updateSetting = useCallback(
     async (key: keyof LauncherSettings, value: boolean) => {
       const next = { ...settings, [key]: value };
@@ -730,88 +707,6 @@ function LauncherApp() {
     },
     [addActivity, copy, settings],
   );
-
-  const updateProxySettingsDraft = useCallback((next: NetworkProxySettings) => {
-    setProxySettings(next);
-    setProxyTestResult(null);
-    if (!next.enabled) {
-      void saveProxySettings(next)
-        .then((saved) => {
-          setProxySettings(saved);
-          addActivity("info", copy.proxyDisabledStatus);
-        })
-        .catch((error) => {
-          const message = copy.proxySettingsFailed(String(error));
-          addActivity("error", message);
-          showFloatingToast(message, "error");
-        });
-    }
-  }, [addActivity, copy, showFloatingToast]);
-
-  const doTestProxySettings = useCallback(async () => {
-    setProxyBusy("test");
-    setProxyTestResult(null);
-    addActivity("info", copy.proxyTesting);
-    try {
-      const result = await testProxySettings(proxySettings);
-      setProxyTestResult(result);
-      if (!result.ok) {
-        const message = result.message || copy.proxyTestFailed(copy.proxyUntested);
-        addActivity("warning", message);
-        showFloatingToast(message, "warning");
-        return;
-      }
-      const saved = await saveProxySettings(proxySettings);
-      setProxySettings(saved);
-      const elapsed = result.elapsedMs ?? 0;
-      const version = result.httpVersion ?? "";
-      const message = copy.proxyTestAndApplied(elapsed, version);
-      addActivity("success", message);
-      showFloatingToast(message, "success");
-    } catch (error) {
-      const message = copy.proxyTestFailed(String(error));
-      setProxyTestResult(proxyFailureResult(message));
-      addActivity("error", message);
-      showFloatingToast(message, "error");
-    } finally {
-      setProxyBusy(null);
-    }
-  }, [addActivity, copy, proxySettings, showFloatingToast]);
-
-  const doAutoDetectProxySettings = useCallback(async (force = true, silent = false) => {
-    if (proxyBusy) return;
-    setProxyBusy("detect");
-    if (!silent) {
-      addActivity("info", copy.proxyAutoDetecting);
-    }
-    try {
-      const result = await autoDetectProxySettings(force);
-      if (result.detected) {
-        const detected = result.proxy ?? await getProxySettings();
-        setProxySettings(detectedProxySettings(detected));
-        setProxyTestResult(null);
-      } else if (result.proxy) {
-        setProxySettings(result.proxy);
-      }
-      if (result.test) {
-        setProxyTestResult(result.test);
-      }
-      const message = result.detected ? copy.proxyAutoDetected : result.message || copy.proxyAutoDetectNotFound;
-      if (!silent || Boolean(result.test)) {
-        addActivity(result.detected ? "success" : "warning", message);
-        showFloatingToast(message, result.detected ? "success" : "warning");
-      }
-    } catch (error) {
-      if (!silent) {
-        const message = copy.proxyTestFailed(String(error));
-        setProxyTestResult(proxyFailureResult(message));
-        addActivity("error", message);
-        showFloatingToast(message, "error");
-      }
-    } finally {
-      setProxyBusy(null);
-    }
-  }, [addActivity, copy, proxyBusy, showFloatingToast]);
 
   useEffect(() => {
     const unlistenRuntime = listenRuntimeProgress((progress) => {
@@ -839,8 +734,6 @@ function LauncherApp() {
     if (startupInitializedRef.current) return;
     startupInitializedRef.current = true;
     void recordFrontendActivity("info", "frontend startup initialization begin").catch(() => undefined);
-    void refreshProxySettings();
-    void doAutoDetectProxySettings(false, true);
     isEnabled()
       .then((enabled) => {
         setSettings((old) => {
@@ -850,7 +743,7 @@ function LauncherApp() {
         });
       })
       .catch(() => undefined);
-  }, [doAutoDetectProxySettings, refreshProxySettings]);
+  }, []);
 
   // The mount load reads its state in the promise continuation instead of
   // calling the shared refreshers, whose first statement flips a busy flag
@@ -978,13 +871,7 @@ function LauncherApp() {
               languageSetting={languageSetting}
               onLanguageChange={updateLanguageSetting}
               settings={settings}
-              proxySettings={proxySettings}
-              proxyBusy={proxyBusy}
-              proxyTestResult={proxyTestResult}
               onUpdateSetting={updateSetting}
-              onProxyChange={updateProxySettingsDraft}
-              onProxyTest={() => void doTestProxySettings()}
-              onProxyAutoDetect={() => void doAutoDetectProxySettings(true, false)}
               promptPackCatalog={promptPackCatalog}
               promptPackDefaults={promptPackDefaults}
               promptPackBusy={promptPackBusy}
@@ -999,23 +886,4 @@ function LauncherApp() {
       </main>
     </div>
   );
-}
-
-function proxyFailureResult(message: string): ProxyTestResult {
-  return {
-    ok: false,
-    message,
-    elapsedMs: null,
-    httpVersion: null,
-    targetUrl: "",
-  };
-}
-
-function detectedProxySettings(proxy: NetworkProxySettings): NetworkProxySettings {
-  return {
-    ...proxy,
-    enabled: true,
-    host: proxy.host || "127.0.0.1",
-    port: proxy.port ?? 7890,
-  };
 }
