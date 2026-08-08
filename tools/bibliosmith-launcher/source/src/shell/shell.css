@@ -66,3 +66,22 @@
   background: var(--jade-soft);
   color: var(--jade);
 }
+
+/* Update-waiting dot on the gear. The label is real text so screen readers
+   announce which version is waiting; only its rendering is a dot. */
+.sh-settings-btn { position: relative; }
+
+.sh-settings-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--jade);
+  box-shadow: 0 0 0 2px var(--island);
+  overflow: hidden;
+  text-indent: 100%;
+  white-space: nowrap;
+  pointer-events: none;
+}

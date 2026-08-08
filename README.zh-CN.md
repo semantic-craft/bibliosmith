@@ -9,8 +9,8 @@ English: [README.md](README.md)。
 ## 安装与运行
 
 桌面端叫 **BiblioSmith Launcher**，是一个 Tauri 应用。发行版**只构建 macOS Apple
-Silicon**，产物只有 DMG 一种。仓库里有 Windows 条件编译的代码，但目前不构建也不测试
-Windows 版本。
+Silicon**：手动安装用 DMG，装好之后的升级走应用内自动更新。仓库里有 Windows 条件
+编译的代码，但目前不构建也不测试 Windows 版本。
 
 ### 1. 下载
 
@@ -30,7 +30,16 @@ Windows 版本。
 公证票据。Gatekeeper 会将应用识别为 `Notarized Developer ID`；拖入
 `/Applications` 后直接双击即可，不需要去「隐私与安全性」放行，也不需要清除隔离属性。
 
-应用没有自动更新。要升级就重新下载新的 DMG。
+### 升级
+
+装好之后应用会自己更新：每次启动在后台问一次 GitHub Release 有没有新版本，有的话弹
+一条提示并在设置齿轮上留一个圆点。**下载和安装都要你自己在「设置 → 应用更新」里点**，
+它不会静默替换。更新包用本项目的密钥签名，装之前先验签，验不过就不装。
+
+有流水线任务在跑时安装按钮是禁用的：安装会整包替换 App，而任务正在用这个包里的
+Python、Node 和 Chromium。等任务结束再装。
+
+DMG 仍然照常发布，手动下载覆盖安装也一样可用。
 
 ### 3. 首次启动要配什么
 

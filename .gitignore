@@ -19,6 +19,9 @@
 tools/bibliosmith-launcher/source/dist/
 tools/bibliosmith-launcher/source/src-tauri/target/
 tools/bibliosmith-launcher/source/src-tauri/gen/
+# Staging for the release's updater assets; scripts/build-update-manifest.sh
+# rewrites it from the built bundle on every run.
+tools/bibliosmith-launcher/source/update-manifest/
 .playwright-mcp/
 launcher-console.txt
 .opencode/node_modules/

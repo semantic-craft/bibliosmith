@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import {
   ActionResult,
   BookPipelineActionResult,
@@ -1648,4 +1650,76 @@ export function listenRuntimeProgress(
   callback: (payload: DownloadProgress) => void,
 ) {
   return listenDownloadProgress("runtime-install-progress", callback);
+}
+
+/**
+ * One available launcher release, plus the call that installs it. Downloading
+ * and installing stay on this handle rather than becoming a free function
+ * because the updater plugin needs the same object it handed back: the
+ * downloaded bytes live on it, and a second `check()` would fetch the manifest
+ * again.
+ */
+export type LauncherUpdate = {
+  version: string;
+  /** Raw release notes; the caller picks the section for its locale. */
+  notes: string;
+  /** Publication date as the manifest reported it, when it carried one. */
+  date: string | null;
+  downloadAndInstall: (
+    onProgress: (progress: LauncherUpdateDownloadProgress) => void,
+  ) => Promise<void>;
+};
+
+export type LauncherUpdateDownloadProgress = {
+  downloadedBytes: number;
+  /** null until the server announces a length, and for chunked responses. */
+  totalBytes: number | null;
+};
+
+/**
+ * Resolves to null when the installed build is already the newest one.
+ *
+ * The browser preview refuses rather than answering null: null is the "already
+ * newest" answer, and there is no installed App in a preview for that to be
+ * true of. Reporting up to date there would repeat the stub this feature
+ * replaced, which claimed the same thing without ever asking anyone.
+ */
+export async function checkLauncherUpdate(): Promise<LauncherUpdate | null> {
+  if (!isTauriRuntime()) {
+    throw new Error("Updates are only available in the installed app.");
+  }
+  const update = await check();
+  if (!update) return null;
+  return {
+    version: update.version,
+    notes: update.body ?? "",
+    date: update.date ?? null,
+    downloadAndInstall: (onProgress) => {
+      let downloadedBytes = 0;
+      let totalBytes: number | null = null;
+      return update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          totalBytes = event.data.contentLength ?? null;
+          downloadedBytes = 0;
+        } else if (event.event === "Progress") {
+          downloadedBytes += event.data.chunkLength;
+        } else {
+          // Finished: the plugin stops reporting chunks, so close the bar on
+          // the length it announced instead of leaving it just short of full.
+          downloadedBytes = totalBytes ?? downloadedBytes;
+        }
+        onProgress({ downloadedBytes, totalBytes });
+      });
+    },
+  };
+}
+
+/**
+ * Restarts into the bundle that downloadAndInstall just wrote. macOS keeps
+ * running the old code until the process is replaced, so nothing the user sees
+ * is actually updated before this resolves.
+ */
+export function relaunchLauncher() {
+  if (!isTauriRuntime()) return Promise.resolve();
+  return relaunch();
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   jobStatusTone,
+  pipelineJobActivelyRunning,
   pipelineJobOutcomeSucceeded,
   pipelineJobSucceeded,
   translationHandoffReady,
@@ -93,5 +94,38 @@ describe("pipelineJobOutcomeSucceeded", () => {
 
   it("rejects a failed job with nothing handed off", () => {
     expect(pipelineJobOutcomeSucceeded(job({ status: "failed" }))).toBe(false);
+  });
+});
+
+// Mirrors job_is_actively_running in book_pipeline.rs. The launcher's update
+// install reads this: installing replaces the App bundle a running stage is
+// executing its Python, Node and Chromium out of, so a job this call misses is
+// a job the install interrupts.
+describe("pipelineJobActivelyRunning", () => {
+  it("accepts the two job statuses that mean running", () => {
+    expect(pipelineJobActivelyRunning(job({ status: "running" }))).toBe(true);
+    // handoff_running is a running state whose name does not say "running";
+    // reading job.status === "running" alone answers no for it.
+    expect(pipelineJobActivelyRunning(job({ status: "handoff_running" }))).toBe(true);
+  });
+
+  it("accepts a job whose own status has moved on but whose stage is executing", () => {
+    const child = childJob({ status: "ready", stages: [stage("translate", "running")] });
+    expect(pipelineJobActivelyRunning(job({ status: "ready", children: [child] }))).toBe(true);
+  });
+
+  it("ignores a running stage on a child that was removed from the shelf", () => {
+    const child = childJob({
+      status: "ready",
+      stages: [stage("translate", "running")],
+      removedAt: "2026-08-07T00:00:00Z",
+    });
+    expect(pipelineJobActivelyRunning(job({ status: "ready", children: [child] }))).toBe(false);
+  });
+
+  it("rejects jobs that are queued, waiting on a person, or finished", () => {
+    for (const status of ["pending", "ready", "waiting_for_approval", "blocked", "failed", "completed", "skipped"]) {
+      expect(pipelineJobActivelyRunning(job({ status, children: [] })), status).toBe(false);
+    }
   });
 });

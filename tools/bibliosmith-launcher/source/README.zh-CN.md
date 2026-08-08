@@ -11,12 +11,15 @@
 - 在人工闸门处停下等你拍板（`approve_translation` / `approve_promotion`），审批只记录
   一个哈希绑定的决定，不替你执行下一阶段。
 - 管理凭证：模型 key 存 macOS 钥匙串，OCR 与向量嵌入各有自己的设置面板。
+- 自更新：启动时后台检查一次新版本，是否安装由用户在设置里决定；见下面的「自动更新」。
 
 ## 平台
 
 **只构建并测试 macOS（Apple Silicon）**。`.github/workflows/release-launcher.yml`
-产出的唯一产物是 DMG，`ci.yml` 的后端作业跑在 `macos-latest`。树里还有 Windows 条件
-编译的代码，但没有任何 Windows 产物被构建或验证 —— 不要把它当作受支持的平台。
+产出的是 DMG 加一份同版本的更新包（`.app.tar.gz` + `.sig` + `latest.json`），
+`ci.yml` 的后端作业跑在 `macos-latest`。更新清单里只有 `darwin-aarch64` 一个平台条目，
+其它平台上的 Launcher 会得到「没有更新」而不是一个跑不起来的包。树里还有 Windows
+条件编译的代码，但没有任何 Windows 产物被构建或验证 —— 不要把它当作受支持的平台。
 
 ## 开发
 
@@ -34,6 +37,18 @@ npx tauri dev
 npx tauri build --bundles dmg --no-sign
 ```
 
+`--no-sign` 现在同时跳过两件事：Apple 代码签名，以及更新包的 minisign 签名。
+`tauri.conf.json` 里配了 `plugins.updater.pubkey` 之后，只要构建 `app` 产物且没给
+`--no-sign`，Tauri 就要求环境里有 `TAURI_SIGNING_PRIVATE_KEY`，否则直接构建失败 ——
+这是故意的，宁可打不出来也不要发一个装不上的未签名更新包。持有私钥时这样打带更新
+包的本地构建：
+
+```sh
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/bibliosmith-launcher.key)" \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+npx tauri build --bundles app dmg
+```
+
 产物在 `src-tauri/target/release/bundle/dmg/`。配置默认指向
 `Developer ID Application`；没有证书的普通开发机使用上面的 `--no-sign`。持有证书的
 发布维护者可以去掉该参数，或用 `APPLE_SIGNING_IDENTITY` 指定精确身份。正式 Release
@@ -49,6 +64,44 @@ Gatekeeper 将应用识别为 `Notarized Developer ID`。
 脚本通过 macOS 隐藏输入框接收密码，再直接写入 `semantic-craft/bibliosmith` 的
 `APPLE_PASSWORD` GitHub Secret，不会把密码放进 shell 历史或命令参数；留空或取消
 不会改动现有 Secret。
+
+## 自动更新
+
+装好的 Launcher 每次启动会在后台向 GitHub Release 问一次有没有新版本。发现新版本
+时只做两件事：弹一条提示，并在设置齿轮上留一个小圆点；**下载和安装都要用户在设置
+里点。** 不静默安装，也不在退出时偷偷替换——安装会整包替换 App，而流水线任务正在
+用这个包里的 Python、Node 和 Chromium，所以只要还有任务在跑，安装按钮就是禁用的，
+并写明原因。
+
+信任链是两条独立的签名，谁也替不了谁：
+
+- **Apple Developer ID 签名 + 公证**：用户双击打开时 Gatekeeper 查的是这条。
+- **minisign 签名**：装好的 Launcher 替换自己之前查的是这条，用编译进当前版本的公钥
+  校验更新包。所以即使有人换掉了 Release 里的文件、或者更新端点被劫持，装不上去。
+
+对应的密钥与 Secret：
+
+| 东西 | 位置 |
+| --- | --- |
+| 公钥 | `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`，随代码提交 |
+| 私钥 | 维护者本地的 `~/.tauri/bibliosmith-launcher.key`，**不进仓库** |
+| CI 私钥 | GitHub Secret `TAURI_SIGNING_PRIVATE_KEY` |
+| CI 私钥密码 | GitHub Secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（没设密码就是空串，但 Secret 必须存在） |
+
+首次配置或轮换密钥时运行：
+
+```sh
+./scripts/set-updater-signing-secret-macos.sh
+```
+
+**私钥丢了就没有回头路**：装在用户机器上的 Launcher 只认它当初编译进去的那个公钥，
+换新密钥意味着所有老用户的自动更新永久失效，只能让他们手动重新下载一次 DMG。备份
+好 `~/.tauri/bibliosmith-launcher.key`。
+
+发布流水线相应多了四步，都在 `release-launcher.yml` 里：构建时一并产出 `app` 与更新
+包、解开更新包确认里面的 App 确实已公证且 stapled、由构建产物生成 `latest.json`、
+发布后再真的去请求一次更新端点确认它返回的是这一版。最后一步是有意的：端点 404 在
+所有已安装的 Launcher 看来和「没有新版本」完全一样，不主动验就永远不会有人发现。
 
 ## 测试
 

@@ -5,6 +5,7 @@ import {
   clampPercent,
   formatBytes,
   formatDownloadProgress,
+  formatFileSize,
   formatPercent,
   progressWidth,
   versionFromDate,
@@ -35,6 +36,27 @@ describe("formatBytes", () => {
 
   it("renders zero without dividing", () => {
     expect(formatBytes(0)).toBe("0.0 KB");
+  });
+});
+
+describe("formatFileSize", () => {
+  // The whole App bundle travels in a launcher update, so KB-only formatting
+  // would put a seven-digit number in front of the user.
+  it("picks a unit instead of always reporting kilobytes", () => {
+    expect(formatFileSize(512)).toBe("512 B");
+    expect(formatFileSize(2048)).toBe("2.0 KB");
+    expect(formatFileSize(536_870_912)).toBe("512.0 MB");
+    expect(formatFileSize(1_073_741_824)).toBe("1.0 GB");
+  });
+
+  it("stops at the largest unit it knows", () => {
+    expect(formatFileSize(1024 ** 5)).toBe("1024.0 TB");
+  });
+
+  it("treats absent and nonsense sizes as zero rather than NaN", () => {
+    expect(formatFileSize(0)).toBe("0 B");
+    expect(formatFileSize(-1)).toBe("0 B");
+    expect(formatFileSize(Number.NaN)).toBe("0 B");
   });
 });
 

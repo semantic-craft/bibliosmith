@@ -56,6 +56,43 @@ APPLE_PASSWORD_SECRET_SETTER = (
     / "scripts"
     / "set-apple-password-secret-macos.sh"
 )
+UPDATER_VERIFIER = (
+    REPO_ROOT
+    / "tools"
+    / "bibliosmith-launcher"
+    / "source"
+    / "scripts"
+    / "verify-macos-updater-bundle.sh"
+)
+UPDATE_MANIFEST_BUILDER = (
+    REPO_ROOT
+    / "tools"
+    / "bibliosmith-launcher"
+    / "source"
+    / "scripts"
+    / "build-update-manifest.sh"
+)
+UPDATE_ENDPOINT_VERIFIER = (
+    REPO_ROOT
+    / "tools"
+    / "bibliosmith-launcher"
+    / "source"
+    / "scripts"
+    / "verify-update-endpoint.sh"
+)
+LAUNCHER_CAPABILITIES = (
+    REPO_ROOT
+    / "tools"
+    / "bibliosmith-launcher"
+    / "source"
+    / "src-tauri"
+    / "capabilities"
+    / "default.json"
+)
+# The app bundle is built alongside the DMG because the updater bundle is a
+# tarball of it, and the bundler only produces updater artifacts for app
+# bundles it actually built.
+BUILD_COMMAND = "npx tauri build --bundles app dmg"
 README_EN = REPO_ROOT / "README.md"
 README_ZH = REPO_ROOT / "README.zh-CN.md"
 LAUNCHER_README_ZH = (
@@ -84,7 +121,7 @@ def test_release_uses_secret_backed_developer_id_signing_and_notarization() -> N
     assert "security import" in workflow
     assert "security set-key-partition-list" in workflow
     assert "APPLE_SIGNING_IDENTITY" in workflow
-    assert workflow.index("security import") < workflow.index("npx tauri build --bundles dmg")
+    assert workflow.index("security import") < workflow.index(BUILD_COMMAND)
     assert 'trap \'rm -f "$certificate_path"\' EXIT' in workflow
     assert "if: ${{ always() }}" in workflow
     assert 'security delete-keychain "$RUNNER_TEMP/bibliosmith-signing.keychain-db"' in workflow
@@ -490,12 +527,127 @@ def test_release_workflow_verifies_the_app_before_publishing() -> None:
     staple = "xcrun stapler staple"
     assert verifier in workflow
     assert "--wait" in workflow[workflow.index(notarytool) : workflow.index(staple)]
-    assert workflow.index("npx tauri build --bundles dmg") < workflow.index(notarytool)
+    assert workflow.index(BUILD_COMMAND) < workflow.index(notarytool)
     assert workflow.index(notarytool) < workflow.index(staple)
     assert workflow.index(staple) < workflow.index(verifier)
     assert workflow.index(verifier) < workflow.index('gh release create "$RELEASE_TAG"')
     assert f'{verifier} "${{dmgs[0]}}"' in workflow
     assert "apps=(src-tauri/target/release/bundle/macos/*.app)" not in workflow
+
+
+def test_launcher_verifies_update_bundles_against_a_committed_public_key() -> None:
+    """The in-app updater's trust root, which is separate from Apple's.
+
+    Gatekeeper's answer is about a human opening the app. Nothing asks it when
+    the running launcher overwrites itself, so the updater carries its own
+    signature over the bundle, checked against this public key. Without a
+    pubkey the plugin installs whatever the endpoint returns.
+    """
+    config = json.loads(TAURI_CONFIG.read_text(encoding="utf-8"))
+    capabilities = json.loads(LAUNCHER_CAPABILITIES.read_text(encoding="utf-8"))
+
+    updater = config["plugins"]["updater"]
+    assert updater["pubkey"].strip(), "The updater must verify against a public key."
+    assert updater["endpoints"] == [
+        "https://github.com/semantic-craft/bibliosmith/releases/latest/download/latest.json"
+    ]
+    for endpoint in updater["endpoints"]:
+        assert endpoint.startswith("https://")
+    # Only set to allow plain HTTP, which would let anything on the path
+    # substitute the manifest.
+    assert "dangerousInsecureTransportProtocol" not in updater
+
+    assert config["bundle"]["createUpdaterArtifacts"] is True
+    assert "app" in config["bundle"]["targets"]
+
+    permissions = capabilities["permissions"]
+    assert "updater:default" in permissions
+    # relaunch() in the frontend invokes plugin:process|restart.
+    assert "process:allow-restart" in permissions
+
+
+def test_release_publishes_a_signed_updater_bundle_and_a_live_manifest() -> None:
+    """The four gates between a built app and an update a launcher can install.
+
+    Each one covers a failure the DMG steps cannot see. The tarball is a
+    different file from the DMG and carries its own copy of the app; the
+    manifest is written rather than built if nothing derives it from the
+    artifacts; and the endpoint is a redirect nothing else in the release ever
+    requests -- a manifest that 404s reads to every installed launcher as "no
+    update available", so the failure is silent and permanent.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    for name in ("TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"):
+        assert f"${{{{ secrets.{name} }}}}" in workflow
+
+    updater_verifier = "./scripts/verify-macos-updater-bundle.sh"
+    manifest_builder = "./scripts/build-update-manifest.sh"
+    endpoint_verifier = "./scripts/verify-update-endpoint.sh"
+    publish = 'gh release create "$RELEASE_TAG"'
+    for step in (updater_verifier, manifest_builder, endpoint_verifier):
+        assert step in workflow
+
+    assert workflow.index(BUILD_COMMAND) < workflow.index(updater_verifier)
+    assert workflow.index(updater_verifier) < workflow.index(manifest_builder)
+    assert workflow.index(manifest_builder) < workflow.index(publish)
+    # Verifying the endpoint before publishing would only ever describe the
+    # previous release.
+    assert workflow.index(publish) < workflow.index(endpoint_verifier)
+
+    # The manifest and the bundle it names have to be release assets; a
+    # manifest left on the runner is one no launcher can reach.
+    assert "tools/bibliosmith-launcher/source/update-manifest/*" in workflow
+
+    for script in (UPDATER_VERIFIER, UPDATE_MANIFEST_BUILDER, UPDATE_ENDPOINT_VERIFIER):
+        assert script.stat().st_mode & stat.S_IXUSR, f"{script.name} is not executable"
+
+
+def test_updater_bundle_verifier_demands_a_notarized_stapled_app_and_a_signature() -> None:
+    """What the DMG verifier proves says nothing about the tarball.
+
+    An in-app update unpacks this bundle and never the DMG, so the same
+    Gatekeeper questions have to be put to the app inside it. Stapling matters
+    more here than for the DMG: an updated app that has to reach Apple to be
+    admitted fails shut for an offline user.
+    """
+    verifier = UPDATER_VERIFIER.read_text(encoding="utf-8")
+
+    assert "spctl -a -vvv -t install" in verifier
+    assert "source=Notarized Developer ID" in verifier
+    assert "xcrun stapler validate" in verifier
+    assert "codesign --verify --deep --strict" in verifier
+    # A tarball with no .sig is a release no launcher can install, not a
+    # cosmetic gap.
+    assert 'if [[ ! -s "$signature" ]]' in verifier
+    # The sidecars and runtime are what the pipeline executes; an update that
+    # dropped them opens and then cannot run a single job.
+    assert "for sidecar in node uv" in verifier
+    assert "bibliosmith-runtime" in verifier
+
+
+def test_update_manifest_is_derived_from_the_artifacts_it_describes() -> None:
+    builder = UPDATE_MANIFEST_BUILDER.read_text(encoding="utf-8")
+    endpoint_verifier = UPDATE_ENDPOINT_VERIFIER.read_text(encoding="utf-8")
+
+    # Version, signature and notes all come from files on the runner. A
+    # hand-typed field is one that can describe a different build.
+    assert "launcher-version.json" in builder
+    assert "RELEASE_NOTES.md" in builder
+    assert 'UPDATE_SIGNATURE_FILE="$out_dir/$asset_name.sig"' in builder
+    assert 'if [[ "v$version" != "$release_tag" ]]' in builder
+
+    # Apple Silicon only, as the DMG has always been. Any other platform is
+    # told there is no update, which is true, rather than handed a bundle it
+    # cannot run.
+    assert '"darwin-aarch64"' in builder
+    assert '"darwin-aarch64"' in endpoint_verifier
+
+    # The product name has a space and GitHub rewrites spaces in asset names,
+    # so the manifest would otherwise carry a URL that does not resolve.
+    assert 'asset_name="BiblioSmith-Launcher_${version}_aarch64.app.tar.gz"' in builder
+    assert "releases/latest/download/latest.json" in endpoint_verifier
+    assert "--head" in endpoint_verifier
 
 
 def test_install_docs_describe_a_direct_notarized_first_launch() -> None:

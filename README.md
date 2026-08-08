@@ -18,9 +18,9 @@ The project does not remove DRM, bypass access controls, locate unauthorized ful
 ## Install and run the app
 
 The desktop app is **BiblioSmith Launcher**, a Tauri application. Releases are
-built for **macOS on Apple Silicon** only; the DMG is the sole published
-artifact. The repository has Windows-conditional code, but no Windows build is
-produced or tested.
+built for **macOS on Apple Silicon** only: the DMG is how you install it by
+hand, and an installed launcher updates itself from there. The repository has
+Windows-conditional code, but no Windows build is produced or tested.
 
 ### 1. Download
 
@@ -43,7 +43,20 @@ publishing. Gatekeeper therefore accepts the app with source
 `Notarized Developer ID`: after dragging it to `/Applications`, double-click it
 normally. No Privacy & Security override or quarantine removal is required.
 
-There is no auto-update. A new version means downloading the new DMG.
+### Updating
+
+An installed launcher checks GitHub Releases once in the background at each
+startup. When a new version exists it says so — a short notice and a dot on the
+settings gear — and stops there. **Downloading and installing are both yours to
+start, from Settings → App updates.** Nothing is replaced silently. The update
+bundle is signed with this project's own key and the signature is verified
+before anything is installed.
+
+The install button is disabled while pipeline jobs are running, and says so:
+installing replaces the whole app bundle, and a running job is executing the
+Python, Node and Chromium inside it. Let the jobs finish first.
+
+Downloading a newer DMG by hand still works and is still published.
 
 ### 3. First launch
 

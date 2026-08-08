@@ -10,6 +10,25 @@ export function formatBytes(value: number) {
   return `${(value / 1024).toFixed(1)} KB`;
 }
 
+// formatBytes above is fixed at KB, which suits the runtime downloads it was
+// written for. A launcher update carries the whole App bundle — Node, uv and a
+// Chromium runtime included — so the same helper would render it as a
+// seven-digit KB count. This one picks the unit.
+const FILE_SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
+
+export function formatFileSize(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < FILE_SIZE_UNITS.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  // Bytes are whole things; anything the loop scaled reads better with one
+  // decimal than as a rounded integer that jumps 1 GB at a time.
+  return `${unit === 0 ? size : size.toFixed(1)} ${FILE_SIZE_UNITS[unit]}`;
+}
+
 export function clampPercent(value: number) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, value));
